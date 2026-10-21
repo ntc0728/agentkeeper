@@ -1,0 +1,69 @@
+# ---- dependencies ----
+node_modules/
+
+# ---- build outputs ----
+release/
+*.exe
+*.blockmap
+
+# ---- Tauri / Rust build artifacts (7.7GB after one release build) ----
+# 只提交 src/、Cargo.toml/lock、tauri.conf.json、capabilities、dist/（前端副本）。
+# 注意 dist/ 是可复制的派生资源，但它需要与 src/renderer 保持逐字节一致，
+# 由 tauri-shell/copy-frontend.js 生成，因此入库以便 reviewer 直接看到差异。
+tauri-shell/src-tauri/target/
+tauri-shell/src-tauri/gen/
+tauri-shell/node_modules/
+*.pdb
+
+# ---- demo data ----
+# 示例项目已不再随包发布。仓库根曾有一个 `demo-projects/` 作为 tauri.conf.json
+# `bundle.resources` 的输入，随构建移出资源列表一并删除；它同时还会被运行期/临时
+# 脚本写入（`core/seed.js`、`scripts/selftest.js`），因此继续忽略。
+# 示例内容的唯一真相是 `scripts/fixtures/`（测试输入），任何同名目录都不入库。
+**/demo-projects/
+demo/
+
+# ---- 临时探针产物（各子代理调试用，一律不入库）----
+.tmp-*
+
+# ---- research / internal working notes (never commit) ----
+# Competitive research and internal remediation notes are working documents,
+# not project documentation.
+docs/COMPETITIVE-MATRIX.md
+docs/REMEDIATION-PLAN.md
+docs/packaged-screenshot.png
+
+# ---- generated screenshots (reproducible via tauri-shell/shot.ps1) ----
+docs/ui-*.png
+docs/screenshot.log
+
+# ---- local state & secrets ----
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+*credential*
+*secret*
+.claude/settings.local.json
+
+# ---- OS / editor noise ----
+Thumbs.db
+.DS_Store
+desktop.ini
+*.log
+*.tmp
+
+# ---- probe / research artifacts ----
+docs/probe-*.txt
+docs/probe-*.json
+docs/dashboard-preview.html
+
+# ---- Tauri externalBin staging (produced by tauri-shell/stage-mcp-bin.js) ----
+tauri-shell/src-tauri/binaries/
+
+# ---- owner-only local knowledge base (never commit) ----
+# Internal reports, dev-stage screenshots, real-machine verification harness and
+# the delivery contract output live here. Public repo carries the product only.
+.devkb/

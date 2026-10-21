@@ -1,0 +1,178 @@
+name: release
+
+# Tag-driven release: `git tag v0.3.0 && git push origin v0.3.0` builds the
+# Tauri NSIS installer and attaches it to a GitHub Release.
+#
+# What the in-app updater actually consumes (see docs/UPDATE.md):
+#   GET /repos/{repo}/releases/latest  ->  pick one entry of `assets[]`
+# via `core/update/version.rs::pick_installer`, which on win32 wants
+#   *.exe  ·  not `-portable`/archive/`-win|-web|-linux|-mac`  ·  name matching
+#   /setup|install/  ·  then `updateAssetKeyword` ("AgentKeeper") in the name.
+# `AgentKeeper_0.2.0_x64-setup.exe` satisfies all of that, so **the installer
+# alone is the release payload** — no `latest.yml`, no `.blockmap`. Those were
+# electron-builder artefacts from the retired Electron build; the JS kernel
+# never parsed them.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node has exactly one job left: generating tauri-shell/dist from
+      # src/renderer. copy-frontend.js has zero dependencies, so there is no
+      # `npm ci` any more — and there must not be one: package.json carries no
+      # dependencies at all since the Electron app (and its electron /
+      # electron-builder devDependencies) was deleted.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # i18n gate, before anything is built: every sentence the Rust engine
+      # puts on screen must have a zh mapping in src/renderer/engine-zh.js.
+      # An untranslated sentence found here costs a re-run; found after the
+      # release it costs an English string in a Chinese UI.
+      # `npm run` is only a launcher — package.json has nothing to install and
+      # there is deliberately no `npm ci` in this job.
+      - name: Check Rust engine i18n coverage
+        run: npm run tauri:i18n
+
+      # tauri-shell/dist is git-ignored, so a fresh checkout has no frontend at
+      # all and `cargo tauri build` would bundle an empty app.
+      - name: Generate the frontend bundle
+        run: node tauri-shell/copy-frontend.js
+
+      # Stamp the tag's version into the build.
+      #
+      # Not cosmetic. `UpdateManager::app_version` is `env!("CARGO_PKG_VERSION")`
+      # (core/update/manager.rs:560) and is compared against the release tag to
+      # decide "is there an update". Left at whatever Cargo.toml says, every
+      # install reports the same version forever and the updater re-offers the
+      # release the user just installed, on every check. Stamping also makes
+      # the installer name carry the version being released.
+      #
+      # A `workflow_dispatch` run has a branch name in `github.ref_name`
+      # (`main`), not a version, so a non-`vX.Y.Z` ref keeps the version that
+      # is already in the tree.
+      - name: Stamp the release version
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          cat > "$RUNNER_TEMP/stamp-version.js" <<'NODE'
+          const fs = require('fs');
+          const confPath = 'tauri-shell/src-tauri/tauri.conf.json';
+          const cargoPath = 'tauri-shell/src-tauri/Cargo.toml';
+          const ref = process.env.REF_NAME || '';
+          const conf = JSON.parse(fs.readFileSync(confPath, 'utf8'));
+          const current = conf.version;
+          const m = /^v(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/.exec(ref);
+          if (!m) {
+            console.log(`ref ${JSON.stringify(ref)} is not a vX.Y.Z tag — keeping ${current}`);
+            process.exit(0);
+          }
+          const version = m[1];
+          if (version === current) {
+            console.log(`release version: ${version} (already in the tree)`);
+            process.exit(0);
+          }
+          conf.version = version;
+          fs.writeFileSync(confPath, JSON.stringify(conf, null, 2) + '\n');
+          // First `version = "…"` in Cargo.toml is `[package] version`.
+          const cargo = fs.readFileSync(cargoPath, 'utf8');
+          const patched = cargo.replace(/^(version = )"[^"]*"/m, `$1"${version}"`);
+          if (patched === cargo) {
+            console.error(`could not patch [package] version in ${cargoPath}`);
+            process.exit(1);
+          }
+          fs.writeFileSync(cargoPath, patched);
+          console.log(`release version: ${current} -> ${version}`);
+          NODE
+          node "$RUNNER_TEMP/stamp-version.js"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tauri-shell/src-tauri
+
+      # `cargo tauri build` is used instead of tauri-apps/tauri-action@v0 on
+      # purpose:
+      #   · tauri-action auto-runs the package manager of whatever package.json
+      #     it finds — a step this pipeline neither needs nor wants (it used to
+      #     pull Electron, only to have the deletion undo it);
+      #   · it is a floating `@v0` tag in a pipeline that publishes binaries;
+      #   · this job needs to run its own steps before the build anyway
+      #     (frontend generation, version stamp), which is the same amount of
+      #     YAML either way.
+      # `^2` + `--locked` pins the CLI the release was verified with.
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      # `bundle.resources` used to ship ../../demo-projects, which was
+      # git-ignored, so a clean checkout had none and the build hard-failed with
+      # "resource path `…` doesn't exist". That entry is gone, so the workaround
+      # that created the directory is gone with it. If a resource is ever added
+      # back, it must be tracked in git — a `mkdir` here would ship an empty one.
+
+      # `bundle.externalBin` ships the MCP stdio server beside the app exe, at
+      # `%LOCALAPPDATA%\AgentKeeper\agentkeeper-mcp.exe` — the path
+      # docs/MCP-SERVER.md tells users to paste into their agent config.
+      #
+      # It has to exist BEFORE `cargo tauri build` (an external bin Tauri cannot
+      # resolve is a hard config error) and it cannot be committed: git-ignored,
+      # several MB, rebuilt from source. `cargo tauri build` builds the app
+      # binary only, never the other `[[bin]]` targets, so the staging script
+      # builds it and copies it to
+      # `src-tauri/binaries/agentkeeper-mcp-x86_64-pc-windows-msvc.exe`.
+      # Node and cargo are already set up above; still no `npm ci`.
+      - name: Stage the MCP server binary
+        working-directory: tauri-shell
+        run: node stage-mcp-bin.js
+
+      # No `--target`: the runner's host triple is already
+      # x86_64-pc-windows-msvc, and keeping the default target puts the bundle
+      # under target/release/ like every other build in this repo.
+      - name: Build the NSIS installer
+        working-directory: tauri-shell/src-tauri
+        run: cargo tauri build
+
+      - name: Collect artefacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-artifacts
+          shopt -s nullglob
+          exe=(tauri-shell/src-tauri/target/release/bundle/nsis/*.exe)
+          if [ ${#exe[@]} -eq 0 ]; then
+            echo "::error::no NSIS installer under tauri-shell/src-tauri/target/release/bundle/nsis"
+            exit 1
+          fi
+          cp "${exe[@]}" dist-artifacts/
+          ls -l dist-artifacts
+
+      - name: Publish to the Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Tag-push builds attach to the release GitHub creates for the tag;
+          # a manual run creates one on demand.
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') }}
+          files: |
+            dist-artifacts/*.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentkeeper-windows-x64
+          path: dist-artifacts/
+          retention-days: 30

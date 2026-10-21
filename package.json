@@ -1,0 +1,33 @@
+{
+  "name": "agentkeeper",
+  "productName": "AgentKeeper",
+  "version": "0.2.0",
+  "description": "Unified dashboard for discovering and managing agent assets: skills, MCP servers, plugins, rules and memory across multiple AI agents and projects.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ntc0728/agentkeeper.git"
+  },
+  "homepage": "https://github.com/ntc0728/agentkeeper",
+  "author": {
+    "name": "AgentKeeper"
+  },
+  "private": true,
+  "scripts": {
+    "check": "node scripts/check.js",
+    "verify": "node scripts/check.js",
+    "tauri:i18n": "node scripts/tauri-i18n.js",
+    "tauri:sync": "node tauri-shell/copy-frontend.js",
+    "tauri:check": "node tauri-shell/copy-frontend.js --check",
+    "tauri:adapters": "node scripts/gen-adapters-snapshots.js",
+    "tauri:mcp-bin": "node tauri-shell/stage-mcp-bin.js"
+  },
+  "keywords": [
+    "agent",
+    "skills",
+    "mcp",
+    "plugins",
+    "rules",
+    "memory"
+  ],
+  "license": "MIT"
+}
