@@ -2,38 +2,48 @@
 node_modules/
 
 # ---- build outputs ----
+# `release/` is where `npm run tauri:bundle` stages the shippable artifacts:
+#   release/AgentKeeper_<ver>_x64-setup.exe      NSIS installer
+#   release/AgentKeeper_<ver>_x64-portable.zip   install-free archive
+# Both are rebuilt from source in minutes, so they never enter the repository.
 release/
 *.exe
 *.blockmap
+# CI's artefact collection step (`Collect artefacts` in release.yml) writes here.
+# It only runs in Actions, but the same commands run locally without warning.
+dist-artifacts/
 
-# ---- Tauri / Rust build artifacts (7.7GB after one release build) ----
-# 只提交 src/、Cargo.toml/lock、tauri.conf.json、capabilities、dist/（前端副本）。
-# 注意 dist/ 是可复制的派生资源，但它需要与 src/renderer 保持逐字节一致，
-# 由 tauri-shell/copy-frontend.js 生成，因此入库以便 reviewer 直接看到差异。
+# ---- Tauri / Rust build artifacts (large after one release build) ----
+# 只提交 src/、Cargo.toml/lock、tauri.conf.json、capabilities。
+#
+# `tauri-shell/dist/` 是**生成物**，不入库：它是 `src/renderer` 的逐字节副本，
+# 而 `cargo tauri build` 直接把它编进可执行文件。入库的副本可能相对源码过期，
+# 而构建过程不校验新鲜度——于是一份陈旧的界面会被悄悄打进安装包。
+# `npm run tauri:sync` 在每次构建前重新生成它，`npm run tauri:check` 校验一致。
+tauri-shell/dist/
+#
+# `tauri-shell/target/` 是 WORKSPACE 级的产物目录：cargo 把 core/ 与 src-tauri/
+# 两个成员都编进同一个 target/，它不在这两个目录下面，而在它们的上一级。
+tauri-shell/target/
 tauri-shell/src-tauri/target/
 tauri-shell/src-tauri/gen/
 tauri-shell/node_modules/
 *.pdb
+#
+# 任何位置的 `target/`：上面三条是已知路径，这一条是兜底。一个临时脚本若在仓库
+# 根跑 `cargo build`（不带 workspace 的 target 目录），产物会落在 `./target/`，
+# 而它既不被上面三条覆盖，也不在 `tauri-shell/` 下——没有这条就会被提交。
+target/
 
 # ---- demo data ----
-# 示例项目已不再随包发布。仓库根曾有一个 `demo-projects/` 作为 tauri.conf.json
-# `bundle.resources` 的输入，随构建移出资源列表一并删除；它同时还会被运行期/临时
-# 脚本写入（`core/seed.js`、`scripts/selftest.js`），因此继续忽略。
 # 示例内容的唯一真相是 `scripts/fixtures/`（测试输入），任何同名目录都不入库。
 **/demo-projects/
 demo/
 
-# ---- 临时探针产物（各子代理调试用，一律不入库）----
+# ---- local temporary artifacts ----
 .tmp-*
 
-# ---- research / internal working notes (never commit) ----
-# Competitive research and internal remediation notes are working documents,
-# not project documentation.
-docs/COMPETITIVE-MATRIX.md
-docs/REMEDIATION-PLAN.md
-docs/packaged-screenshot.png
-
-# ---- generated screenshots (reproducible via tauri-shell/shot.ps1) ----
+# ---- generated screenshots ----
 docs/ui-*.png
 docs/screenshot.log
 
@@ -60,10 +70,14 @@ docs/probe-*.txt
 docs/probe-*.json
 docs/dashboard-preview.html
 
-# ---- Tauri externalBin staging (produced by tauri-shell/stage-mcp-bin.js) ----
+# ---- Tauri externalBin staging (produced by tauri-shell/stage-core-bins.js) ----
 tauri-shell/src-tauri/binaries/
 
 # ---- owner-only local knowledge base (never commit) ----
 # Internal reports, dev-stage screenshots, real-machine verification harness and
 # the delivery contract output live here. Public repo carries the product only.
 .devkb/
+
+# The workspace never creates a separate target/ for a member, but listing it
+# costs nothing and protects against a future per-member target directory.
+tauri-shell/core/target/

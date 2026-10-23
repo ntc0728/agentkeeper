@@ -71,8 +71,8 @@ const UI_STRING_PATTERNS = [
   // el('...', {...}, 'Some English text') — a literal child
   /\bel\((?:[^()]|\([^()]*\))*?,\s*'([A-Z][a-z]+ [a-z][^']{4,60})'/g,
   /\bel\((?:[^()]|\([^()]*\))*?,\s*"([A-Z][a-z]+ [a-z][^"]{4,60})"/g,
-  // 2026-10-18: three shapes the original heuristic missed and that shipped
-  // real English into the zh UI:
+  // Three shapes that must be matched: a trailing label argument, a
+  // textContent/innerHTML assignment, and a label inside an options array.
   //   a) a trailing label argument:  }, 'Some English text')
   /\},\s*'([A-Z][a-z]+ [a-z][^']{3,60})'\s*\)/g,
   //   b) a textContent/innerHTML assignment:  x.textContent = 'Some text'
@@ -340,11 +340,9 @@ for (const f of targets) {
   if (!fs.existsSync(f)) { problems.push(`${rel(f)} missing`); continue; }
   const src = fs.readFileSync(f, 'utf8');
   // Parse before linting. Every rule below reads the source as *text*, so a file
-  // that does not even parse used to sail through: a comment-stripping edit once
-  // removed the backticks around the one template literal in app.js, the whole
-  // renderer failed to evaluate, and the first thing to notice was the
-  // real-machine probe (page stuck on its skeleton, no language switch). This
-  // check costs milliseconds and turns that into a build failure.
+  // that does not parse would sail through every text rule while the renderer
+  // fails to evaluate at runtime. This check costs milliseconds and turns that
+  // into a build failure.
   try {
     new vm.Script(src, { filename: f });
   } catch (e) {
@@ -352,9 +350,8 @@ for (const f of targets) {
     continue;
   }
   shadowCount += checkScope(src, f) ? 0 : 1;
-  // Every target is a renderer file now that the JS kernel (core/, src/main/)
-  // is deleted. The guard stays so a future non-renderer target cannot silently
-  // inherit the untranslated-string rule, which is UI-only by construction.
+  // Every target is a renderer file. The guard keeps a non-renderer target from
+  // silently inheriting the untranslated-string rule, which is UI-only.
   hardCount += f.includes(`${path.sep}renderer${path.sep}`) ? findUntranslated(src, f) : 0;
   if (f.endsWith("app.js")) hardCount += findTemplateProse(src, f);
   styleCount += findInlineStyles(src, f);

@@ -4,7 +4,9 @@
   "version": "0.2.0",
   "identifier": "dev.agentkeeper",
   "build": {
-    "frontendDist": "../dist"
+    "frontendDist": "../dist",
+    "beforeBuildCommand": "node copy-frontend.js",
+    "beforeDevCommand": "node copy-frontend.js"
   },
   "app": {
     "withGlobalTauri": true,
@@ -22,7 +24,8 @@
       "nsis"
     ],
     "externalBin": [
-      "binaries/agentkeeper-mcp"
+      "binaries/agentkeeper-mcp",
+      "binaries/ak-scan"
     ],
     "icon": [
       "icons/32x32.png",

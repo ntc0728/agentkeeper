@@ -1,21 +1,19 @@
 'use strict';
 /**
- * Adapter table — the last surviving piece of the pre-Tauri JS kernel.
+ * Adapter table — the generator input for `core/adapters.rs`.
  *
  * SOURCE
- *   Lifted verbatim from `core/adapters/index.js` before that tree was deleted.
- *   Provenance: tag `pre-electron-removal` (= commit 95b82f7, the last commit
- *   that still contained the JS kernel). Caveat: only the *tracked* part of the
- *   old tree is in that tag — `core/discover.js`, `core/errors.js` and
- *   `core/update/` were never committed, so they are gone with the working
- *   copy. Nothing here needs them.
+ *   The canonical declaration of every supported agent: id, label, accent
+ *   colour and the per-scope directories it reads. `npm run tauri:adapters`
+ *   evaluates this file against a fake home and freezes the result into the
+ *   `DECLARED_TABLE_JSON` / `RESOLVED_PATHS_JSON` constants that the Rust
+ *   tests compare against, so the two declarations cannot drift.
  *
  * WHY IT STANDS ALONE
- *   The JS kernel is gone — `core/`, `src/main/` and `src/mcp/` are deleted and
- *   the product ships as the Tauri build. The only remaining consumer of this
- *   table is `scripts/gen-adapters-snapshots.js`, which freezes it into
- *   `JS_TABLE_JSON` / `JS_RESOLVED_JSON` inside
- *   `tauri-shell/src-tauri/src/core/adapters.rs`. Nothing else may import it:
+ *   The only consumer of this table is `scripts/gen-adapters-snapshots.js`,
+ *   which freezes it into
+ *   `DECLARED_TABLE_JSON` / `RESOLVED_PATHS_JSON` inside
+ *   `tauri-shell/core/src/adapters.rs`. Nothing else may import it:
  *   this file exists to regenerate a snapshot, not to be an engine.
  *
  * WHEN YOU EDIT THIS FILE
@@ -23,14 +21,12 @@
  *   SAME CHANGE. The Rust snapshot is the parity oracle for the `AGENTS` table
  *   in adapters.rs — an added/removed/renamed agent, a changed `home` template,
  *   or any edited skills/rules/memory/mcp/plugins list makes it stale, and a
- *   stale snapshot asserts what the generator used to believe rather than what
- *   this file now says.
+ *   stale snapshot asserts the old table rather than what this file says.
  *
- * WHAT WAS NOT CARRIED OVER
- *   The `detected: (fs, p) => ...` closures. They were already dead in the JS
- *   build — their only caller (src/main/ipc.js) imported the table but never
- *   invoked them, as noted at tauri-shell/src-tauri/src/core/adapters.rs:10 —
- *   and detection now lives in Rust. `detected` was never part of the generated
+ * WHAT IS NOT PART OF THIS TABLE
+ *   The `detected: (fs, p) => ...` closures: never invoked, and detection now
+ *   lives in Rust (`adapters.rs` derives `installed` from `existsDir(home)`).
+ *   `detected` was never part of the generated
  *   snapshot either, so dropping it leaves the snapshot byte-identical.
  */
 
@@ -437,9 +433,8 @@ const SHARED_SKILLS_DIR = '~/.agents/skills';
  * `path.join(home, '.claude')`. That byte-level behaviour is asserted on the
  * Rust side by `resolve_home_matches_the_js_substitution_byte_for_byte`.
  *
- * Was `core/scanner.js:22` — the only place the JS expanded a tilde. The
- * snapshot generator used to carry its own inline copy of this exact regex;
- * it now imports this one so the two cannot drift.
+ * Tilde expansion lives here only: the snapshot generator imports this exact
+ * regex so the two cannot drift.
  *
  * os.homedir() is called per invocation (never captured at require time), so a
  * caller can monkey-patch os.homedir before requiring this module.
@@ -452,7 +447,6 @@ function byId(id) {
 }
 
 /**
- * Minimal surface for scripts/gen-adapters-snapshots.js — deliberately not the
- * old `core/adapters` module API.
+ * Minimal surface for scripts/gen-adapters-snapshots.js.
  */
 module.exports = { AGENTS, SHARED_SKILLS_DIR, resolveHome, byId };

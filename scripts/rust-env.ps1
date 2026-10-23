@@ -27,7 +27,7 @@ if (Test-Path $vswhere) {
 if (Test-Path (Join-Path $vsPath 'VC\Tools\MSVC')) {
     $msvcRoot = Join-Path $vsPath 'VC\Tools\MSVC'
     # 按版本号数值排序，不能用 Sort-Object Name（字符串排序会把 14.44 排在 14.9 之后）。
-    # 迁移期间可能并存多个 MSVC 版本，取真正最新的那个。
+    # 机器上可能并存多个 MSVC 版本，取真正最新的那个。
     $msvcVer = (Get-ChildItem $msvcRoot -Directory |
                 Where-Object { $_.Name -match '^(\d+)\.(\d+)\.(\d+)' } |
                 ForEach-Object {

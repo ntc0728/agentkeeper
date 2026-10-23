@@ -7,7 +7,7 @@
 //!   `core::store::rmrf`. `std::fs::remove_dir_all` is unusable on this host —
 //!   its trash layer fails on trees it did not create.
 //! * `core::registry` and `core::assets` are process-global singletons (they
-//!   stand in for the JS `ProjectRegistry` instance and `Keeper.lastScan`).
+//!   stand in for the registry instance and the last scan).
 //!   `cargo test` runs test fns on a thread pool, so any test that binds or
 //!   seeds them must hold [`serial`] first.
 
@@ -35,7 +35,7 @@ pub fn temp_root(tag: &str) -> PathBuf {
     dir
 }
 
-/// `fs.rmSync(dir, {recursive:true, force:true})` — via the store's helper.
+/// Recursive, forced removal — via the store's helper.
 pub fn cleanup(p: &Path) {
     store::rmrf(p);
 }
@@ -55,7 +55,7 @@ pub fn exists(path: &str) -> bool {
     Path::new(path).exists()
 }
 
-/// `readDirSnapshot()` from `scripts/selftest.js` — relative path + content for
+/// Relative path + content for
 /// every file, so "restored byte-for-byte" is checkable in one comparison.
 pub fn dir_snapshot(dir: &str) -> String {
     let mut files = list_all(Path::new(dir), String::new());
@@ -63,8 +63,13 @@ pub fn dir_snapshot(dir: &str) -> String {
     files
         .iter()
         .map(|rel| {
-            let full = Path::new(dir).join(rel.replace('/', &std::path::MAIN_SEPARATOR.to_string()));
-            format!("{}#{}", rel, std::fs::read_to_string(&full).unwrap_or_default())
+            let full =
+                Path::new(dir).join(rel.replace('/', &std::path::MAIN_SEPARATOR.to_string()));
+            format!(
+                "{}#{}",
+                rel,
+                std::fs::read_to_string(&full).unwrap_or_default()
+            )
         })
         .collect::<Vec<String>>()
         .join("|")
@@ -91,8 +96,8 @@ fn list_all(dir: &Path, base: String) -> Vec<String> {
     out
 }
 
-/// `path.join(base, ...parts)` with the native separator, matching what the JS
-/// build stores in every path field.
+/// Join with the native separator, matching what every
+/// stored path field looks like.
 pub fn join(base: &str, parts: &[&str]) -> String {
     let mut p = PathBuf::from(base);
     for part in parts {

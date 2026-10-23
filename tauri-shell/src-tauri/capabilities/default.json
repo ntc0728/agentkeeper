@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Stage 1 prototype capabilities: only what the shell itself needs. Every privileged operation is a Tauri command stubbed in Rust — no plugin grants to the filesystem or the network.",
+  "description": "Capabilities for the main window: only what the shell itself needs. Every privileged operation is a Tauri command in Rust — no plugin grants to the filesystem or the network.",
   "windows": ["main"],
   "permissions": [
     "core:default",

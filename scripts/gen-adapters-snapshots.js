@@ -1,31 +1,26 @@
 /**
- * Regenerate the parity snapshots in `tauri-shell/src-tauri/src/core/adapters.rs`.
+ * Regenerate the parity snapshots in `tauri-shell/core/src/adapters.rs`.
  *
  * WHAT IT DOES
- *   Loads the JS adapter table (scripts/adapter-table.js) with a fake user home,
- *   evaluates every path template on the JS side, and freezes both the table
- *   and the resolved paths into two Rust string constants (`JS_TABLE_JSON`,
- *   `JS_RESOLVED_JSON`) at the end of that file. The Rust tests in `mod tests`
+ *   Loads the declared adapter table (scripts/adapter-table.js) with a fake user
+ *   home, evaluates every path template, and freezes both the table
+ *   and the resolved paths into two Rust string constants (`DECLARED_TABLE_JSON`,
+ *   `RESOLVED_PATHS_JSON`) at the end of that file. The Rust tests in `mod tests`
  *   then compare AGENTS / resolve_home / join_native against the frozen JS
  *   output.
  *
  * WHY IT EXISTS
  *   Asset parity ("both builds return the same assets") cannot see an adapter
  *   whose home directory does not exist on this machine: both builds agree
- *   about nothing. A snapshot taken from the JS source closes that blind spot —
+ *   about nothing. A snapshot taken from the declared source closes that blind spot —
  *   and it must be *generated*, never hand-copied, because a hand-copied
- *   snapshot silently freezes whatever the copier believed the JS said.
+ *   snapshot silently freezes whatever the copier believed the source said.
  *
  * WHEN IT MUST BE RE-RUN
  *   Any change to `scripts/adapter-table.js` — an added/removed/renamed agent, a
  *   changed `home` template, or any edited skills/rules/memory/mcp/plugins
  *   list. If you add an agent, also add it to `AGENTS` in adapters.rs; the
  *   generated tests will fail until you do, which is the point.
- *
- * HISTORY
- *   The table used to live in `core/adapters/index.js`, and the tilde expansion
- *   in `core/scanner.js:22`. Both are deleted with the pre-Tauri JS kernel; their
- *   semantics now live in `scripts/adapter-table.js`.
  *
  *   node scripts/gen-adapters-snapshots.js      (or: npm run tauri:adapters)
  */
@@ -35,7 +30,7 @@ const path = require('path');
 const os = require('os');
 
 const REPO = path.resolve(__dirname, '..');
-const ADAPTERS_RS = path.join(REPO, 'tauri-shell/src-tauri/src/core/adapters.rs');
+const ADAPTERS_RS = path.join(REPO, 'tauri-shell', 'core', 'src', 'adapters.rs');
 const FAKE_HOME = 'C:/ak-parity-home';
 const FAKE_PROJECT = 'C:/ak-parity-project';
 
@@ -45,9 +40,8 @@ if (!fs.existsSync(ADAPTERS_RS)) {
 }
 
 os.homedir = () => FAKE_HOME; // replaces the real home for this process only
-// Adapter table + tilde expansion now come from the single surviving copy:
-// scripts/adapter-table.js (was core/adapters/index.js + core/scanner.js:22,
-// both deleted with the pre-Tauri JS kernel).
+// Adapter table + tilde expansion come from the single copy in
+// scripts/adapter-table.js.
 const { AGENTS, SHARED_SKILLS_DIR, resolveHome } = require(path.join(REPO, 'scripts/adapter-table'));
 
 const agents = [];
@@ -59,15 +53,13 @@ for (const a of AGENTS) {
   const put = (bag, group, list, base) => {
     for (const rel of list || []) bag[group + ':' + rel] = path.resolve(base, rel);
   };
-  // globals resolve against the agent home (was core/scanner.js:690 — deleted,
-  // semantics now documented in scripts/adapter-table.js).
+  // globals resolve against the agent home.
   put(globalPaths, 'globals.skills', a.globals.skills, home);
   put(globalPaths, 'globals.plugins', a.globals.plugins, home);
   put(globalPaths, 'globals.rules', a.globals.rules, home);
   put(globalPaths, 'globals.memory', a.globals.memory, home);
   put(globalPaths, 'globals.mcp', a.globals.mcp, home);
-  // projects resolve against the project dir (was core/scanner.js:716-722 —
-  // deleted, semantics now documented in scripts/adapter-table.js).
+  // projects resolve against the project dir.
   put(projectPaths, 'projects.skills', a.projects.skills, FAKE_PROJECT);
   put(projectPaths, 'projects.rules', a.projects.rules, FAKE_PROJECT);
   put(projectPaths, 'projects.memory', a.projects.memory, FAKE_PROJECT);
@@ -122,23 +114,23 @@ const resolvedJson =
 const rust = String.raw`
 #[cfg(test)]
 mod tests {
-    //! Snapshot tests against the JavaScript adapter table.
+    //! Snapshot tests against the declared adapter table.
     //!
     //! Everything here is generated: run
     //!
     //!     npm run tauri:adapters      (scripts/gen-adapters-snapshots.js)
     //!
     //! after any change to scripts/adapter-table.js. The two JSON constants below
-    //! are that script's output — the JS table loaded with os.homedir() set to
-    //! FAKE_HOME, plus every path template resolved by the JS itself. Never
+    //! are that script's output — the adapter table evaluated with os.homedir()
+    //! set to FAKE_HOME, plus every path template resolved against it. Never
     //! edit them by hand: a hand-edited snapshot asserts whatever the editor
-    //! believed, not what the JS says.
+    //! believed, not what the table says.
     use super::*;
-    use crate::core::model::join_native;
+    use crate::model::join_native;
     use serde_json::Value;
     use std::path::Path;
 
-    /// Fake user home / project root the JS snapshot below was taken with.
+    /// Fake user home / project root the snapshot below was taken with.
     /// Nothing here touches the real machine — every assertion compares
     /// strings produced by the two adapter tables for the same fake input.
     const FAKE_HOME: &str = "${FAKE_HOME}";
@@ -146,27 +138,26 @@ mod tests {
 
     /// scripts/adapter-table.js loaded with os.homedir() === FAKE_HOME, plus the
     /// family and notes fields.
-    const JS_TABLE_JSON: &str = r##"${tableJson}"##;
+    const DECLARED_TABLE_JSON: &str = r##"${tableJson}"##;
 
-    /// Every path template of every adapter, resolved on the JS side:
+    /// Every path template of every adapter, resolved on the reference side:
     /// path.resolve(home, rel) for globals and path.resolve(proj.dir, rel) for
-    /// projects (was core/scanner.js:690 and :716-722 — deleted; semantics now
-    /// in scripts/adapter-table.js), with home coming from resolveHome(), also
-    /// in scripts/adapter-table.js (was core/scanner.js:22 — deleted).
-    const JS_RESOLVED_JSON: &str = r##"${resolvedJson}"##;
+    /// projects, with home coming from resolveHome() in
+    /// scripts/adapter-table.js.
+    const RESOLVED_PATHS_JSON: &str = r##"${resolvedJson}"##;
 
-    fn js_table() -> Value {
-        serde_json::from_str(JS_TABLE_JSON).expect("JS adapter snapshot must be valid JSON")
+    fn declared_table_json() -> Value {
+        serde_json::from_str(DECLARED_TABLE_JSON).expect("adapter snapshot must be valid JSON")
     }
 
-    fn js_resolved() -> Value {
-        serde_json::from_str(JS_RESOLVED_JSON).expect("JS path snapshot must be valid JSON")
+    fn resolved_paths_json() -> Value {
+        serde_json::from_str(RESOLVED_PATHS_JSON).expect("JS path snapshot must be valid JSON")
     }
 
-    fn js_agents() -> Vec<Value> {
-        match js_table().get("agents").and_then(|v| v.as_array()) {
+    fn declared_agents_json() -> Vec<Value> {
+        match declared_table_json().get("agents").and_then(|v| v.as_array()) {
             Some(a) => a.clone(),
-            None => panic!("JS adapter snapshot has no agents array"),
+            None => panic!("adapter snapshot has no agents array"),
         }
     }
 
@@ -185,7 +176,7 @@ mod tests {
     }
 
     /// Compare two paths the way the filesystem does. path.resolve rewrites
-    /// every separator to the native one, while this port keeps the slash that
+    /// every separator to the native one, while this implementation keeps the slash that
     /// resolve_home preserved after the tilde, so the raw strings can differ in
     /// separator only. What must match is the directory they name.
     fn same_path(js: &str, rust: &str) -> bool {
@@ -197,12 +188,12 @@ mod tests {
 
     /// 17 adapters, declaration order preserved, every field identical.
     #[test]
-    fn js_and_rust_tables_are_field_for_field_identical() {
-        let js = js_agents();
+    fn the_declared_table_and_the_rust_one_agree_field_for_field() {
+        let js = declared_agents_json();
         assert_eq!(
             js.len(),
             AGENTS.len(),
-            "JS declares {} adapters, Rust declares {}",
+            "snapshot declares {} adapters, Rust declares {}",
             js.len(),
             AGENTS.len()
         );
@@ -217,10 +208,10 @@ mod tests {
             assert_eq!(r.home, j["home"].as_str().unwrap_or_default(), "{}: home", id);
 
             // notes is undefined on every adapter but two.
-            let js_notes = j["notes"].as_str().map(|s| s.to_string());
-            assert_eq!(r.notes.map(|s| s.to_string()), js_notes, "{}: notes", id);
+            let declared_notes = j["notes"].as_str().map(|s| s.to_string());
+            assert_eq!(r.notes.map(|s| s.to_string()), declared_notes, "{}: notes", id);
 
-            // family is a plain field in JS; this port derives it from the id.
+            // family is a plain field; this implementation derives it from the id.
             assert_eq!(
                 family(r.id),
                 j["family"].as_str().unwrap_or_default(),
@@ -250,18 +241,18 @@ mod tests {
                 ),
                 None => assert!(
                     r.projects.plugins.is_none(),
-                    "{}: JS declares no projects.plugins",
+                    "{}: snapshot declares no projects.plugins",
                     id
                 ),
             }
         }
     }
 
-    /// Every JS id resolves here, and an unknown id resolves to nothing instead
+    /// Every declared id resolves here, and an unknown id resolves to nothing instead
     /// of a guessed path.
     #[test]
-    fn by_id_covers_every_js_agent() {
-        for j in js_agents() {
+    fn by_id_covers_every_declared_agent() {
+        for j in declared_agents_json() {
             let id = j["id"].as_str().unwrap_or_default();
             assert!(by_id(id).is_some(), "by_id({}) must resolve", id);
         }
@@ -273,10 +264,10 @@ mod tests {
     /// including the slash right behind it — stays as written. path.resolve
     /// would normalise it away, so this asserts the raw string.
     #[test]
-    fn resolve_home_matches_the_js_substitution_byte_for_byte() {
-        assert_eq!(js_table()["fakeHome"].as_str().unwrap(), FAKE_HOME);
-        let resolved = js_resolved();
-        for j in js_agents() {
+    fn resolve_home_substitutes_the_home_placeholder_byte_for_byte() {
+        assert_eq!(declared_table_json()["fakeHome"].as_str().unwrap(), FAKE_HOME);
+        let resolved = resolved_paths_json();
+        for j in declared_agents_json() {
             let id = j["id"].as_str().unwrap_or_default();
             let want = resolved[id]["home"].as_str().unwrap_or_default();
             let got = resolve_home(by_id(id).unwrap().home, FAKE_HOME).unwrap_or_default();
@@ -297,16 +288,16 @@ mod tests {
     /// The blind spot asset parity cannot see: a template that resolves to the
     /// wrong directory is invisible while neither build has that directory.
     ///
-    /// Driven from the Rust table (what this port actually walks) and checked
-    /// against the JS snapshot in both directions — a template must exist on
+    /// Driven from the Rust table (what this implementation walks) and checked
+    /// against the snapshot in both directions — a template must exist on
     /// both sides, and the snapshot must not carry one we dropped.
     #[test]
-    fn every_path_template_resolves_to_the_js_directory() {
-        let resolved = js_resolved();
+    fn every_path_template_resolves_under_the_declared_home() {
+        let resolved = resolved_paths_json();
         let mut checked = 0usize;
-        for j in js_agents() {
+        for j in declared_agents_json() {
             let id = j["id"].as_str().unwrap_or_default();
-            let agent = by_id(id).expect("id comes from the JS table");
+            let agent = by_id(id).expect("id comes from the adapter table");
             let home = resolve_home(agent.home, FAKE_HOME).unwrap_or_default();
             let entry = &resolved[id];
 
@@ -325,31 +316,31 @@ mod tests {
                 ("projects.plugins", agent.projects.plugins.unwrap_or(&[])),
             ];
 
-            let js_global = entry["globalPaths"].as_object().unwrap();
-            let js_project = entry["projectPaths"].as_object().unwrap();
+            let declared_global = entry["globalPaths"].as_object().unwrap();
+            let declared_project = entry["projectPaths"].as_object().unwrap();
             assert_eq!(
-                js_global.len(),
+                declared_global.len(),
                 global_groups.iter().map(|(_, r)| r.len()).sum::<usize>(),
                 "{}: globals template count",
                 id
             );
             assert_eq!(
-                js_project.len(),
+                declared_project.len(),
                 project_groups.iter().map(|(_, r)| r.len()).sum::<usize>(),
                 "{}: projects template count",
                 id
             );
 
             for (bag, groups, base) in [
-                (js_global, &global_groups[..], home.as_str()),
-                (js_project, &project_groups[..], FAKE_PROJECT),
+                (declared_global, &global_groups[..], home.as_str()),
+                (declared_project, &project_groups[..], FAKE_PROJECT),
             ] {
                 for (group, rels) in groups.iter() {
                     for rel in rels.iter() {
                         let key = format!("{}:{}", group, rel);
                         let want = bag
                             .get(&key)
-                            .unwrap_or_else(|| panic!("{}: {} is missing from the JS snapshot", id, key))
+                            .unwrap_or_else(|| panic!("{}: {} is missing from the snapshot", id, key))
                             .as_str()
                             .unwrap_or_default();
                         let got = join_native(Path::new(base), rel);
@@ -376,8 +367,8 @@ mod tests {
     /// The shared directory is a constant rather than an adapter, so it drifts
     /// easily: assert both the token and its expansion.
     #[test]
-    fn shared_skills_dir_matches_the_js_constant() {
-        let table = js_table();
+    fn shared_skills_dir_is_the_declared_constant() {
+        let table = declared_table_json();
         assert_eq!(SHARED_SKILLS_DIR, table["sharedSkillsDir"].as_str().unwrap());
         let want = format!("{}/.agents/skills", FAKE_HOME);
         assert_eq!(resolve_home(SHARED_SKILLS_DIR, FAKE_HOME).as_deref(), Some(want.as_str()));
@@ -391,9 +382,14 @@ mod tests {
 `;
 
 let src = fs.readFileSync(ADAPTERS_RS, 'utf8');
-const marker = '\n#[cfg(test)]\nmod tests {';
-if (src.includes(marker)) {
-  src = src.slice(0, src.indexOf(marker));
+// Truncate at the FIRST generated block, whatever the line endings are:
+// the file may be CRLF, and a marker spelled with LF would not match it —
+// then `indexOf` returns -1, `slice(0, -1)` keeps everything, and the
+// generator APPENDS a second copy of the block on every run.
+const marker = /\r?\n#\[cfg\(test\)\]\r?\nmod tests \{/;
+const m = marker.exec(src);
+if (m) {
+  src = src.slice(0, m.index);
 }
 src = src.replace(/\s+$/, '') + '\n' + rust;
 fs.writeFileSync(ADAPTERS_RS, src);
@@ -405,7 +401,7 @@ const templates = Object.values(resolved).reduce(
 console.log(
   'adapters.rs: froze ' +
     agents.length +
-    ' JS adapters and ' +
+    ' adapters and ' +
     templates +
     ' resolved path templates (' +
     src.length +

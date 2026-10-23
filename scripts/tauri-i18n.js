@@ -3,35 +3,28 @@
 /**
  * Rust-engine i18n audit — the Tauri half of the no-degradation guarantee.
  *
- * Policy (user mandate, 2026-10-18): with the UI in Chinese, every sentence
- * the engine puts on screen must render in Chinese. Proper nouns / protocol
- * words are the only allowed exceptions.
+ * Policy: with the UI in Chinese, every sentence the engine puts on screen
+ * must render in Chinese. Proper nouns / protocol words are the only allowed
+ * exceptions.
  *
- * `scripts/selftest.js` §18 used to enforce this by scraping sentence-like
- * literals out of `core/*.js` + `src/main/ipc.js` and asserting each one hits
- * EXACT / PATTERNS / INTERNAL in `src/renderer/engine-zh.js`. That audit dies
- * with the old JS architecture: the engine is now
- * `tauri-shell/src-tauri/src/**\/*.rs`, and every Rust message reaches the
- * renderer as `{ ok:false, error:"…" }`, a `reason` field, a validation issue
- * or a `const &str` — none of which §18 ever saw.
- *
- * This script re-establishes the guarantee over Rust, reusing §18's judgement
- * rules (see `looksSentence`) so the two eras stay comparable. It also audits
- * the dictionary *back towards* the engine (ORPHAN), so dead entries and
- * mis-targeted additions surface instead of piling up silently.
+ * The engine is `tauri-shell/src-tauri/src/**\/*.rs`, and every Rust message
+ * reaches the renderer as `{ ok:false, error:"…" }`, a `reason` field, a
+ * validation issue or a `const &str`. The script scrapes all string literals,
+ * filters out the ones that cannot reach the screen (see `looksSentence`) and
+ * asserts each survivor has a dictionary entry; it also audits the dictionary
+ * *back towards* the engine (ORPHAN), so dead entries and mis-targeted
+ * additions surface instead of piling up silently.
  *
  * Dependencies: `src/renderer/engine-zh.js` and the Rust sources only.
- * The pre-Tauri JS kernel (`core/`, `src/main/`, `scripts/selftest.js`) is
- * deleted; ORPHAN is judged purely against the Rust engine, which is the only
- * thing that emits sentences in the shipped Tauri build.
+ * ORPHAN is judged purely against the Rust engine, which is the only thing
+ * that emits sentences in the shipped build.
  *
  * It also checks the two things a dictionary can get wrong without ever
  * showing up as a MISS:
  *   CODE-MISS  a `code` literal the Rust engine emits that CODE_ZH cannot
  *              translate (the user then sees a raw English code);
  *   CJK-KEY    Chinese sitting in an EXACT / PATTERNS *key*, i.e. a slot that
- *              must hold the engine's English — a defect the deleted
- *              `core/errors.js` already had, and which must not be re-created
+ *              must hold the engine's English.
  *              in Rust.
  *
  *   node scripts/tauri-i18n.js             gate: exit 1 on MISS/AMBIGUOUS
@@ -44,12 +37,25 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
-const RUST_SRC = path.join(ROOT, 'tauri-shell', 'src-tauri', 'src');
+/**
+ * Every Rust source tree that can put a sentence on screen.
+ *
+ * The engine lives in the `agentkeeper-core` crate; the Tauri shell has its
+ * own tree. Both are scanned — a gate that only looked at one of them would
+ * let half the English sentences through unnoticed, and the crate split moved
+ * most of them into the other one.
+ */
+const RUST_SRC_DIRS = [
+  path.join(ROOT, 'tauri-shell', 'core', 'src'),
+  path.join(ROOT, 'tauri-shell', 'src-tauri', 'src'),
+];
 const DICT = path.join(ROOT, 'src', 'renderer', 'engine-zh.js');
 
-if (!fs.existsSync(RUST_SRC)) {
-  console.error(`[tauri-i18n] missing Rust source tree: ${RUST_SRC}`);
-  process.exit(2);
+for (const dir of RUST_SRC_DIRS) {
+  if (!fs.existsSync(dir)) {
+    console.error(`[tauri-i18n] missing Rust source tree: ${dir}`);
+    process.exit(2);
+  }
 }
 if (!fs.existsSync(DICT)) {
   console.error(`[tauri-i18n] missing dictionary: ${DICT}`);
@@ -61,12 +67,13 @@ const DICT_SRC = fs.readFileSync(DICT, 'utf8');
 const reportOnly = process.argv.includes('--report');
 
 /* ------------------------------------------------------------------ */
-/* 1. Judgement rules — copied from selftest.js §18                    */
+/* 1. Judgement rules                                                  */
 
 /**
  * Does this string look like a sentence an English speaker would read?
- * Same regex (incl. the 140-char cap) and same two extra conditions as §18,
- * so a string that passed §18 in the JS era passes here too.
+ * Same regex (incl. the 140-char cap) and same two extra conditions as the
+ * so a string that passed the same rule in the previous implementation passes
+ * here too.
  */
 function looksSentence(s) {
   return /^[A-Za-z][A-Za-z0-9 ,.:;'‘’"()%`[\]{}\-—&+!?/\\_§]{4,140}$/.test(s)
@@ -137,7 +144,7 @@ function normalizePlaceholders(s) {
   return s.replace(/\{[^{}]*\}/g, () => `§${++n}`);
 }
 
-/** Undo the escapes §18 also undid, so quoting matches the dictionary. */
+/** Undo the escapes the scanner also undid, so quoting matches the dictionary. */
 function unescape(s) {
   return s.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
 }
@@ -214,7 +221,7 @@ function extract(file) {
   let logDepth = 0;
 
   for (const [line, text] of productionLines(noRaw)) {
-    if (/^\s*(\/\/|\*|\/\*)/.test(text)) continue;      // same rule as §18
+    if (/^\s*(\/\/|\*|\/\*)/.test(text)) continue;      // a comment, not a sentence
 
     const code = text.replace(/\/\/.*$/, '');           // trailing // comment
     const opensLog = LOG_SINK.test(code);
@@ -236,7 +243,7 @@ function extract(file) {
        * MISS yet absent from every bucket, invisible. The dictionary entries
        * translating them were then reported as ORPHANs: one string, two
        * opposite verdicts. Only rustfmt-wrapped calls (literal on a following
-       * line, caught by inLogCall) used to escape this.
+       * line, caught by inLogCall) would otherwise escape this.
        */
       if (LOG_SITE.test(before) || inLogCall || isLogSurface(norm) || isLogSurface(raw)) {
         rows.push({ file: rel, line, s: norm, raw, log: true });
@@ -280,9 +287,6 @@ function extract(file) {
  * the WebView. File-scoped, and printed in full in the report so growth stays
  * visible — the acknowledged trade-off is that a UI message added to a bin file
  * would be hidden. There is no UI channel in a bin today.
- *
- * (A per-string allowlist lived here until 2026-10-20 for the `ak-store` replay
- * binary. Both went away together: the binary was the parity harness's CLI.)
  */
 const CLI_FILE = /\/bin\/[a-z0-9-]+\.rs$/;
 
@@ -292,8 +296,14 @@ const CLI_FILE = /\/bin\/[a-z0-9-]+\.rs$/;
  * the WebView. Excluded by FILE, not by wording — the acknowledged trade-off
  * is that a real UI message added to mcp.rs would be hidden. mcp.rs has no UI
  * channel today; if it ever gets one, split the file and narrow this rule.
+ *
+ * The path is matched on the FILE NAME only, not on the directory it sits in:
+ * the module moved from `src-tauri/src/core/mcp.rs` to `core/src/mcp.rs` when
+ * the core became its own crate, and a rule anchored on the old directory
+ * would have silently stopped matching — the gate would then demand Chinese
+ * translations for sentences that only ever reach an LLM.
  */
-const PROTOCOL_FILE = /\/core\/mcp\.rs$/;
+const PROTOCOL_FILE = /(^|[\\/])mcp\.rs$/;
 
 function classify(r) {
   if (r.log) return 'logSurface';
@@ -454,7 +464,7 @@ function rustFiles(dir) {
   return out.sort();
 }
 
-const files = rustFiles(RUST_SRC);
+const files = RUST_SRC_DIRS.flatMap((dir) => rustFiles(dir));
 const all = [];
 for (const f of files) all.push(...extract(f));
 
@@ -541,7 +551,7 @@ for (const r of rows) {
 /*
  * Rescue pass — keeps a scraping limitation from faking a dead entry.
  *
- * `looksSentence` (§18's rule, kept verbatim) only accepts characters from a
+ * `looksSentence` (the rule, kept verbatim) only accepts characters from a
  * fixed class, and `^` / `$` are not in it. A message such as
  * `MCP server name must match /^…$/` is therefore never scraped, and usage
  * measured off the scrape alone would report it as an ORPHAN — a false
@@ -561,7 +571,7 @@ for (const s of literalForms) {
 const orphans = [];
 for (const k of Object.keys(zh.EXACT)) {
   if (usage.get(`EXACT|${k}`)) continue;
-  // Same entry point the coverage check used to route this string to the log
+  // Same entry point the coverage check uses to route this string to the log
   // surface. Skipping it here is what keeps the two checks from disagreeing:
   // "emitted but not to the screen" and "dead, delete it" cannot both hold.
   if (isLogSurface(k)) continue;
@@ -573,10 +583,8 @@ compiledPatterns.forEach((c) => {
   orphans.push({ kind: `PATTERNS#${c.i}`, id: c.src, zh: c.zh });
 });
 
-// ORPHAN is judged against the Rust engine only. The pre-Tauri JS engine that
-// used to justify an extra UNGENERATED sub-bucket (an ORPHAN it never produced
-// either) is deleted, so "never right" vs "made obsolete by the migration" is no
-// longer a distinction this script can make — an unused entry is simply an ORPHAN.
+// ORPHAN is judged against the Rust engine only: an unused entry is simply an
+// ORPHAN.
 
 /* ------------------------------------------------------------------ */
 /* 7b. code integrity + key-language integrity                         */
@@ -620,7 +628,7 @@ const show = (label, list, extra) => {
 
 W('');
 W('Rust engine i18n audit — no-English-degradation gate');
-W(`  source : ${path.relative(ROOT, RUST_SRC).replace(/\\/g, '/')}`);
+W(`  source : ${RUST_SRC_DIRS.map((d) => path.relative(ROOT, d).replace(/\\/g, '/')).join(', ')}`);
 W(`  dict   : ${path.relative(ROOT, DICT).replace(/\\/g, '/')}`);
 W('');
 W(`  rust files scanned        : ${files.length}`);
@@ -645,9 +653,8 @@ show('logSurface', buckets.logSurface,
   '      neither the WebView nor a terminal. Listed in full — watch this count.');
 show('chinese', buckets.chinese,
   '    ^ hard-coded Chinese in the Rust engine. Renders correctly but bypasses\n' +
-  '      the dictionary, so it cannot follow a UI-language switch. Pre-Tauri\n' +
-  '      product debt (the deleted core/update/http.js already returned these),\n' +
-  '      not a migration regression. Debt, not a degradation.');
+  '      the dictionary, so it cannot follow a UI-language switch. Engine-side\n' +
+  '      debt, not a degradation of the guarantee.');
 show('escaped', buckets.escaped);
 show('notProse', buckets.notProse);
 show('placeholder', buckets.placeholder);

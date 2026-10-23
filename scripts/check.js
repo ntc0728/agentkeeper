@@ -6,21 +6,20 @@
  *   node scripts/check.js          # everything
  *   node scripts/check.js residue  # one gate, by name
  *
- * Why a single entry point: this repo used to have four overlapping checkers
- * (`check-mutation-residue`, `i18n-report`, `lint-renderer`, `ui-audit`) plus a
- * 60 KB `selftest.js` and a 1,356-line write-parity harness, all wired into one
- * `npm run verify` that took 74 s and tested an Electron app that no longer
- * ships. A suite nobody runs on a hunch protects nothing. These gates total
- * well under a second, so they can run on every save.
+ * Why a single entry point: one script, one口径 — every gate below either
+ * passes or fails for the same reason a reviewer would reject the change.
+ * The whole suite runs in well under a second, so it can run on every save.
  *
  * Gates (in order, cheapest first):
  *   1. residue   — mutation markers and backup files left behind by a harness
  *   2. bridge    — every `window.ak` call shape matches the Rust command it
  *                  invokes (see below — this is the gate that pays for itself)
- *   3. renderer  — `scripts/lint-renderer.js` (i18n parity, CSP, shadowing)
- *   4. ui        — `scripts/ui-audit.js` (dead controls, theme violations)
- *   5. i18n      — `scripts/tauri-i18n.js` (Rust sentence → zh dictionary)
- *   6. dist      — `tauri-shell/copy-frontend.js --check` (bundle is current)
+ *   3. tree      — `target/` stays under a size ceiling (pdb and caches are KEPT);
+ *                  orphaned build dirs are reported, not deleted (7.9 GB once grew here)
+ *   4. renderer  — `scripts/lint-renderer.js` (i18n parity, CSP, shadowing)
+ *   5. ui        — `scripts/ui-audit.js` (dead controls, theme violations)
+ *   6. i18n      — `scripts/tauri-i18n.js` (Rust sentence → zh dictionary)
+ *   7. dist      — `tauri-shell/copy-frontend.js --check` (bundle is current)
  *
  * ## Why the bridge gate exists
  *
@@ -116,7 +115,7 @@ function gateResidue() {
 
 /* ------------------------------------------------------------------ gate 2 */
 
-/** Args Tauri resolves from the command message, not from the JS payload. */
+/** Args Tauri resolves from the command message, not from the payload body. */
 const FRAMEWORK_ARGS = /^(?:\w+::)*(?:AppHandle|Window|WebviewWindow|Webview|State|Request|CommandScope|GlobalScope)\b|<.*\b(?:State|Request)>/;
 
 function splitTopLevel(s) {
@@ -274,7 +273,254 @@ function gateBridge() {
   if (dead.length) console.log(`        unused commands (${dead.length}): ${dead.join(', ')}`);
 }
 
-/* ------------------------------------------------------------- gates 3–6 */
+/* ------------------------------------------------------------- gates 3–7 */
+
+/**
+ * gate: tree — `target/` must stay BOUNDED, not sterile.
+ *
+ * Policy: build artefacts are KEPT. `*.pdb`, `*.rlib`, `*.rmeta`
+ * and `incremental/` are what the linker emits or what the next build reads;
+ * deleting them buys disk by making every rebuild slower. This gate does not
+ * ask for their removal.
+ *
+ * What it protects is boundedness. The tree once reached 7.9 GB (2.9 debug +
+ * 5.0 release) because each Cargo.toml change left an orphaned
+ * `build/<crate>-<hash>/` behind and an unexpected incremental cache could
+ * refill invisible to everyone, and nothing failed while it grew.
+ *
+ *   HARD  total > CEILING_GIB       → fail, with a breakdown naming the
+ *                                     biggest consumers so the fix is targeted
+ *   INFO  pdb / orphaned build dirs / incremental cache — reported with their
+ *         size, never deleted by this gate, never a failure on their own
+ *
+ * Baseline measured for this project (both profiles, release
+ * incremental cache warm): 4.5 GiB without `.pdb`, ~4.9 GiB with them. The
+ * 6.5 GiB ceiling leaves room for one extra profile or toolchain while still
+ * failing well below the 7.9 GiB incident — and a single stray 2.5 GiB
+ * incremental cache (the worst case seen) now trips it on its own.
+ *
+ * The two config pins below stay hard failures: a missing/loosened
+ * `[build] incremental = false` is what silently refilled that cache.
+ */
+function gateTree() {
+  // The workspace's shared target directory: `tauri-shell/target`, beside
+  // `core/` and `src-tauri/` — cargo builds every workspace member into it.
+  const TARGET = path.join(ROOT, 'tauri-shell', 'target');
+  const REL = 'tauri-shell/target';
+  const GIB = 1024 ** 3;
+  /** Total tree ceiling. See the gate doc: baseline 4.5–4.9 GiB. */
+  const CEILING_GIB = 6.5;
+  if (!fs.existsSync(TARGET)) {
+    ok('tree: no target/ yet — nothing built, nothing to measure');
+    return;
+  }
+
+  // Collect every finding, then report once. A gate that fails and *also*
+  // prints its ok line is worse than no gate: the summary reads "ok" and the
+  // failure scrolls away. (This happened on the first run of this gate.)
+  const problems = [];
+
+  /** Walk without following links; returns {path,size,inode} for files. */
+  const files = [];
+  const stack = [TARGET];
+  while (stack.length) {
+    const cur = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(cur, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      const full = path.join(cur, e.name);
+      if (e.isDirectory()) stack.push(full);
+      else if (e.isFile()) {
+        try {
+          const st = fs.statSync(full, { bigint: true });
+          files.push({ path: full, size: Number(st.size), inode: `${st.dev}:${st.ino}` });
+        } catch {
+          /* raced a concurrent build */
+        }
+      }
+    }
+  }
+
+  /**
+   * Sum bytes, counting each inode once.
+   *
+   * cargo hard-links `target/<profile>/<name>.exe|.pdb` against the hashed
+   * copy under `deps/`, so a naive sum double-counts the final artefacts.
+   * Reporting and the ceiling must agree with `du`, not with the number of
+   * directory entries.
+   */
+  const seenInode = new Set();
+  const unique = files.filter((f) => {
+    if (seenInode.has(f.inode)) return false;
+    seenInode.add(f.inode);
+    return true;
+  });
+  const sumOf = (pred) => unique.filter(pred).reduce((a, f) => a + f.size, 0);
+  const totalBytes = unique.reduce((a, f) => a + f.size, 0);
+
+  /* ---- informational: what the tree is made of (never a failure) -------- */
+  const pdbBytes = sumOf((f) => f.path.toLowerCase().endsWith('.pdb'));
+  const pdbCount = unique.filter((f) => f.path.toLowerCase().endsWith('.pdb')).length;
+  const rlibBytes = sumOf((f) => f.path.endsWith('.rlib'));
+  const rmetaBytes = sumOf((f) => f.path.endsWith('.rmeta'));
+  const incBytes = sumOf((f) => f.path.split(path.sep).includes('incremental'));
+
+  /* orphaned build-script output dirs (exact hash match, same rule as
+     tauri-shell/clean-build.js — matching on the crate name alone would call
+     every historical hash live and hide the growth) */
+  const buildRoot = path.join(TARGET, 'release', 'build');
+  const fpRoot = path.join(TARGET, 'release', '.fingerprint');
+  let fps = [];
+  try {
+    fps = fs.readdirSync(fpRoot);
+  } catch {
+    /* not built yet */
+  }
+  const fpHashes = new Set(
+    fps.map((f) => (f.match(/-([0-9a-f]{16})$/) || [])[1]).filter(Boolean)
+  );
+  let orphanDirs = [];
+  try {
+    orphanDirs = fs
+      .readdirSync(buildRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .filter((name) => {
+        const hash = (name.match(/-([0-9a-f]{16})$/) || [])[1];
+        return !hash || !fpHashes.has(hash);
+      });
+  } catch {
+    /* no build dir */
+  }
+  const orphanBytes = orphanDirs.reduce((a, name) => {
+    const prefix = path.join(buildRoot, name) + path.sep;
+    return a + unique.filter((f) => f.path.startsWith(prefix)).reduce((x, f) => x + f.size, 0);
+  }, 0);
+
+  /* ---- HARD: the ceiling ------------------------------------------------- */
+  const gib = (b) => (b / GIB).toFixed(2);
+  if (totalBytes > CEILING_GIB * GIB) {
+    const reclaim = [];
+    if (orphanDirs.length) {
+      reclaim.push(
+        `${orphanDirs.length} orphaned build dir(s), ${gib(orphanBytes)} GiB — no .fingerprint references them`
+      );
+    }
+    reclaim.push('a stray incremental cache (debug, or a second release profile)');
+    reclaim.push('`cargo clean -p <crate>` for a crate whose source changed shape');
+    reclaim.push('rlib+rmeta last — they are the compile cache, deleting them means a full rebuild');
+    problems.push(
+      `${REL} is ${gib(totalBytes)} GiB, over the ${CEILING_GIB} GiB ceiling.\n` +
+        `        breakdown: rlib ${gib(rlibBytes)} · rmeta ${gib(rmetaBytes)} · ` +
+        `pdb ${gib(pdbBytes)} · incremental ${gib(incBytes)} · rest ${gib(totalBytes - rlibBytes - rmetaBytes - pdbBytes - incBytes)} GiB\n` +
+        `        reclaim in this order, largest stale item first:\n` +
+        reclaim.map((line, i) => `          ${i + 1}. ${line}`).join('\n')
+    );
+  }
+
+  /* ---- informational lines (printed only when nothing failed) ----------- */
+  const notes = [];
+  if (pdbBytes) {
+    notes.push(
+      `tree: keeps ${pdbCount} .pdb (${gib(pdbBytes)} GiB) — linker symbols, kept as artefacts`
+    );
+  }
+  if (orphanDirs.length) {
+    notes.push(
+      `tree: ${orphanDirs.length} orphaned build dir(s) (${gib(orphanBytes)} GiB) — ` +
+        `left behind by Cargo.toml hash changes; \`npm run tauri:clean\` can reclaim them`
+    );
+  }
+  if (incBytes) {
+    notes.push(`tree: incremental cache ${gib(incBytes)} GiB — kept (hot pack builds depend on it)`);
+  }
+
+  /* the pins that keep it clean must themselves stay in place */
+  const cfg = path.join(ROOT, 'tauri-shell', '.cargo', 'config.toml');
+  let cfgText = '';
+  try {
+    cfgText = fs.readFileSync(cfg, 'utf8');
+  } catch {
+    problems.push(
+      'tauri-shell/.cargo/config.toml is missing — the workspace would fall back\n' +
+        '        to the machine-wide [build] incremental = true and refill the cache.'
+    );
+  }
+  if (cfgText && !/^\[build\][\s\S]*?^incremental\s*=\s*false/m.test(cfgText)) {
+    problems.push(
+      'tauri-shell/.cargo/config.toml no longer pins [build] incremental = false.\n' +
+        '        The [profile.dev] key is NOT equivalent — a [build] incremental anywhere in\n' +
+        '        the config chain wins over [profile.*] (measured, cargo 1.99.1).'
+    );
+  }
+
+  if (problems.length) {
+    for (const p of problems) {
+      fail('tree', p);
+    }
+    return;
+  }
+
+  // One ok line per note, then the summary. A gate that fails must never print
+  // its ok line (that ordering bug was fixed once already); every note here is
+  // printed only on the success path above.
+  for (const n of notes) ok(n);
+  const cacheRlib = unique.filter((f) => f.path.endsWith('.rlib')).length;
+  ok(
+    `tree: ${gib(totalBytes)} GiB of ${CEILING_GIB} GiB ceiling ` +
+      `(kept ${cacheRlib} .rlib + matching .rmeta as compile cache)`
+  );
+}
+
+/* ------------------------------------------------------------- gate: untracked */
+
+/**
+ * gate: untracked — build artefacts must not be tracked by git.
+ *
+ * `tauri-shell/dist/` is generated from `src/renderer` by
+ * `tauri-shell/copy-frontend.js`, and `cargo tauri build` compiles whatever is
+ * in `dist/` without checking whether it matches the sources. A tracked copy is
+ * therefore a trap: it can be older than the renderer it claims to mirror, and
+ * the executable ships the old UI. `tauri.conf.json` runs the generator as
+ * `beforeBuildCommand`, so nothing is lost by not tracking it — and the
+ * `release/` artefacts are rebuilt from source the same way.
+ *
+ * The check is on the INDEX (`git ls-files`), not on `.gitignore`: a file can
+ * be ignored and still be tracked, and that is exactly the case worth
+ * catching.
+ */
+const MUST_BE_UNTRACKED = ['tauri-shell/dist/', 'release/', 'tauri-shell/target/'];
+
+function gateUntracked() {
+  const r = spawnSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8' });
+  if (r.status !== 0) {
+    // No git (a tarball export, a fresh container): nothing to check.
+    ok('untracked: no git index — skipped');
+    return;
+  }
+  const tracked = r.stdout.split('\n').filter(Boolean);
+  const problems = [];
+  for (const prefix of MUST_BE_UNTRACKED) {
+    const hits = tracked.filter((f) => f === prefix.replace(/\/$/, '') || f.startsWith(prefix));
+    if (hits.length) {
+      problems.push(
+        `${hits.length} file(s) under ${prefix} are tracked by git: ${hits.slice(0, 3).join(', ')}` +
+          (hits.length > 3 ? ', …' : '') +
+          '\n        these are build artefacts; a tracked copy can be stale and the build ' +
+          'does not check\n        freshness. Untrack them: git rm --cached -r <path>'
+      );
+    }
+  }
+  if (problems.length) {
+    for (const p of problems) fail('untracked', p);
+    return;
+  }
+  ok(`untracked: ${MUST_BE_UNTRACKED.length} artefact trees are not in the git index`);
+}
 
 /** Run a repo script in-process tree; returns true when it exits 0. */
 function runScript(gate, script, args, label) {
@@ -291,10 +537,17 @@ function runScript(gate, script, args, label) {
 const GATES = {
   residue: gateResidue,
   bridge: gateBridge,
+  tree: gateTree,
   renderer: () => runScript('renderer', path.join(ROOT, 'scripts', 'lint-renderer.js'), [], 'renderer: lint + i18n parity clean'),
   ui: () => runScript('ui', path.join(ROOT, 'scripts', 'ui-audit.js'), [], 'ui: no dead controls / theme violations'),
   i18n: () => runScript('i18n', path.join(ROOT, 'scripts', 'tauri-i18n.js'), [], 'i18n: every Rust sentence has a zh mapping'),
-  dist: () => runScript('dist', DIST_CHECK, ['--check'], 'dist: tauri-shell/dist matches src/renderer')
+  dist: () => runScript('dist', DIST_CHECK, ['--check'], 'dist: tauri-shell/dist matches src/renderer'),
+  // `tauri-shell/dist/` is a build artefact. If it is tracked again, a stale
+  // copy can be committed and then compiled into the executable — the build
+  // does not check freshness. The `beforeBuildCommand` in tauri.conf.json
+  // regenerates it on every build, so tracking it buys nothing and risks
+  // shipping an old UI.
+  untracked: gateUntracked
 };
 
 const wanted = process.argv.slice(2).filter((a) => !a.startsWith('-'));

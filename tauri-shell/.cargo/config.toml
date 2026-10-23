@@ -1,0 +1,32 @@
+# Incremental compilation stays OFF for this workspace, at the config layer that wins.
+#
+# `Cargo.toml` already says `[profile.dev] incremental = false`, but that key is
+# the WEAKEST of the three places the setting can live. Measured on cargo 1.99.1
+# with a 6-case matrix: whenever a `[build] incremental` exists anywhere in the
+# config chain, it wins over `[profile.*] incremental` in both directions --
+# a global `true` silently re-enabled incremental here despite the profile
+# saying `false`, and a config `true` overrode a profile `false` too.
+#
+# This machine's ~/.cargo/config.toml carries `[build] incremental = true`
+# (written for all projects), which is why the older `target/` trees grew
+# incremental caches of 629 MB (debug) and 2.5 GB (release) even though the
+# profile asked for none. Note the key name matters: writing
+# `[profile.dev] incremental = false` *here* would NOT help, only `[build]`.
+#
+# A project-level `.cargo/config.toml` takes precedence over the home-directory
+# one, so this file pins the value for this workspace without touching a
+# machine-wide setting that other Rust projects may legitimately rely on.
+#
+# Cargo discovers this file by walking UP from the current working directory,
+# not from `--manifest-path`. It therefore has to sit at the WORKSPACE root
+# (`tauri-shell/`), not inside one member: the builders now run with cwd =
+# `tauri-shell/` (scripts/package-release.js, tauri-shell/stage-core-bins.js)
+# as well as `tauri-shell/src-tauri` (the release workflow), and only a
+# file at the root is found from both.
+#
+# Escape hatch, if a build really does need the cache: CARGO_INCREMENTAL=1
+# overrides this file (env beats config). Unset it afterwards -- note that
+# CARGO_INCREMENTAL only honours the literals `0` and `1`; values like `true`
+# or a typo'd variable name are silently ignored.
+[build]
+incremental = false

@@ -1,38 +1,24 @@
 [package]
 name = "agentkeeper-shell"
 version = "0.2.0"
-description = "AgentKeeper Tauri shell (stage 2: Rust core scanner)"
+description = "AgentKeeper desktop shell (Tauri 2)"
 authors = ["AgentKeeper"]
 edition = "2021"
 rust-version = "1.77"
-# The GUI binary. `cargo tauri build` refuses to guess which of the three
-# binaries in this crate is the app, and picking wrong silently ships a CLI
-# instead of the shell.
+# The GUI binary — the ONLY binary in this crate. `cargo tauri build` refuses to
+# guess which of a crate's binaries is the app, and picking wrong silently
+# ships a CLI instead of the shell.
+#
+# The other two binaries (`agentkeeper-mcp`, `ak-scan`) live in the
+# `agentkeeper-core` crate, which has no Tauri dependency. Keeping them here
+# would mean one crate, one dependency graph, one fat-LTO pass per binary:
+# the two headless CLIs would link a WebView stack they never call, and each
+# of them would pay a full cross-crate optimisation the GUI alone needs.
 default-run = "agentkeeper-shell"
 
 [lib]
 name = "agentkeeper_shell_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
-# Headless scanner: the same `core::scan` the GUI uses, without a window, so a
-# scan can be diffed in a shell (and `tests/assets.rs` can shell out to it).
-[[bin]]
-name = "ak-scan"
-path = "src/bin/ak-scan.rs"
-
-# The stdio MCP server an agent launches. Same crate, same `core::` modules as
-# the GUI — a second copy of the write path would drift, and this one IS the
-# write path from an agent's point of view.
-[[bin]]
-name = "agentkeeper-mcp"
-path = "src/bin/agentkeeper-mcp.rs"
-
-# `ak-store` (a headless replay of the write path, diffed byte-for-byte against
-# the pre-migration `core/store.js`) was removed on 2026-10-20 with
-# `scripts/tauri-write-parity.js`. Rust is the only implementation now, and
-# `tests/write_path.rs` guards it; the JS reference is no longer a spec to stay
-# equal to. Both halves are recoverable from tag `pre-electron-removal`
-# (commit 95b82f7, the last commit that carried the JS kernel).
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -41,54 +27,19 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
-# preserve_order keeps frontmatter key order identical to the JS `yaml`
-# package, so a skill's metadata panel does not reshuffle fields.
+# The asset core: scanning, validation, the store, the MCP server. It has no
+# Tauri dependency, so the headless binaries built from it stay small and link
+# fast. `lib.rs` re-exports it as `pub mod core`, so `core::…` paths — and the
+# integration tests' `agentkeeper_shell_lib::core::…` — read exactly as before.
+agentkeeper-core = { path = "../core" }
+# The shell itself only serialises command payloads. Everything else — the
+# scanner, the store, the YAML/TOML frontmatter, the HTTP client, DPAPI — is
+# the core's business, and the core owns those dependencies.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-sha2 = "0.10"
-# preserve_order matters for parity: `@iarna/toml` keeps key insertion order,
-# and `meta.envKeys` exposes that order to the UI.
-toml = { version = "0.8", features = ["preserve_order"] }
-serde_yaml_ng = "0.10"
-rayon = "1"
-# Security rules are the JS regexes verbatim (from the pre-migration
-# `core/security.js`); `regex` is a drop-in for every one of those patterns
-# (no backreferences, no lookaround).
-regex = "1"
-# The only network client in the tree. The deleted JS kernel used global
-# `fetch` for discovery and its update HTTP layer, so one small blocking client
-# (rustls + webpki roots, no async runtime) covers both without dragging in
-# tokio just to read a JSON document.
-ureq = { version = "2", features = ["json"] }
-# `enc1:` envelope for the update token (base64 of a DPAPI blob), and the
-# Win32 calls that produce it. DPAPI is the same primitive Electron's
-# `safeStorage` uses on Windows, so the ciphertext is interchangeable.
-base64 = "0.22"
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = "s"
-# `panic = "abort"` was here for size. It is gone because the MCP server relies
-# on `catch_unwind`: under `abort`, one `unwrap()` in a tool handler kills the
-# stdio process and the agent sees a dropped transport instead of an error.
-# Unwinding tables cost a few hundred KB; a dead server costs the feature.
-panic = "unwind"
-strip = true
-
-# ---------------------------------------------------------------------------
-# `debug` / `test` builds exist only to run `cargo test` and `cargo check`.
-# The default profile kept full LLVM debuginfo for all ~400 dependency crates
-# plus an incremental cache, which cost 7.4 GB — 2.5x the release tree that
-# actually ships. Nobody debugs through a native debugger here, so:
-#   - our own crate keeps line tables (panic messages still show file:line)
-#   - dependencies drop debuginfo entirely (they are the bulk)
-#   - incremental is off: its cache doubles the tree and only pays off when
-#     many tiny edits happen inside one session, which is not this workflow
-[profile.dev]
-debug = 1
-incremental = false
-
-[profile.dev.package."*"]
-debug = false
+# The release / dev / test profiles live in the workspace root
+# (`tauri-shell/Cargo.toml`). A `[profile.*]` table only applies to the
+# package that declares it, so keeping them here would have left the core
+# crate's binaries on cargo's defaults — unoptimised and unstripped, shipped
+# 50% larger.

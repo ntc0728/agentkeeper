@@ -14,12 +14,16 @@
   "private": true,
   "scripts": {
     "check": "node scripts/check.js",
-    "verify": "node scripts/check.js",
+    "test": "node scripts/test-affected.js",
+    "test:all": "node scripts/test-affected.js --all",
     "tauri:i18n": "node scripts/tauri-i18n.js",
     "tauri:sync": "node tauri-shell/copy-frontend.js",
     "tauri:check": "node tauri-shell/copy-frontend.js --check",
     "tauri:adapters": "node scripts/gen-adapters-snapshots.js",
-    "tauri:mcp-bin": "node tauri-shell/stage-mcp-bin.js"
+    "tauri:clean": "node tauri-shell/clean-build.js --apply",
+    "tauri:bundle": "node scripts/package-release.js",
+    "tauri:portable": "node scripts/package-release.js --portable-only",
+    "tauri:core-bins": "node tauri-shell/stage-core-bins.js"
   },
   "keywords": [
     "agent",

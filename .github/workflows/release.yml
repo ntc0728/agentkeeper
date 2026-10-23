@@ -1,7 +1,17 @@
 name: release
 
-# Tag-driven release: `git tag v0.3.0 && git push origin v0.3.0` builds the
-# Tauri NSIS installer and attaches it to a GitHub Release.
+# TWO release channels, one workflow:
+#
+#   1. tag push (`git tag v0.3.0 && git push origin v0.3.0`)  → FINAL release.
+#      Version is stamped from the tag; prerelease only for beta/rc/alpha.
+#   2. push to main → CI PRERELEASE `v<tree-version>-ci.<run_number>`.
+#      Every commit lands on the Releases page, but as a Pre-release: the
+#      in-app updater's stable channel reads `/releases/latest`
+#      (core/update/manager.rs:1110), which GitHub serves EXCLUDING
+#      prereleases — so a CI build can never hijack a stable user's
+#      "check for updates". The `-ci.N` suffix parses as a prerelease
+#      segment (core/update/version.rs:26) and sorts BELOW the tree
+#      version, so once v0.2.0 ships it outranks every 0.2.0-ci.* build.
 #
 # What the in-app updater actually consumes (see docs/UPDATE.md):
 #   GET /repos/{repo}/releases/latest  ->  pick one entry of `assets[]`
@@ -9,13 +19,20 @@ name: release
 #   *.exe  ·  not `-portable`/archive/`-win|-web|-linux|-mac`  ·  name matching
 #   /setup|install/  ·  then `updateAssetKeyword` ("AgentKeeper") in the name.
 # `AgentKeeper_0.2.0_x64-setup.exe` satisfies all of that, so **the installer
-# alone is the release payload** — no `latest.yml`, no `.blockmap`. Those were
-# electron-builder artefacts from the retired Electron build; the JS kernel
-# never parsed them.
+# alone is the release payload** — no `latest.yml`, no `.blockmap`.
 on:
   push:
+    branches: [main]
     tags: ['v*']
   workflow_dispatch:
+
+# One release build at a time per ref. A burst of main pushes cancels the
+# superseded runs instead of queueing five 15-minute builds; a tag build is
+# never cancelled by a later push (an interrupted release is worse than a
+# late one).
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 permissions:
   contents: write
@@ -26,11 +43,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Node has exactly one job left: generating tauri-shell/dist from
+      # Node has exactly one job: generating tauri-shell/dist from
       # src/renderer. copy-frontend.js has zero dependencies, so there is no
-      # `npm ci` any more — and there must not be one: package.json carries no
-      # dependencies at all since the Electron app (and its electron /
-      # electron-builder devDependencies) was deleted.
+      # `npm ci` — package.json carries no dependencies at all.
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -45,7 +60,9 @@ jobs:
         run: npm run tauri:i18n
 
       # tauri-shell/dist is git-ignored, so a fresh checkout has no frontend at
-      # all and `cargo tauri build` would bundle an empty app.
+      # all and `cargo tauri build` would bundle an empty app. Regenerating
+      # here also guarantees the executable carries the renderer as of this
+      # commit, not a stale local copy.
       - name: Generate the frontend bundle
         run: node tauri-shell/copy-frontend.js
 
@@ -62,6 +79,7 @@ jobs:
       # (`main`), not a version, so a non-`vX.Y.Z` ref keeps the version that
       # is already in the tree.
       - name: Stamp the release version
+        id: stamp
         shell: bash
         env:
           REF_NAME: ${{ github.ref_name }}
@@ -69,31 +87,45 @@ jobs:
           cat > "$RUNNER_TEMP/stamp-version.js" <<'NODE'
           const fs = require('fs');
           const confPath = 'tauri-shell/src-tauri/tauri.conf.json';
-          const cargoPath = 'tauri-shell/src-tauri/Cargo.toml';
+          // Both workspace members carry the version: the shell reports it in
+          // the UI, and the core reports it in the MCP server's serverInfo.
+          // A release where they disagree is a release where the agent and the
+          // GUI report different versions of the same program.
+          const cargoPaths = [
+            'tauri-shell/src-tauri/Cargo.toml',
+            'tauri-shell/core/Cargo.toml',
+          ];
           const ref = process.env.REF_NAME || '';
           const conf = JSON.parse(fs.readFileSync(confPath, 'utf8'));
           const current = conf.version;
           const m = /^v(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/.exec(ref);
           if (!m) {
             console.log(`ref ${JSON.stringify(ref)} is not a vX.Y.Z tag — keeping ${current}`);
+            // main pushes have no version in the ref; the tree version feeds
+            // the synthetic release tag `v<version>-ci.<run_number>`.
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${current}\n`);
             process.exit(0);
           }
           const version = m[1];
           if (version === current) {
             console.log(`release version: ${version} (already in the tree)`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);
             process.exit(0);
           }
           conf.version = version;
           fs.writeFileSync(confPath, JSON.stringify(conf, null, 2) + '\n');
-          // First `version = "…"` in Cargo.toml is `[package] version`.
-          const cargo = fs.readFileSync(cargoPath, 'utf8');
-          const patched = cargo.replace(/^(version = )"[^"]*"/m, `$1"${version}"`);
-          if (patched === cargo) {
-            console.error(`could not patch [package] version in ${cargoPath}`);
-            process.exit(1);
+          for (const cargoPath of cargoPaths) {
+            // First `version = "…"` in Cargo.toml is `[package] version`.
+            const cargo = fs.readFileSync(cargoPath, 'utf8');
+            const patched = cargo.replace(/^(version = )"[^"]*"/m, `$1"${version}"`);
+            if (patched === cargo) {
+              console.error(`could not patch [package] version in ${cargoPath}`);
+              process.exit(1);
+            }
+            fs.writeFileSync(cargoPath, patched);
           }
-          fs.writeFileSync(cargoPath, patched);
           console.log(`release version: ${current} -> ${version}`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);
           NODE
           node "$RUNNER_TEMP/stamp-version.js"
 
@@ -103,13 +135,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: tauri-shell/src-tauri
+          workspaces: tauri-shell -> target
 
       # `cargo tauri build` is used instead of tauri-apps/tauri-action@v0 on
       # purpose:
       #   · tauri-action auto-runs the package manager of whatever package.json
-      #     it finds — a step this pipeline neither needs nor wants (it used to
-      #     pull Electron, only to have the deletion undo it);
+      #     it finds — a step this pipeline neither needs nor wants;
       #   · it is a floating `@v0` tag in a pipeline that publishes binaries;
       #   · this job needs to run its own steps before the build anyway
       #     (frontend generation, version stamp), which is the same amount of
@@ -118,26 +149,22 @@ jobs:
       - name: Install the Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
 
-      # `bundle.resources` used to ship ../../demo-projects, which was
-      # git-ignored, so a clean checkout had none and the build hard-failed with
-      # "resource path `…` doesn't exist". That entry is gone, so the workaround
-      # that created the directory is gone with it. If a resource is ever added
-      # back, it must be tracked in git — a `mkdir` here would ship an empty one.
-
-      # `bundle.externalBin` ships the MCP stdio server beside the app exe, at
-      # `%LOCALAPPDATA%\AgentKeeper\agentkeeper-mcp.exe` — the path
-      # docs/MCP-SERVER.md tells users to paste into their agent config.
+      # The MCP server and the headless scanner live in the `agentkeeper-core`
+      # crate, not in the Tauri crate. `cargo tauri build` collects binaries
+      # from the crate it builds, so it cannot see them; `bundle.externalBin`
+      # is how a binary from elsewhere gets shipped.
       #
-      # It has to exist BEFORE `cargo tauri build` (an external bin Tauri cannot
-      # resolve is a hard config error) and it cannot be committed: git-ignored,
-      # several MB, rebuilt from source. `cargo tauri build` builds the app
-      # binary only, never the other `[[bin]]` targets, so the staging script
-      # builds it and copies it to
-      # `src-tauri/binaries/agentkeeper-mcp-x86_64-pc-windows-msvc.exe`.
-      # Node and cargo are already set up above; still no `npm ci`.
-      - name: Stage the MCP server binary
+      # This step is NOT circular. It was, when the sidecars were `[[bin]]`
+      # targets of the Tauri crate itself: `tauri-build` runs as that crate's
+      # build script for every target, so a clean target/ could not build a
+      # sidecar the build script insisted already existed. The core crate has
+      # no build script, so it is built by something that does not care.
+      #
+      # The staged files land in `tauri-shell/src-tauri/binaries/`, which is
+      # what `bundle.externalBin` resolves against.
+      - name: Stage the core binaries
         working-directory: tauri-shell
-        run: node stage-mcp-bin.js
+        run: node stage-core-bins.js
 
       # No `--target`: the runner's host triple is already
       # x86_64-pc-windows-msvc, and keeping the default target puts the bundle
@@ -146,30 +173,63 @@ jobs:
         working-directory: tauri-shell/src-tauri
         run: cargo tauri build
 
+      # Trim what the build left behind, then prove it is gone.
+      #
+      # `target/` is never cached or uploaded here, so this is not about CI
+      # disk -- it is the only place the rule can be *enforced* rather than
+      # remembered. A `cargo build` leaves ~180 MB of build-script .pdb plus an
+      # orphaned build dir per Cargo.toml change; locally that reached 7.9 GB
+      # before anything failed. The `tree` gate is what fails next time.
+      #
+      # Runs BEFORE "Collect artefacts": clean-build.js only touches pdb /
+      # build / incremental and never the bundled installer.
+      - name: Trim build tree
+        run: node tauri-shell/clean-build.js --apply
+
+      - name: Verify the build tree is clean
+        run: node scripts/check.js tree
+
       - name: Collect artefacts
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist-artifacts
           shopt -s nullglob
-          exe=(tauri-shell/src-tauri/target/release/bundle/nsis/*.exe)
+          exe=(tauri-shell/target/release/bundle/nsis/*.exe)
           if [ ${#exe[@]} -eq 0 ]; then
-            echo "::error::no NSIS installer under tauri-shell/src-tauri/target/release/bundle/nsis"
+            echo "::error::no NSIS installer under tauri-shell/target/release/bundle/nsis"
             exit 1
           fi
           cp "${exe[@]}" dist-artifacts/
+
+          # The portable zip is built by the same script the README documents,
+          # so CI and a local run cannot drift. `--no-build`: the installer was
+          # just built above, and re-running `cargo tauri build` here would
+          # spend minutes producing the same binary.
+          #
+          # Publishing the zip is safe for the in-app updater: `pick_installer`
+          # rejects it twice over — `-?portable\b` and the `.zip` archive pattern
+          # (core/update/version.rs asset_patterns). Only the NSIS setup competes.
+          node scripts/package-release.js --no-build
+          cp release/*.zip dist-artifacts/
           ls -l dist-artifacts
 
       - name: Publish to the Release
         uses: softprops/action-gh-release@v2
         with:
           # Tag-push builds attach to the release GitHub creates for the tag;
-          # a manual run creates one on demand.
+          # a main-push build gets a synthetic tag `v<version>-ci.<run>`.
+          # Version source, in order: the vX.Y.Z ref, else the tree
+          # (stamp-version printed which one applied).
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}-ci.{1}', steps.stamp.outputs.version, github.run_number) }}
           generate_release_notes: true
-          draft: false
-          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') }}
+          # main builds are ALWAYS prerelease: that is what keeps them out of
+          # /releases/latest and away from stable-channel updaters (see header).
+          # Tag builds follow the beta/rc/alpha naming.
+          prerelease: ${{ github.ref_type != 'tag' || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') }}
           files: |
             dist-artifacts/*.exe
+            dist-artifacts/*.zip
 
       - uses: actions/upload-artifact@v4
         with:

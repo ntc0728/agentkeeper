@@ -3,8 +3,9 @@
 /**
  * Build tauri-shell/dist from src/renderer.
  *
- * The Tauri shell serves the *same* frontend as Electron — no fork, no edits.
- * Only two deltas exist, and both are applied here so they can never drift:
+ * `src/renderer` is the only source of the frontend; `dist` is derived, so no
+ * hand edit ever survives here. Only two deltas exist, and both are applied
+ * here so they can never drift:
  *
  *   1. <html data-shell="tauri">  — lets CSS/JS branch on the host shell
  *   2. <script src="tauri-bridge.js">  — the window.ak shim over invoke()
@@ -28,10 +29,10 @@ const DIST = path.join(SHELL, 'dist');
 const PLAIN = ['theme-init.js', 'engine-zh.js', 'i18n.js', 'app.js', 'styles.css'];
 
 const BRIDGE_ANCHOR = '  <script src="engine-zh.js"></script>';
-const BRIDGE_INJECT = [
+const BRIDGE_INJECT_LINES = [
   '  <!-- Tauri shell: exposes window.__TAURI__.core.invoke -->',
   '  <script src="tauri-bridge.js"></script>',
-].join('\n');
+];
 
 const HTML_ANCHOR = '<html lang="en" data-theme="light">';
 const HTML_REPLACED = '<html lang="en" data-theme="light" data-shell="tauri">';
@@ -71,8 +72,19 @@ if (html) {
   }
 }
 
+// The injected lines must use the SAME line ending the source file uses.
+// A CRLF source with LF-injected lines produces a file whose bytes no longer
+// match what this script computes — so `--check` would report `dist/index.html`
+// is stale forever, and the copy it writes would differ from the copy it
+// verifies. The newline is detected from the source itself, not from the
+// anchor (the anchor is one line and carries no newline).
+const NEWLINE = html && html.includes('\r\n') ? '\r\n' : '\n';
+const BRIDGE_INJECT = BRIDGE_INJECT_LINES.join(NEWLINE);
+
 const htmlOut = html
-  ? html.replace(HTML_ANCHOR, HTML_REPLACED).replace(BRIDGE_ANCHOR, BRIDGE_INJECT + '\n' + BRIDGE_ANCHOR)
+  ? html
+      .replace(HTML_ANCHOR, HTML_REPLACED)
+      .replace(BRIDGE_ANCHOR, BRIDGE_INJECT + NEWLINE + BRIDGE_ANCHOR)
   : '';
 
 /* ---- 2. assemble the full expected file set ---- */

@@ -1,0 +1,55 @@
+[package]
+name = "agentkeeper-core"
+version = "0.2.0"
+description = "AgentKeeper asset core: scanning, validation, store, MCP server — no Tauri dependency"
+authors = ["AgentKeeper"]
+edition = "2021"
+rust-version = "1.77"
+
+# The core is a library only. Every binary that needs it declares a dependency
+# on it; none of them inherits a Tauri dependency from here, because there
+# isn't one. That separation is the point of the crate split: the headless
+# `agentkeeper-mcp` and `ak-scan` binaries must not drag a WebView stack into
+# their link, and the core is what they share with the GUI.
+[lib]
+name = "agentkeeper_core"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+# The stdio MCP server an agent launches. Same `core::` modules as the GUI — a
+# second copy of the write path would drift, and this one IS the write path
+# from an agent's point of view. The GUI reaches the same modules through the
+# `agentkeeper-shell` crate's dependency on this one.
+[[bin]]
+name = "agentkeeper-mcp"
+path = "src/bin/agentkeeper-mcp.rs"
+
+# Headless scanner: the same `core::scan` the GUI uses, without a window, so a
+# scan can be diffed in a shell.
+[[bin]]
+name = "ak-scan"
+path = "src/bin/ak-scan.rs"
+
+[dependencies]
+# preserve_order keeps frontmatter key order as written, so a skill's metadata
+# panel does not reshuffle fields.
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+# preserve_order matters for parity: `@iarna/toml` keeps key insertion order,
+# and `meta.envKeys` exposes that order to the UI.
+toml = { version = "0.8", features = ["preserve_order"] }
+serde_yaml_ng = "0.10"
+rayon = "1"
+# The security rule patterns use no backreferences and no lookaround, so
+# `regex` covers every one of them.
+regex = "1"
+# The only network client in the tree: one small blocking client (rustls +
+# webpki roots, no async runtime) covers discovery and the update HTTP layer
+# without dragging in tokio just to read a JSON document.
+ureq = { version = "2", features = ["json"] }
+# `enc1:` envelope for the update token (base64 of a DPAPI blob), and the
+# Win32 calls that produce it. The token is wrapped in DPAPI with user scope and
+# no entropy, so the ciphertext is interchangeable for the same user.
+base64 = "0.22"
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

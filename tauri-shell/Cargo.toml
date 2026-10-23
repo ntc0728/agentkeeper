@@ -1,0 +1,101 @@
+# AgentKeeper Rust workspace.
+#
+# Two crates, split along the line the code already draws:
+#
+#   core/       the asset core — scanning, validation, store, MCP server.
+#               No Tauri dependency, so the headless binaries built from it
+#               (`agentkeeper-mcp`, `ak-scan`) link a fraction of the
+#               dependency graph the GUI does and cost a fraction of the
+#               fat-LTO time.
+#   src-tauri/  the Tauri desktop shell — commands, window, updater wiring.
+#               Depends on the core; the core depends on nobody.
+#
+# The split is what makes "the core never sees a Tauri type" a compiler
+# guarantee instead of a convention.
+[workspace]
+members = ["core", "src-tauri"]
+resolver = "2"
+
+# ---------------------------------------------------------------------------
+# The release profile lives HERE, not in `src-tauri/Cargo.toml`.
+#
+# A `[profile.*]` table only applies to the package that declares it, so with
+# the core as a separate crate the headless binaries would have been built
+# with cargo's defaults — opt-level 0, no LTO, no strip — and shipped 50%
+# larger and unoptimised. Workspace-root profiles apply to every member.
+# ---------------------------------------------------------------------------
+
+# TWO PROFILES, TWO JOBS. See docs/BUILDING.md for how to pick.
+#
+# `[profile.release]` is what SHIPS: it is optimised for the artefact's size.
+# `[profile.dev]` is what you ITERATE with: it is optimised for how long you
+# wait. They are different profiles on purpose — a single profile cannot be
+# both.
+#
+# Measured on a 16-thread desktop, changing one
+# line of the shell's own source and rebuilding everything:
+#
+#   lto = true,  codegen-units = 1    →  212 s     (fat LTO, single codegen unit)
+#   lto = false, codegen-units = 16   →   68 s     (this file's setting)
+#
+# Fat LTO re-runs the cross-crate optimisation for EVERY binary in the
+# workspace, and `codegen-units = 1` pins LLVM to one thread while it does.
+# The price is artefact size: the shell goes from 10.4 MiB to ~12.5 MiB
+# (+20%), the installer from 3.63 MiB to ~4.0 MiB.
+#
+# That trade is worth making, because the release profile is now used for
+# BUILDING AN INSTALLER, not for every keystroke. Iteration runs on
+# `[profile.dev]`, which is ~8 s. See docs/BUILDING.md.
+[profile.release]
+codegen-units = 16
+lto = false
+opt-level = "s"
+# `panic = "abort"` was here for size. It is gone because the MCP server relies
+# on `catch_unwind`: under `abort`, one `unwrap()` in a tool handler kills the
+# stdio process and the agent sees a dropped transport instead of an error.
+# Unwinding tables cost a few hundred KB; a dead server costs the feature.
+panic = "unwind"
+strip = true
+
+# The shipping profile's own artefact size is not the only thing that matters:
+# a release build also has to be REPRODUCIBLE in size across the workspace
+# members. `codegen-units = 16` is what makes the two core binaries link in
+# parallel with the shell's, instead of queueing behind it.
+#
+# If a future change makes the shipped binary much larger again, the lever is
+# `lto = "thin"` (slower than `false`, smaller than `true` — measured 138 s vs
+# 68 s for the same rebuild) rather than going back to fat LTO.
+
+# ---------------------------------------------------------------------------
+# `debug` / `test` builds exist only to run `cargo test` and `cargo check`.
+# The default profile kept full LLVM debuginfo for all ~400 dependency crates
+# plus an incremental cache, which cost 7.4 GB — 2.5x the release tree that
+# actually ships. Nobody debugs through a native debugger here, so:
+#   - our own crates keep line tables (panic messages still show file:line)
+#   - dependencies drop debuginfo entirely (they are the bulk)
+#   - incremental is off: its cache doubles the tree and only pays off when
+#     many tiny edits happen inside one session, which is not this workflow
+[profile.dev]
+debug = 1
+incremental = false
+
+[profile.dev.package."*"]
+debug = false
+
+# build script 及其依赖默认按 dev profile 另编一套（host 侧），与 target 侧的
+# release 产物互不复用。tauri-build 要跑 build script，于是 tauri-utils / syn /
+# serde / regex 等同时出现在两条链上，各编一份。实测 tauri-utils 两份 feature
+# 完全相同（[brotli, compression, resources, walkdir]），体积 50.0 MB vs
+# 25.9 MB，差异只来自 profile。
+#
+# 效果（实测，干净 release 构建）：宿主侧依赖的 debuginfo 被剥掉，
+# release 树 1791 MB -> 1396 MB（-22%）。
+#
+# 注意仍未消除的部分，别指望这一段能解决：
+#   · build/ 下仍会留 100 个 build_script_build-*.pdb（约 107 MB）。cargo 对
+#     build script 自身产物的 pdb 不受 build-override 的 strip 约束。
+#   · .rlib 695 MB + .rmeta 381 MB 是依赖编译的必需产物，成对存在，不能删。
+# opt-level 保持默认，避免改变 build script 自身的执行行为。
+[profile.release.build-override]
+debug = 0
+strip = "symbols"
