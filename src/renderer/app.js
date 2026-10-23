@@ -6,13 +6,12 @@
 
 /* Engine-layer message translation (core/ + ipc errors are English; the
    zh UI must never show them raw — no-degradation policy). */
-const { zhText, zhField, zhError } = window.__akEngineZh;
+const { zhText, zhField, zhError, zhCode } = window.__akEngineZh;
 
 const S = {
   view: 'overview',  boot: null,
   data: null,
   settings: {},
-  pending: [],
   lastIssueCount: null,
   localStats: null,
   filter: '',
@@ -23,7 +22,6 @@ const S = {
   sortKey: null,
   onlyShadowed: false,
   page: 1,
-  expandPending: false,
   checked: new Set(),
   selected: null,
   lastDiff: null,
@@ -107,11 +105,9 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
 /**
  * Token counts and other plain magnitudes, with the unit ladder spelled out.
  *
- * The dashboard used to render estTokens/1000 with a k suffix, which put
- * "102909.9k" in a stat card — a number nobody can read and that no SI prefix
- * produces (k is 10³, so the correct SI form of 102,909,900 is 102.9M). English
- * copy review found it; the fix is one formatter, used everywhere a count is
- * shown, so the boundary cannot drift between views.
+ * One formatter for every count shown in the UI. A hundreds-of-millions value
+ * must render as "102.9M": dividing by 1000 and appending "k" produces
+ * "102909.9k", which is not an SI form of anything.
  */
 function count(n) {
   const v = Number(n) || 0;
@@ -327,10 +323,10 @@ function wireErrorReporting() {
 /**
  * An error message with a way out.
  *
- * A failed boot used to write one line into #view-root and leave a restart as
- * the only recovery; a failed view repaint did the same on every navigation.
- * The panel keeps the message and adds one button that re-runs exactly the
- * step that failed (boot → bootstrap+scan, scan → scan, view → its data load).
+ * A failed boot or a failed repaint must not leave a restart as the only
+ * recovery. The panel keeps the message and adds one button that re-runs
+ * exactly the step that failed (boot → bootstrap+scan, scan → scan, view →
+ * its data load).
  */
 function errorPanel(message, retry) {
   const btn = el('button', { class: 'btn sm', type: 'button' }, t('common.retry'));
@@ -347,9 +343,8 @@ function errorPanel(message, retry) {
  * Compact "this panel could not load its own data" + retry.
  *
  * The view-level error panel is too heavy for a single row inside a card (the
- * local-stats line, the baseline body). These panels used to show "—" or an
- * endless "loading…" with no way out; the retry re-renders the view, which
- * re-runs the load.
+ * local-stats line, the baseline body). A bare "—" or an endless "loading…"
+ * leaves no way out; the retry re-renders the view, which re-runs the load.
  */
 function inlineRetry(box, retry) {
   box.textContent = '';
@@ -460,6 +455,82 @@ function returnFocus(node) {
   if (nav) nav.focus();
 }
 
+/**
+ * Report a failed write, and distinguish the three failures that are not the
+ * same thing to the user.
+ *
+ * 1. The write was refused before it started (`store.snapshotTooLarge`): the
+ *    asset is bigger than the undo budget, so *nothing* was written and the
+ *    tree is exactly as it was. A sentence is the whole story.
+ * 2. The write ran and the undo put everything back: nothing on disk changed.
+ *    Again a sentence is the whole story.
+ * 3. The write ran and the undo could NOT put everything back
+ *    (`store.restoreIncomplete` + `restoreErrors`): the tree is now in a state
+ *    nobody chose. That is a data problem the user has to see in full, with
+ *    every path named, because they are the only ones who can fix it by hand.
+ *    A one-line toast was the reason a half-restored directory could sit there
+ *    unnoticed.
+ *
+ * `restoreErrors` is an array of entries carrying a path, a code and a
+ * detail; `restoreError` is the joined legacy string. The codes are stable,
+ * so the wording is chosen by looking at them rather than at parsing an
+ * English sentence.
+ */
+function reportWriteFailure(r, fallbackKey) {
+  if (!r || r.ok !== false) return toast((r && r.error) || t(fallbackKey), 'err');
+  const code = r.errorCode || '';
+
+  // Case 1 — refused before any write.
+  if (code === STORE_SNAPSHOT_TOO_LARGE) {
+    return toast(t('restore.toast.tooLarge'), 'err');
+  }
+
+  const restores = Array.isArray(r.restoreErrors)
+    ? r.restoreErrors
+    : (r.restoreError ? [{ path: '', code: '', detail: String(r.restoreError) }] : []);
+  // Case 2 — failed, but the undo was clean.
+  if (!restores.length) {
+    return toast(r.error || t(fallbackKey), 'err');
+  }
+
+  // Case 3 — partially restored. A symlink is only one way this happens, so
+  // the advice line is chosen by what actually failed rather than by a single
+  // global guess.
+  const symlink = restores.some((e) => e && e.code === STORE_SYMLINK_RESTORE_FAILED);
+  const body = el('div', {},
+    el('div', { class: 'alert err' }, t(symlink ? 'restore.headline.symlink' : 'restore.headline.partial')),
+    el('div', { class: 'muted fs-12 mb-12' }, t('restore.intro')),
+    el('ul', { class: 'restore-list' },
+      ...restores.map((e) => {
+        const path = e && e.path ? String(e.path) : t('restore.unknownPath');
+        // The engine sends a path / code / detail triple; zhError reads
+        // code + params. The path is passed as the single parameter so a
+        // sentence with a `§1` placeholder resolves against it, and the
+        // detail string is the fallback when the code is unknown to the
+        // dictionary (then zhText maps the English sentence).
+        const detail = e && e.code && typeof e === 'object'
+          ? (zhCode(e.code, [e.path]) || zhError(e.detail))
+          : zhError(String((e && e.detail) || e));
+        return el('li', {},
+          el('div', { class: 'mono fs-11' }, path),
+          el('div', { class: 'muted fs-11' }, detail));
+      })),
+    el('div', { class: 'muted fs-11 mt-8' }, t(symlink ? 'restore.advice.symlink' : 'restore.advice')));
+  openModal(t('restore.title'), body, [
+    el('button', { class: 'btn', onclick: closeModal }, t('common.close'))
+  ]);
+  toast(t(symlink ? 'restore.toast.symlink' : 'restore.toast.partial'), 'err');
+}
+
+/* Error codes the main process emits on a failed transaction (store.rs). Kept
+ * as literals here on purpose: the bridge crosses a string boundary, and a
+ * typo in one file would otherwise surface as a generic fallback rather than as
+ * a missing translation. `scripts/check.js bridge` does not cover values, only
+ * call shapes, so this list is checked against store.rs by hand. */
+const STORE_SNAPSHOT_TOO_LARGE = 'store.snapshotTooLarge';
+const STORE_RESTORE_INCOMPLETE = 'store.restoreIncomplete';
+const STORE_SYMLINK_RESTORE_FAILED = 'store.symlinkRestoreFailed';
+
 function openModal(title, bodyNode, footNodes = []) {
   modalReturnFocus = document.activeElement;
   $('#modal-title').textContent = title;
@@ -474,11 +545,25 @@ function openModal(title, bodyNode, footNodes = []) {
   focusInto($('#modal'));
 }
 
+/**
+ * The confirm promise that is currently waiting for an answer.
+ *
+ * A dialog can go away through paths its own buttons do not control: Escape,
+ * the scrim, ✕. Before this, the promise stayed pending forever — which was
+ * invisible for a delete (nothing happened, correctly) but is not for
+ * `confirmWrite`, whose caller has to rebuild the editor it covered. One
+ * registry, because there is exactly one #modal.
+ */
+let pendingConfirm = null;
+
 function closeModal() {
   const scrim = $('#modal-scrim');
   if (!scrim.classList.contains('on')) return;
   scrim.classList.remove('on');
   scrim.setAttribute('aria-hidden', 'true');
+  // Dismissing a confirmation is an answer: "no". Resolving after the visual
+  // close lets a caller restore whatever the dialog was covering.
+  if (pendingConfirm) pendingConfirm.settle(false);
   const back = modalReturnFocus;
   modalReturnFocus = null;
   returnFocus(back);
@@ -486,12 +571,146 @@ function closeModal() {
 
 function confirmDialog({ title, message, confirmLabel = t('common.confirm'), danger = false, extra = null }) {
   return new Promise((resolve) => {
+    let settled = false;
+    const entry = {
+      settle(v) {
+        if (settled) return;
+        settled = true;
+        if (pendingConfirm === entry) pendingConfirm = null;
+        resolve(v);
+      }
+    };
+    pendingConfirm = entry;
     const body = el('div', {}, el('div', { class: 'pre-wrap' }, message));
     if (extra) body.appendChild(extra);
-    const ok = el('button', { class: `btn ${danger ? 'danger' : 'primary'}`, onclick: () => { closeModal(); resolve(true); } }, confirmLabel);
-    const cancel = el('button', { class: 'btn', onclick: () => { closeModal(); resolve(false); } }, t('common.cancel'));
+    // Settle BEFORE closing: closeModal() answers any still-pending confirm with
+    // false, and that would beat this true.
+    const ok = el('button', { class: `btn ${danger ? 'danger' : 'primary'}`, onclick: () => { entry.settle(true); closeModal(); } }, confirmLabel);
+    const cancel = el('button', { class: 'btn', onclick: () => { entry.settle(false); closeModal(); } }, t('common.cancel'));
     openModal(title, body, [cancel, ok]);
   });
+}
+
+/**
+ * Snapshot the dialog on screen, so a stacked confirmation can put it back.
+ *
+ * The shell has exactly one #modal, so opening the write check while an editor
+ * is up replaces that editor's DOM. The nodes are moved (appendChild), not
+ * cloned, so keeping references restores the *same* inputs — every keystroke
+ * the user already typed survives cancelling the confirmation.
+ */
+function snapshotModal() {
+  const scrim = $('#modal-scrim');
+  if (!scrim || !scrim.classList.contains('on')) return null;
+  return {
+    title: $('#modal-title').textContent,
+    body: [...$('#modal-body').childNodes],
+    foot: [...$('#modal-foot').childNodes],
+    back: modalReturnFocus
+  };
+}
+
+/**
+ * Put a snapshot back on screen.
+ *
+ * Called from two places for two reasons: a cancelled write check (the editor
+ * must look untouched) and a write that failed after its check (the caller
+ * only toasts, so the form has to come back or the user loses it).
+ */
+function restoreModal(snap) {
+  if (!snap) return;
+  $('#modal-title').textContent = snap.title;
+  const body = $('#modal-body');
+  body.innerHTML = '';
+  for (const n of snap.body) body.appendChild(n);
+  const foot = $('#modal-foot');
+  foot.innerHTML = '';
+  for (const n of snap.foot) foot.appendChild(n);
+  modalReturnFocus = snap.back;
+  $('#modal-scrim').classList.add('on');
+  $('#modal-scrim').setAttribute('aria-hidden', 'false');
+  focusInto($('#modal'));
+}
+
+/**
+ * Destination directories for a set of distribution targets.
+ *
+ * A target is (agent × scope × project) and the adapter declares the relative
+ * directory per kind, so the real path is only knowable here. `withLabel`
+ * prefixes the agent name: two agents can declare the same relative dir under
+ * different homes, and the path alone would not tell them apart in the dialog.
+ */
+function targetPaths(picks, key, withLabel = false) {
+  const out = [];
+  for (const tg of picks || []) {
+    const agent = (S.boot?.agents || []).find((x) => x.id === tg.agentId);
+    if (!agent) continue;
+    const rels = tg.scope === 'project' ? (agent.projects?.[key] || []) : (agent.globals?.[key] || []);
+    const project = tg.scope === 'project'
+      ? (S.data?.projects || []).find((p) => p.id === tg.projectId)
+      : null;
+    const base = project ? project.dir : (agent.home || '');
+    const label = [zhText(agent.label) || agent.id, project ? project.name : ''].filter(Boolean).join(' · ');
+    for (const rel of rels) {
+      const dir = base ? base.replace(/[\\/]+$/, '') + '\\' + rel.replace(/^[\\/]+/, '') : rel;
+      out.push(withLabel ? `${label} — ${dir}` : dir);
+    }
+  }
+  return out;
+}
+
+/**
+ * Every mutation of a real agent file goes through this: one dialog, listing
+ * what is about to change, before a byte is written. Settings are excluded —
+ * they live in the app's own store, not in an agent directory.
+ *
+ * Built on confirmDialog rather than a second modal implementation: this shell
+ * grants no dialog-plugin ACL, so `window.confirm` rejects instead of asking,
+ * and two modal paths would drift apart on focus handling.
+ *
+ * Covering dialog: the shell has one #modal, so when this check is layered over
+ * an editor its nodes are moved aside. They are put back when the answer is
+ * "no" — and a write that then fails puts them back through reopenCovered(),
+ * because the caller's failure branch only toasts and the user's typed form
+ * must not disappear with the error.
+ */
+let coveredSnap = null;
+
+/** Put the dialog the last check covered back on screen (after a failed write). */
+function reopenCovered() {
+  const snap = coveredSnap;
+  coveredSnap = null;
+  restoreModal(snap);
+}
+
+async function confirmWrite({ title, action, targets, detail, danger = false }) {
+  const list = (Array.isArray(targets) ? targets : [targets]).filter(Boolean).map(String);
+  const MAX = 10;
+  // A path list, not a sentence: joined paths wrap mid-segment and stop being
+  // readable exactly where the user needs to compare them.
+  const extra = el('div', {},
+    list.length
+      ? el('ul', { class: 'write-targets mono fs-11' },
+          ...list.slice(0, MAX).map((p) => el('li', {}, p)),
+          list.length > MAX ? el('li', { class: 'muted' }, t('confirm.moreTargets', { n: list.length - MAX })) : null)
+      : null,
+    el('div', { class: 'alert info mt-12' }, t('confirm.writeBackupNote')));
+  // Null when nothing was covered (a drawer or a table row triggered this), so
+  // every caller gets the same behaviour without a flag of its own.
+  const snap = snapshotModal();
+  coveredSnap = snap;
+  const ok = await confirmDialog({
+    title: title || t('confirm.writeTitle'),
+    message: [detail, t('confirm.writeBody')].filter(Boolean).join('\n\n'),
+    confirmLabel: action || t('common.confirm'),
+    danger,
+    extra
+  });
+  // Restored eagerly on cancel: the editor has to look untouched the moment the
+  // check closes. On success it stays hidden, so the form cannot blink up behind
+  // the dialog during the IPC round-trip; closeModal() dismisses it as before.
+  if (!ok) { reopenCovered(); return false; }
+  return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -595,16 +814,30 @@ function openDrawer(title, node) {
 /**
  * The one and only exit for the drawer.
  *
- * X, the scrim and Escape all come through here — previously the scrim and
- * Escape unhooked the `.on` class inline and dropped `S.dirty` on the floor,
- * so an unsaved edit was discarded with no confirmation (only X asked).
- * The confirm runs BEFORE the drawer is hidden: refusing it must leave the
- * editor exactly where the user left it.
+ * X, the scrim and Escape all come through here, so the unsaved-edit guard
+ * cannot be bypassed by one of the three. The confirm runs BEFORE the drawer
+ * is hidden: refusing it leaves the editor exactly where the user left it.
  */
-function closeDrawer() {
+async function closeDrawer() {
   const d = $('#drawer');
   if (!d.classList.contains('on')) return;
-  if (S.dirty && !confirm(t('drawer.discardConfirm'))) return;
+  if (S.dirty) {
+    // The guard must be this app's own dialog. `window.confirm()` is routed to
+    // the Tauri dialog plugin, which this shell does not grant
+    // (`Command plugin:dialog|message not allowed by ACL`): the call rejected
+    // and the drawer closed anyway, so the user's edits were discarded with no
+    // prompt at all. One async path keeps ✕ / scrim / Escape identical.
+    // A dialog already on screen owns the next answer — opening a second one
+    // would stack scrims and strand the first promise.
+    if ($('#modal-scrim').classList.contains('on')) return;
+    const ok = await confirmDialog({
+      title: t('drawer.unsavedTitle'),
+      message: t('drawer.discardConfirm'),
+      confirmLabel: t('verb.discard'),
+      danger: true
+    });
+    if (!ok) return;
+  }
   S.dirty = false;
   S.selected = null;
   d.classList.remove('on');
@@ -639,10 +872,9 @@ async function boot() {
   if (!S.langHooked) { i18n.onChange(applyLanguage); S.langHooked = true; }
 
   $('#store-root').textContent = 'store: ' + S.boot.storeRoot;
-  $('#sandbox-toggle').checked = S.boot.sandbox;
   // Paint the shell (nav labels, wired buttons, localized statics) BEFORE the
-  // first scan: the scan takes seconds on real machines and used to leave the
-  // whole main area blank until it finished.
+  // first scan: the scan takes seconds on real machines and must not leave the
+  // whole main area blank while it runs.
   //
   // boot() is also the retry target of the startup error panel, so every wire*
   // below runs at most once: a second pass would stack a second scan listener,
@@ -721,18 +953,35 @@ function syncUpdateBadge(status) {
   if (waiting) syncUpdateBanner(status);
 }
 
+/**
+ * Version whose banner the user dismissed.
+ *
+ * Remembering it in-memory only was not enough: the 60 s status poll calls
+ * `syncUpdateBanner()` again and re-showed the banner the user had just closed.
+ * A *newer* version no longer matches, so it still gets announced.
+ */
+let updateDismissed = (function () {
+  try { return localStorage.getItem('ak.updateDismissed') || null; } catch (_e) { return null; }
+})();
+
 /** One-time wiring for the top banner (rebinding on every boot would stack). */
 function wireUpdateBanner() {
   const open = $('#update-open');
   const dismiss = $('#update-dismiss');
   if (open) open.addEventListener('click', () => go('settings'));
-  if (dismiss) dismiss.addEventListener('click', () => $('#update-banner').classList.add('hidden'));
+  if (dismiss) dismiss.addEventListener('click', () => {
+    const v = S.update && S.update.latest ? String(S.update.latest) : '';
+    updateDismissed = v || null;
+    try { if (v) localStorage.setItem('ak.updateDismissed', v); } catch (_e) { /* storage disabled */ }
+    $('#update-banner').classList.add('hidden');
+  });
 }
 
 function syncUpdateBanner(status) {
   const banner = $('#update-banner');
   if (!banner) return;
-  if (!status || status.hasUpdate !== true || status.skipped) {
+  if (!status || status.hasUpdate !== true || status.skipped
+    || (status.latest && String(status.latest) === updateDismissed)) {
     banner.classList.add('hidden');
     return;
   }
@@ -795,7 +1044,7 @@ async function startUpdateDownload(status) {
 /**
  * Progress polling. The task object lives in the main process (downloads keep
  * running when the user navigates), so this poll is the only way the UI sees
- * bytes arrive — same model as the reference implementation's panel.
+ * bytes arrive — the panel keeps the last N lines.
  */
 function pollUpdateTask() {
   if (S.updateTimer) return;
@@ -869,10 +1118,10 @@ async function rescan(silent = false) {
     if (scanBtn) { scanBtn.classList.add('loading'); scanBtn.disabled = true; }
   }
   try {
-    const [d, p] = await Promise.all([window.ak.scan(), window.ak.pending()]);
+    // Writes land in the real agent directories, so the scan is the only state
+    // this view needs — there is no staged layer left to fetch.
+    const d = await window.ak.scan();
     S.data = d;
-    S.pending = p.changes || [];
-    S.sandbox = p.sandbox;
     // Drop checked ids that no longer exist (deleted elsewhere / rescan changed
     // ids) — otherwise the batch bar counts ghosts.
     if (S.checked.size) {
@@ -880,18 +1129,25 @@ async function rescan(silent = false) {
       for (const id of [...S.checked]) if (!alive.has(id)) S.checked.delete(id);
     }
     $('#nav-asset-count').textContent = d.summary.total;
-    $('#nav-issue-count').textContent = d.summary.issues;
+    // One number for all three surfaces. `summary.issues` counts error-level
+    // format problems only, so a warning-level finding left the sidebar badge on
+    // "0" and the dashboard card on "0" while the Health page listed
+    // "1 asset needs attention". issueAssets() is the Health page's predicate.
+    const issueCount = issueAssets(d).length;
+    const issueEl = $('#nav-issue-count');
+    issueEl.textContent = issueCount;
+    issueEl.classList.toggle('hidden', issueCount === 0);
+    syncNavNames();
     render();
     if (!silent) {
-      const errs = d.summary.issues;
+      const errs = issueCount;
       toast(errs ? t('toast.scanIssues', { n: errs }) : t('toast.scanDone', { n: d.summary.total }),
         errs ? 'warn' : 'ok');
     }
   } catch (e) {
-    // A failed scan used to leave whatever was on screen untouched behind a
-    // toast: the table still showed the previous data and a first scan left a
-    // permanently blank main area with no way to try again but a restart.
-    // Paint the retryable panel instead; its retry re-runs the scan only.
+    // A failed scan must not hide behind a toast: the table would keep the
+    // previous data and a first scan would leave a blank main area with no way
+    // to retry. Paint the retryable panel instead; its retry re-runs the scan.
     reportUiError('error', e);
     const root = $('#view-root');
     if (root) {
@@ -921,13 +1177,6 @@ function wireGlobal() {
     syncSideToggle();
   });
 
-  $('#sandbox-toggle').addEventListener('change', async (e) => {
-    const on = e.target.checked;
-    const r = await window.ak.setSandbox(on);
-    toast(r.note, on ? 'warn' : 'ok');
-    await rescan(true);
-  });
-
   $$('.nav-item').forEach((b) => b.addEventListener('click', () => go(b.dataset.view)));
 
   // Close the context menu on any click outside it.
@@ -940,12 +1189,21 @@ function wireGlobal() {
   $('#search').addEventListener('input', (e) => {
     clearTimeout(debounce);
     const v = e.target.value;
-    debounce = setTimeout(() => { S.filter = v.trim().toLowerCase(); render(); }, 120);
+    debounce = setTimeout(() => {
+      S.filter = v.trim().toLowerCase();
+      // A new query redefines the visible set exactly like a filter select, so
+      // it has to reset the page and the checked set: otherwise page 3 of the
+      // old result stays selected and the batch bar offers to delete rows the
+      // query hides.
+      S.page = 1;
+      S.checked.clear();
+      render();
+    }, 120);
   });
 
   document.addEventListener('keydown', (e) => {
-    // Dialog first: while one is open it owns Tab and Escape. Both used to
-    // leave focus behind the scrim and Escape used to drop unsaved edits.
+    // Dialog first: while one is open it owns Tab and Escape. Otherwise focus
+    // stays behind the scrim and Escape drops unsaved edits.
     const modalOpen = $('#modal-scrim').classList.contains('on');
     const drawerOpen = $('#drawer').classList.contains('on');
     if (e.key === 'Tab') {
@@ -980,12 +1238,34 @@ const VIEWS = {
   settings: { titleKey: 'nav.settings', subKey: 'settings.subtitle', render: viewSettings }
 };
 
+/** The element that should keep focus if this render replaces the DOM. */
+function focusKeyNow() {
+  const n = document.activeElement;
+  if (!n || !n.closest) return null;
+  const holder = n.closest('[data-focus-key]');
+  return holder ? holder.getAttribute('data-focus-key') : null;
+}
+
+/**
+ * Put focus back on the equivalent control after a re-render.
+ *
+ * Checkbox / filter changes re-render the whole view; without this the focus
+ * fell to <body> on every click, so a keyboard user restarted from the top of
+ * the page after each selection and a screen reader lost its place.
+ */
+function restoreFocusKey(root, key) {
+  if (!key) return;
+  const again = root.querySelector(`[data-focus-key="${key}"]`);
+  if (again && typeof again.focus === 'function') again.focus({ preventScroll: true });
+}
+
 function render() {
   if (!S.data) return;
   const v = VIEWS[S.view];
   $('#view-title').textContent = t(v.titleKey);
   $('#view-sub').textContent = t(v.subKey);
   const root = $('#view-root');
+  const keepFocus = focusKeyNow();
   root.innerHTML = '';
   try {
     const out = v.render();
@@ -998,6 +1278,7 @@ function render() {
         if (S.view !== viewAtCall) return;   // user navigated away
         root.innerHTML = '';
         root.appendChild(node);
+        restoreFocusKey(root, keepFocus);
       }).catch((e) => {
         if (S.view !== viewAtCall) return;
         reportUiError('error', e);
@@ -1007,6 +1288,7 @@ function render() {
       return;
     }
     root.appendChild(out);
+    restoreFocusKey(root, keepFocus);
   } catch (e) {
     reportUiError('error', e);
     root.innerHTML = '';
@@ -1033,16 +1315,29 @@ function syncSideToggle() {
 }
 
 /** Re-render everything that shows a translated string (nav, titles, counts). */
-function applyLanguage(lang) {
-  document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+/**
+ * Sidebar labels, including the badge counts.
+ *
+ * `aria-label` replaces descendant text, so the badges ("969", the issue count,
+ * the update dot) were invisible to assistive tech even though they are the only
+ * place those numbers live. Keep the visible text in sync for the same reason.
+ */
+function syncNavNames() {
   for (const n of $$('.nav-item')) {
-    const name = t(`nav.${n.dataset.view}`);
-    // The rail hides the visible label; the button keeps its name anyway.
+    const view = n.dataset.view;
+    const badge = n.querySelector('.nav-badge');
+    const extra = badge && !badge.classList.contains('hidden') ? badge.textContent.trim() : '';
+    const name = t(`nav.${view}`) + (extra ? ` · ${extra}` : '');
     n.setAttribute('aria-label', name);
     n.title = name;
     const label = n.querySelector('.nav-text');
-    if (label) label.textContent = name;
+    if (label) label.textContent = t(`nav.${view}`);
   }
+}
+
+function applyLanguage(lang) {
+  document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+  syncNavNames();
   // Static markup in index.html opts in with data-i18n / data-i18n-placeholder
   // / data-i18n-title / data-i18n-label (ARIA names, which have no text node).
   for (const n of $$('[data-i18n]')) n.textContent = t(n.dataset.i18n);
@@ -1053,8 +1348,8 @@ function applyLanguage(lang) {
   if (group) group.textContent = t('nav.groupOperate');
   const overview = $('#nav-group-overview');
   if (overview) overview.textContent = t('nav.groupOverview');
-  // #btn-scan's title is data-i18n-title="nav.rescanTitle" above; it used to be
-  // overwritten here with the *subtitle* sentence, which read wrong on a button.
+  // #btn-scan's title comes from data-i18n-title="nav.rescanTitle" in the markup;
+  // do not overwrite it here with a subtitle sentence (it reads wrong on a button).
   syncSideToggle();
   render();
 }
@@ -1070,16 +1365,6 @@ function filteredAssets() {
   else if (S.originFilter === 'user') list = list.filter((a) => (a.origin || 'user') === 'user');
   else if (S.originFilter === 'cached') list = list.filter((a) => (a.origin || '') === 'cached' || (a.origin || '') === 'marketplace');
   if (S.onlyShadowed) list = list.filter((a) => a.effective && a.effective.live === false);
-  if (S.sortKey) {
-    const cmp = {
-      tokens: (a, b) => (b.size || 0) - (a.size || 0),
-      size: (a, b) => (b.size || 0) - (a.size || 0),
-      name: (a, b) => a.name.localeCompare(b.name),
-      agent: (a, b) => a.agentLabel.localeCompare(b.agentLabel),
-      scope: (a, b) => a.scope.localeCompare(b.scope)
-    }[S.sortKey];
-    if (cmp) list = list.slice().sort(cmp);
-  }
   if (S.filter) {
     const q = S.filter;
     list = list.filter((a) =>
@@ -1090,11 +1375,37 @@ function filteredAssets() {
       (a.meta.relLabel || '').toLowerCase().includes(q) ||
       (a.tags || []).join(' ').toLowerCase().includes(q));
   }
-  return list.sort((a, b) => (a.kind + a.name).localeCompare(b.kind + b.name));
+  if (S.sortKey) {
+    const cmp = {
+      tokens: (a, b) => (b.size || 0) - (a.size || 0),
+      size: (a, b) => (b.size || 0) - (a.size || 0),
+      name: (a, b) => a.name.localeCompare(b.name),
+      agent: (a, b) => a.agentLabel.localeCompare(b.agentLabel),
+      scope: (a, b) => a.scope.localeCompare(b.scope)
+    }[S.sortKey];
+    // An explicit sort choice is the whole point of the control, so it must win:
+    // no unconditional re-sort at the end of this function, which would discard
+    // every choice but `default`.
+    if (cmp) {
+      return list.slice().sort((a, b) => cmp(a, b) || (a.kind + a.name).localeCompare(b.kind + b.name));
+    }
+  }
+  return list.slice().sort((a, b) => (a.kind + a.name).localeCompare(b.kind + b.name));
 }
 
 function issuesOf(a) {
   return (a.issues || []).filter((i) => i.level === 'error').length;
+}
+
+/**
+ * Assets the Health page will list: any format/validation issue or security
+ * finding, excluding host caches (their defects are the vendor's, not the
+ * user's). The sidebar badge, the dashboard "needs attention" card and the
+ * Health page all read this one predicate.
+ */
+function issueAssets(d) {
+  return (d.assets || []).filter((a) =>
+    ((a.issues || []).length || (a.security || []).length) && (a.origin || 'user') !== 'cached');
 }
 
 /* Raw engine enums (`skill`, `mcp`, `global`) are data, not UI text: they must
@@ -1123,12 +1434,26 @@ function scopeName(scope) {
 /* view: overview                                                      */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Asset counts split by kind, for the dashboard's per-agent table.
+ *
+ * One shared KIND_COLS definition, so the header order and the cell order can
+ * never drift apart — a per-agent row whose columns were built from a
+ * different list than its header is exactly the "the numbers do not match the
+ * titles" defect.
+ */
+const KIND_COLS = ['skill', 'mcp', 'plugin', 'rule', 'memory'];
+
 function viewOverview() {
   const d = S.data;
   const s = d.summary;
-  const wrap = el('div', {});
-
-  if (S.pending && S.pending.length) wrap.appendChild(pendingPanel());
+  // Same predicate as the sidebar badge and the Health page (issueAssets), so
+  // the three cannot disagree about how many assets need attention.
+  const issueCount = issueAssets(d).length;
+  // .view-fill: the view root is a scrolling box of unknown height, so the two
+  // panels below have to claim the remaining space rather than sit as short
+  // cards at the top of an empty page.
+  const wrap = el('div', { class: 'view-fill' });
 
   const cached = s.byOrigin.cached || 0;
   const stats = el('div', { class: 'grid grid-4' },
@@ -1147,8 +1472,8 @@ function viewOverview() {
     statCard('k-memory', t('dashboard.memory'), s.by.memory,
       t('dashboard.stored', { n: bytes(d.assets.filter((a) => a.kind === 'memory').reduce((n, a) => n + a.size, 0)) }),
       () => drill('memory')),
-    statCard('', t('dashboard.issues'), s.issues,
-      s.issues ? t('dashboard.openHealth') : t('dashboard.clean'),
+    statCard('', t('dashboard.issues'), issueCount,
+      issueCount ? t('dashboard.openHealth') : t('dashboard.clean'),
       () => go('health')),
     statCard('', t('dashboard.shadowed'), s.shadowed, t('dashboard.hiddenByProject'),
       () => { S.onlyShadowed = true; go('assets'); }),
@@ -1157,59 +1482,59 @@ function viewOverview() {
   );
   wrap.appendChild(stats);
 
-  const row = el('div', { class: 'row mt' });
+  // Each panel owns a full row. Side by side they had to share ~560px of card
+  // width at the common 1440px viewport, and the agent table's eight columns
+  // then clipped its own Agent column to 68px — a column narrow enough to
+  // ellipsize the very label it exists to identify. Stacked, each table gets the
+  // full content width, and the two panels split the leftover height.
+  const row = el('div', { class: 'row-fill col mt' });
 
-  /* composition */
-  const total = Math.max(1, s.total);
-  // Theme tokens, never literals: the dark palette lifts --violet / --teal, so
-  // a frozen #7c5cff bar would be the only unthemed thing on the page.
-  // Pairs, not an object: `kind: 'value'` is the shape the renderer lint reads
-  // as a hardcoded UI label, and a colour is not one.
-  const colors = [
-    ['skill', 'var(--violet)'],
-    ['mcp', 'var(--accent)'],
-    ['plugin', 'var(--green)'],
-    ['rule', 'var(--chip-rule)'],
-    ['memory', 'var(--teal)']
-  ];
-  const bar = el('div', { class: 'bar' });
-  for (const [k, color] of colors) {
-    if (!s.by[k]) continue;
-    bar.appendChild(el('span', { style: `width:${(s.by[k] / total) * 100}%;background:${color}` }));
-  }
-  const legend = el('div', { class: 'legend' });
-  for (const [k, color] of colors) {
-    // Build the swatch with the DOM + CSSOM: an inline style attribute inside
-    // innerHTML would be refused by our strict `style-src 'self'` CSP.
-    const swatch = el('i', { class: 'swatch' });
-    swatch.style.setProperty('background', color);
-    legend.appendChild(el('span', {}, swatch, ` ${kindName(k)} ${s.by[k]}`));
-  }
-  const comp = el('div', { class: 'card' },
-    el('div', { class: 'card-head' }, el('h3', {}, t('card.composition')), el('span', { class: 'sub spacer' }, t('card.total', { n: s.total }))),
-    el('div', { class: 'card-body' }, bar, legend)
-  );
-  row.appendChild(el('div', { class: 'flex-1' }, comp));
-
-  /* per agent */
+  /* per agent — full width, one column per kind.
+     The composition panel that used to sit here is gone: its stacked bar
+     duplicated the eight stat cards directly above it (same five kinds, same
+     numbers), and the half-column card it shared a row with left both cards
+     too short to read. */
   const perAgent = new Map();
   for (const a of d.assets) {
-    if (!perAgent.has(a.agentId)) perAgent.set(a.agentId, { label: zhText(a.agentLabel), n: 0, bytes: 0 });
+    if (!perAgent.has(a.agentId)) {
+      perAgent.set(a.agentId, { label: zhText(a.agentLabel), n: 0, bytes: 0, byKind: {} });
+    }
     const e = perAgent.get(a.agentId);
     e.n++; e.bytes += a.size || 0;
+    e.byKind[a.kind] = (e.byKind[a.kind] || 0) + 1;
   }
-  const agentRows = [...perAgent.entries()].sort((a, b) => b[1].n - a[1].n).map(([id, v]) =>
-    el('tr', { onclick: () => { S.agentFilter = id; go('assets'); } },
-      el('td', {}, el('div', { class: 't-name' }, v.label), el('div', { class: 't-mono' }, id)),
-      el('td', { class: 'num' }, String(v.n)),
-      el('td', { class: 'num muted' }, bytes(v.bytes))
-    ));
-  const agentCard = el('div', { class: 'card' },
-    el('div', { class: 'card-head' }, el('h3', {}, t('card.byAgent')), el('span', { class: 'sub spacer' }, t('card.clickToFilter'))),
-    el('table', { class: 'tbl' }, el('thead', {}, el('tr', {}, el('th', {}, t('th.agent')), el('th', { class: 'num' }, t('th.assets')), el('th', { class: 'num' }, t('drawer.size')))), el('tbody', {}, agentRows))
-  );
-  row.appendChild(el('div', { class: 'flex-1' }, agentCard));
-  wrap.appendChild(row);
+  const agentRows = [...perAgent.entries()]
+    .sort((a, b) => b[1].n - a[1].n)
+    .map(([id, v]) =>
+      el('tr', {
+        tabindex: '0',
+        'data-focus-key': `agent-${id}`,
+        onclick: () => drillAgent(id),
+        onkeydown: rowKey(() => drillAgent(id))
+      },
+        el('td', { class: 'col-agent' },
+          el('div', { class: 't-name', title: v.label }, v.label),
+          el('div', { class: 't-mono', title: id }, id)),
+        ...KIND_COLS.map((k) =>
+          el('td', { class: `num col-num${v.byKind[k] ? '' : ' muted'}` }, v.byKind[k] ? String(v.byKind[k]) : '·')),
+        el('td', { class: 'num col-num strong' }, String(v.n)),
+        el('td', { class: 'num col-num muted' }, bytes(v.bytes))
+      ));
+  const agentCard = el('div', { class: 'card card-fill' },
+    el('div', { class: 'card-head' },
+      el('h2', {}, t('card.byAgent')),
+      el('span', { class: 'sub spacer' }, t('card.clickToFilter'))),
+    el('div', { class: 'card-scroll' },
+      el('table', { class: 'tbl tbl-agents' },
+        el('thead', {},
+          el('tr', {},
+            el('th', { class: 'col-agent' }, t('th.agent')),
+            ...KIND_COLS.map((k) => el('th', { class: 'num col-num' }, kindName(k))),
+            el('th', { class: 'num col-num' }, t('th.assets')),
+            el('th', { class: 'num col-num' }, t('drawer.size')))),
+        el('tbody', {}, agentRows.length ? agentRows
+          : el('tr', {}, el('td', { colspan: '8', class: 'empty' }, t('empty.noMatch')))))));
+  row.appendChild(el('div', { class: 'flex-1-min' }, agentCard));
 
   /* recent activity */
   const recent = d.assets
@@ -1217,27 +1542,59 @@ function viewOverview() {
     .sort((a, b) => new Date(b.mtime) - new Date(a.mtime))
     .slice(0, 8);
   const recRows = recent.map((a) =>
-    el('tr', { onclick: () => openAsset(a.id) },
-      el('td', {}, el('span', { class: `chip ${a.kind}` }, kindName(a.kind))),
-      el('td', {}, el('div', { class: 't-name' }, a.name)),
-      el('td', { class: 'muted' }, zhText(a.agentLabel)),
-      el('td', { class: 'muted nowrap' }, scopeName(a.scope)),
-      el('td', { class: 'muted nowrap' }, ago(a.mtime))
+    el('tr', { tabindex: '0', onclick: () => openAsset(a.id), onkeydown: rowKey(() => openAsset(a.id)) },
+      el('td', { class: 'col-kind' }, el('span', { class: `chip ${a.kind}` }, kindName(a.kind))),
+      el('td', { class: 'col-name' }, el('div', { class: 't-name', title: a.name }, a.name)),
+      el('td', { class: 'col-agent muted' }, zhText(a.agentLabel)),
+      el('td', { class: 'col-scope muted' }, scopeName(a.scope)),
+      el('td', { class: 'col-time muted' }, ago(a.mtime))
     ));
-  wrap.appendChild(el('div', { class: 'card mt' },
-    el('div', { class: 'card-head' }, el('h3', {}, t('card.recent')), el('span', { class: 'sub spacer' }, t('card.newestFirst'))),
-    el('table', { class: 'tbl' }, el('thead', {}, el('tr', {}, el('th', {}, t('th.kind')), el('th', {}, t('th.name')), el('th', {}, t('th.agent')), el('th', {}, t('th.scope')), el('th', {}, t('drawer.modified')))), el('tbody', {}, recRows))
-  ));
-
-  if (S.sandbox) {
-    wrap.appendChild(el('div', { class: 'alert info mt' },
-      t('dashboard.sandboxOn')));
-  } else {
-    wrap.appendChild(el('div', { class: 'alert ok mt' },
-      t('dashboard.sandboxOff')));
-  }
+  row.appendChild(el('div', { class: 'flex-1-min' },
+    el('div', { class: 'card card-fill' },
+      el('div', { class: 'card-head' },
+        el('h2', {}, t('card.recent')),
+        el('span', { class: 'sub spacer' }, t('card.newestFirst'))),
+      el('div', { class: 'card-scroll' },
+        el('table', { class: 'tbl tbl-recent' },
+          el('thead', {},
+            el('tr', {},
+              el('th', { class: 'col-kind' }, t('th.kind')),
+              el('th', { class: 'col-name' }, t('th.name')),
+              el('th', { class: 'col-agent' }, t('th.agent')),
+              el('th', { class: 'col-scope' }, t('th.scope')),
+              el('th', { class: 'col-time' }, t('drawer.modified')))),
+          el('tbody', {}, recRows.length ? recRows
+            : el('tr', {}, el('td', { colspan: '5', class: 'empty' }, t('empty.noMatch')))))))));
+  wrap.appendChild(row);
 
   return wrap;
+}
+
+/**
+ * Dashboard agent row → the asset list filtered to that agent.
+ *
+ * Every other dimension is reset before navigating. Leaving a dimension
+ * behind is how a click lands on an empty list: the per-agent table sits under
+ * eight stat cards, several of which just wrote `kindFilter` and
+ * `originFilter`, and those are remembered across navigations (persistUiState)
+ * and across restarts (restoreUiState). A row whose agent owns a single asset
+ * is then filtered by that asset's kind *and* by an origin filter that hides
+ * it, and the Assets page correctly reports "no match" for a filter the user
+ * never set. Page must be reset for the same reason: landing on page 4 of a
+ * 1-row result set is an empty table.
+ */
+function drillAgent(agentId) {
+  S.kindFilter = 'all';
+  S.agentFilter = agentId;
+  S.scopeFilter = 'all';
+  S.originFilter = 'all';
+  S.onlyShadowed = false;
+  S.sortKey = null;
+  S.filter = '';
+  S.page = 1;
+  S.checked.clear();
+  persistUiState();
+  go('assets');
 }
 
 /**
@@ -1245,6 +1602,15 @@ function viewOverview() {
  * a dead card that only reports a number forces the user to go hunting for
  * where that number lives.
  */
+/**
+ * Enter/Space handler for rows that are only clickable (agent, recent, matrix,
+ * project rows). The asset table is the exception: it moves a
+ * cursor with ↑/↓ so 50 rows do not become 50 tab stops.
+ */
+const rowKey = (fn) => (e) => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); }
+};
+
 function statCard(cls, label, value, foot, onClick) {
   const node = el('div', {
     class: `stat ${cls}${onClick ? ' clickable' : ''}`,
@@ -1275,7 +1641,18 @@ function go(view) {
   if (!VIEWS[view]) view = 'overview';
   S.view = view;
   $$('.nav-item').forEach((x) => x.classList.toggle('active', x.dataset.view === view));
+  syncSearchBox();
   render();
+}
+
+/**
+ * `#search` shows `S.filter`, but drill-in paths (stat cards, project rows) set
+ * the filter without typing. The box must follow the filter, or the UI claims
+ * a query the list is not applying.
+ */
+function syncSearchBox() {
+  const s = $('#search');
+  if (s && document.activeElement !== s) s.value = S.filter || '';
 }
 
 /** Persist the asset-list UI state across restarts. Filters and sort survive;
@@ -1307,72 +1684,20 @@ function drill(kind, origin) {
   S.kindFilter = kind;
   if (origin) S.originFilter = origin;
   else S.originFilter = kind === 'plugin' ? 'curated' : 'all';
+  // The other four dimensions are sticky: they are persisted across restarts
+  // and survive every navigation, so a stat card that only sets `kindFilter`
+  // can land on a list another filter had already emptied — and the page
+  // index can point past the end of the shorter result set, which is an empty
+  // table rather than an empty list. Reset them; the card names exactly the
+  // one dimension it drills into.
+  S.agentFilter = 'all';
+  S.scopeFilter = 'all';
+  S.onlyShadowed = false;
   S.filter = '';
+  S.page = 1;
+  S.checked.clear();
+  persistUiState();
   go('assets');
-}
-
-/** Shadow-layer panel: staged changes awaiting Apply. */
-function pendingPanel() {
-  // "+N more" used to be a dead row; now it expands the list in place.
-  const shown = S.expandPending ? S.pending.length : Math.min(8, S.pending.length);
-  const rows = S.pending.slice(0, shown).map((c) => {
-    // The change record only knows the target path; match it back to an asset
-    // so clicking a row lands in the same drawer the asset list uses.
-    const asset = (S.data?.assets || []).find((a) => a.file === c.real);
-    const isWrite = c.op === 'write' || c.op === 'json';
-    return el('tr', { onclick: asset ? () => openAsset(asset.id) : null, class: asset ? '' : 'inert' },
-      el('td', {}, el('span', { class: `chip ${isWrite ? 'ok' : 'err'}` },
-        t(c.op === 'delete' ? 'pending.opDelete' : (c.op === 'json' ? 'pending.opJson' : 'pending.opWrite')))),
-      el('td', { class: 't-mono' }, c.real.replace(/^([A-Za-z]):/, '$1:')),
-      el('td', { class: 'num muted nowrap' }, isWrite ? bytes(c.bytes) : '—'),
-      el('td', { class: 'muted nowrap' }, ago(c.at))
-    );
-  });
-
-  const apply = el('button', { class: 'btn primary' }, t('dashboard.apply', { n: S.pending.length }));
-  apply.addEventListener('click', async () => {
-    if (!(await confirmDialog({
-      title: t('confirm.applyTitle'),
-      message: t('confirm.applyBody', { n: S.pending.length }) + '\n\n' +
-        S.pending.slice(0, 10).map((c) => '  • ' + c.real).join('\n') +
-        '\n\n' + t('confirm.applyBackupNote'),
-      confirmLabel: t('dashboard.applyShort')
-    }))) return;
-    const r = await window.ak.applyPending();
-    if (!r.ok) return toast(r.error || t('toast.applyFailed'), 'err');
-    toast(t('toast.applied', { n: r.applied, tx: r.txId }), 'ok');
-    maybeNotify('notify.applied', { n: r.applied });
-    await rescan(true);
-  });
-
-  const discard = el('button', { class: 'btn' }, t('dashboard.discard'));
-  discard.addEventListener('click', async () => {
-    if (!(await confirmDialog({
-      title: t('confirm.discardTitle'),
-      message: t('confirm.discardBody', { n: S.pending.length }),
-      confirmLabel: t('dashboard.discard'), danger: true
-    }))) return;
-    await window.ak.discardPending();
-    toast(t('toast.discarded'), 'ok');
-    await rescan(true);
-  });
-
-  return el('div', { class: 'card mb-14 bordered-accent' },
-    el('div', { class: 'card-head tinted-head' },
-      el('span', { class: 'chip mcp' }, t('dashboard.staged')),
-      el('h3', {}, t('dashboard.stagedTitle', { n: S.pending.length })),
-      el('span', { class: 'sub spacer' }, t('dashboard.sandboxMode')),
-      discard, apply
-    ),
-    el('table', { class: 'tbl' },
-      el('thead', {}, el('tr', {}, el('th', {}, t('th.op')), el('th', {}, t('th.target')), el('th', { class: 'num' }, t('drawer.size')), el('th', {}, t('th.staged')))),
-      el('tbody', {}, rows,
-        !S.expandPending && S.pending.length > 8
-          ? el('tr', {}, el('td', { colspan: '4' },
-              el('button', { class: 'btn ghost sm', onclick: () => { S.expandPending = true; render(); } },
-                t('dashboard.more', { n: S.pending.length - 8 }))))
-          : null))
-  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -1412,7 +1737,14 @@ function viewAssets() {
 
   const rows = pageItems.map((a) => {
     const errs = issuesOf(a);
-    const cb = el('input', { type: 'checkbox', 'aria-label': t('batch.selected', { n: 1 }) });
+    // A name has to identify the row: `{n} selected` made all 50 checkboxes
+    // announce the same thing, so a screen-reader user could not tell which
+    // asset a checkbox belongs to.
+    const cb = el('input', {
+      type: 'checkbox',
+      'aria-label': t('batch.rowAria', { name: a.name, agent: zhText(a.agentLabel) }),
+      'data-focus-key': `cb-${a.id}`
+    });
     cb.checked = S.checked.has(a.id);
     cb.addEventListener('click', (e) => e.stopPropagation());
     cb.addEventListener('change', () => {
@@ -1441,7 +1773,11 @@ function viewAssets() {
   });
 
   const allChecked = pageItems.length > 0 && pageItems.every((a) => S.checked.has(a.id));
-  const headCb = el('input', { type: 'checkbox', 'aria-label': t('batch.selected', { n: pageItems.length }) });
+  const headCb = el('input', {
+    type: 'checkbox',
+    'aria-label': t('batch.allAria', { n: pageItems.length }),
+    'data-focus-key': 'cb-all'
+  });
   headCb.checked = allChecked;
   headCb.addEventListener('change', () => {
     for (const a of pageItems) { if (headCb.checked) S.checked.add(a.id); else S.checked.delete(a.id); }
@@ -1491,11 +1827,21 @@ function viewAssets() {
         to: Math.min(S.page * PER_PAGE, list.length),
         total: list.length
       })),
-      el('button', { class: 'btn sm', disabled: S.page <= 1 ? 'true' : null,
-        onclick: () => { S.page--; render(); } }, '←'),
+      el('button', {
+        class: 'btn sm',
+        disabled: S.page <= 1 ? 'true' : null,
+        'aria-label': t('pager.prev'),
+        'data-focus-key': 'pager-prev',
+        onclick: () => { S.page--; render(); }
+      }, '←'),
       el('span', { class: 'info' }, `${S.page} / ${pageCount}`),
-      el('button', { class: 'btn sm', disabled: S.page >= pageCount ? 'true' : null,
-        onclick: () => { S.page++; render(); } }, '→')
+      el('button', {
+        class: 'btn sm',
+        disabled: S.page >= pageCount ? 'true' : null,
+        'aria-label': t('pager.next'),
+        'data-focus-key': 'pager-next',
+        onclick: () => { S.page++; render(); }
+      }, '→')
     ));
   }
   return wrap;
@@ -1509,8 +1855,20 @@ function agentOptions() {
   });
 }
 
+/** Accessible name for each filter dimension (a select's value is not its name). */
+const FILTER_LABEL = {
+  kind: 'filter.kind', agent: 'filter.agent', scope: 'filter.scope',
+  origin: 'filter.origin', sort: 'filter.sort'
+};
+
 function selectGroup(dim, current, options) {
-  const s = el('select', { class: 'select-inline' });
+  const s = el('select', {
+    class: 'select-inline',
+    // The current option text is the only thing a reader would hear otherwise;
+    // it says "Skills" but not that this control filters *by kind*.
+    'aria-label': t(FILTER_LABEL[dim] || 'filter.kind'),
+    'data-focus-key': `filter-${dim}`
+  });
   for (const [v, label] of options) {
     const o = el('option', { value: v }, label);
     if (v === current) o.selected = true;
@@ -1555,7 +1913,7 @@ function viewAgents() {
         ),
         el('div', { class: 'agent-counts' },
           ...['skill', 'mcp', 'plugin', 'rule', 'memory'].map((k) =>
-            el('span', { class: 'mini' }, el('b', {}, String(counts[k] || 0)), ' ', k))
+            el('span', { class: 'mini' }, el('b', {}, String(counts[k] || 0)), ' ', kindName(k)))
         )
       )
     );
@@ -1603,7 +1961,13 @@ function matrixCard() {
     const present = agents.filter((ag) => row[ag.id]);
     // Row click opens the asset wherever it exists; gap cells stay inert.
     const first = present.length ? row[present[0].id] : null;
-    return el('tr', { onclick: first ? () => openAsset(first.id) : null, class: first ? '' : 'inert' },
+    const openFirst = first ? () => openAsset(first.id) : null;
+    return el('tr', {
+      tabindex: openFirst ? '0' : null,
+      class: first ? '' : 'inert',
+      onclick: openFirst,
+      onkeydown: openFirst ? rowKey(openFirst) : null
+    },
       el('td', { class: 't-name' }, name),
       ...agents.map((ag) => cell(row[ag.id], name)),
       el('td', { class: 'num' }, missing.length
@@ -1613,7 +1977,7 @@ function matrixCard() {
         : '—'));
   });
 
-  const kindSel = el('select', { class: 'select-inline' },
+  const kindSel = el('select', { class: 'select-inline', 'aria-label': t('filter.matrixKind') },
     ...['skill', 'rule', 'memory'].map((k) => {
       const o = el('option', { value: k }, t(`dashboard.${k === 'skill' ? 'skills' : k === 'memory' ? 'memory' : 'rules'}`));
       if (k === kind) o.selected = true;
@@ -1623,7 +1987,7 @@ function matrixCard() {
 
   return el('div', { class: 'card mt' },
     el('div', { class: 'card-head' },
-      el('h3', {}, t('matrix.title')),
+      el('h2', {}, t('matrix.title')),
       el('span', { class: 'sub spacer' }, t('matrix.note')),
       kindSel),
     el('div', { class: 'card-body scroll-x' },
@@ -1649,7 +2013,8 @@ function viewProjects() {
   const rows = d.projects.map((p) =>
     // Clicking a project filters the asset list to it (text search over the
     // project name) — the fastest path from "which project owns this" to the assets.
-    el('tr', { onclick: () => { S.filter = p.name.toLowerCase(); go('assets'); } },
+    el('tr', { onclick: () => { S.filter = p.name.toLowerCase(); go('assets'); },
+      tabindex: '0', onkeydown: rowKey(() => { S.filter = p.name.toLowerCase(); go('assets'); }) },
       el('td', {},
         el('div', { class: 't-name' }, p.name),
         el('div', { class: 't-mono' }, p.dir)
@@ -1660,7 +2025,16 @@ function viewProjects() {
       el('td', {}, el('button', {
         class: 'btn sm danger',
         onclick: async () => {
-          if (!(await confirmDialog({ title: t('activity.removeProject'), message: t('activity.removeProjectMsg', { x: p.name }), confirmLabel: t('common.remove'), danger: true }))) return;
+          // Removing a project only rewrites the registry, so the target is the
+          // project directory the user is giving up — not a file that changes.
+          const ok = await confirmWrite({
+            title: t('activity.removeProject'),
+            action: t('common.remove'),
+            targets: [p.dir],
+            detail: t('activity.removeProjectMsg', { x: p.name }),
+            danger: true
+          });
+          if (!ok) return;
           await window.ak.removeProject(p.id);
           toast(t('projects.removed', { x: p.name }), 'ok');
           rescan(true);
@@ -1684,7 +2058,7 @@ function viewProjects() {
 async function doImportProject() {
   const r = await window.ak.pickProject();
   if (r.canceled) return;
-  if (r.added.length) toast(`Imported ${r.added.length} project(s): ${r.added.map((p) => p.name).join(', ')}`, 'ok');
+  if (r.added.length) toast(t('toast.importedProjects', { n: r.added.length, names: r.added.map((p) => p.name).join(', ') }), 'ok');
   for (const s of r.skipped) toast(`${s.dir}: ${zhText(s.reason)}`, 'warn');
   await rescan(true);
   if (r.added.length) {
@@ -1720,7 +2094,7 @@ function viewHealth() {
       )));
     wrap.appendChild(el('div', { class: 'card' },
       el('div', { class: 'card-head' },
-        el('h3', {}, t('health.securityTitle')),
+        el('h2', {}, t('health.securityTitle')),
         el('span', { class: 'sub spacer' }, t('health.securityNote'))),
       el('div', { class: 'card-body flex col gap-8' }, secItems)
     ));
@@ -1751,7 +2125,7 @@ function viewHealth() {
         el('button', { class: 'btn sm', onclick: () => openAsset(a.id) }, t('common.inspect'))
       ));
     wrap.appendChild(el('div', { class: 'card' },
-      el('div', { class: 'card-head' }, el('h3', {}, t('health.attention', { n: bad.length })),
+      el('div', { class: 'card-head' }, el('h2', {}, t(bad.length === 1 ? 'health.attentionOne' : 'health.attention', { n: bad.length })),
         el('span', { class: 'sub spacer' }, t('health.attentionNote'))),
       el('div', { class: 'card-body flex col gap-8' }, items)
     ));
@@ -1768,7 +2142,7 @@ function viewHealth() {
  */
 function baselineCard() {
   const box = el('div', { class: 'card' },
-    el('div', { class: 'card-head' }, el('h3', {}, t('baseline.title')),
+    el('div', { class: 'card-head' }, el('h2', {}, t('baseline.title')),
       el('span', { class: 'sub spacer' }, t('baseline.note'))),
     el('div', { class: 'card-body' }, el('div', { class: 'muted' }, t('common.loading'))));
   window.ak.baselineDiff().then((r) => {
@@ -1807,41 +2181,27 @@ function baselineCard() {
 
 async function viewActivity() {
   const wrap = el('div', {});
-  const [audit, txs] = await Promise.all([window.ak.audit({ limit: 200 }), window.ak.transactions(120)]);
+  const audit = await window.ak.audit({ limit: 200 });
 
-  // Named `tx`, not `t` — `t` is the module-scope i18n translator.
-  const undoable = new Set(txs.filter((tx) => tx.status === 'ok').map((tx) => tx.txId));
-  const items = audit.filter((r) => r.txId || r.action === 'scan').slice(0, 160).map((r) => {
-    const canRollback = r.txId && undoable.has(r.txId);
-    return el('div', { class: `tl-item ${r.status === 'ok' ? 'ok' : r.status === 'failed' ? 'failed' : 'rolled-back'}` },
+  // No transaction list and no undo button: the store no longer keeps
+  // backups, so an "undo" here could not restore anything — the journal is
+  // now purely a record of what happened, not a menu of things to reverse.
+  const items = audit.filter((r) => r.txId || r.action === 'scan').slice(0, 160).map((r) =>
+    el('div', { class: `tl-item ${r.status === 'ok' ? 'ok' : r.status === 'failed' ? 'failed' : ''}` },
       el('div', { class: 'tl-head' },
         el('span', { class: 'tl-title' }, labelFor(r)),
         r.kind ? el('span', { class: `chip ${r.kind}` }, r.kind) : null,
-        r.sandbox ? el('span', { class: 'chip warn' }, t('activity.sandboxChip')) : null,
-        canRollback ? el('button', {
-          class: 'btn sm ml-8',
-          onclick: async () => {
-            if (!(await confirmDialog({
-              title: t('confirm.rollbackTitle'),
-              message: t('confirm.rollbackBody', { tx: r.txId }),
-              confirmLabel: t('activity.rollbackPrefix'), danger: true
-            }))) return;
-            const res = await window.ak.rollback(r.txId);
-            if (res.ok) { toast(t('toast.rolledBack', { n: res.restored }), 'ok'); maybeNotify('notify.rollback', { n: res.restored }); await rescan(true); render(); }
-            else toast(res.error, 'err');
-          }
-        }, t('common.undo')) : null,
         el('span', { class: 'tl-time' }, clock(r.ts))
       ),
       el('div', { class: 'tl-meta' },
         [zhText(r.agentLabel) || r.agentId, r.projectName, r.assetName, (r.targets || []).join('  '), zhError(r)]
           .filter(Boolean).join('  ·  '))
-    );
-  });
+    )
+  );
 
   wrap.appendChild(el('div', { class: 'card' },
     el('div', { class: 'card-head' },
-      el('h3', {}, t('card.audit')),
+      el('h2', {}, t('card.audit')),
       el('span', { class: 'sub spacer' }, t('activity.journalNote', { n: audit.length }))),
     el('div', { class: 'card-body' },
       items.length ? el('div', { class: 'tl' }, items) : el('div', { class: 'empty' }, t('empty.noActivity')))
@@ -1851,7 +2211,6 @@ async function viewActivity() {
 
 function labelFor(r) {
   if (r.action === 'scan') return t('activity.scanLabel', { n: r.count ?? '' });
-  if (r.action === 'rollback') return t('activity.rollbackLabel', { tx: r.txId });
   const verb = { create: t('verb.create'), update: t('verb.update'), 'delete': t('verb.delete'), distribute: t('verb.distribute') }[r.action] || r.action || t('verb.change');
   return `${verb} ${r.assetName || ''}`.trim() + (r.status === 'failed' ? ` ${t('activity.failedSuffix')}` : '');
 }
@@ -1868,6 +2227,7 @@ function viewDiscover() {
   const root = el('div', {});
   const repoInput = el('input', {
     class: 'input-inline wide', type: 'text', id: 'disc-repo',
+    'aria-label': t('discover.repoLabel'),
     placeholder: 'https://github.com/owner/repo  ·  owner/repo',
     onkeydown: (e) => { if (e.key === 'Enter') void discInstallFromInput(); }
   });
@@ -1877,6 +2237,7 @@ function viewDiscover() {
         el('div', { class: 'search-wrap grow' },
           el('input', {
             id: 'disc-q', type: 'search', value: S.discQ || '',
+            'aria-label': t('discover.searchLabel'),
             placeholder: t('discover.searchPlaceholder'), autocomplete: 'off',
             onkeydown: (e) => { if (e.key === 'Enter') discSearch(); }
           })
@@ -1892,7 +2253,7 @@ function viewDiscover() {
   // reachable path was "already listed in the registry", which excludes every
   // private or brand-new repository.
   root.appendChild(el('div', { class: 'card mt-14' },
-    el('div', { class: 'card-head' }, el('h3', {}, t('discover.byRepo'))),
+    el('div', { class: 'card-head' }, el('h2', {}, t('discover.byRepo'))),
     el('div', { class: 'card-body' },
       el('div', { class: 'flex gap-sm' },
         repoInput,
@@ -1923,12 +2284,19 @@ async function discInstallFromInput() {
     el('div', { class: 'set-row' },
       el('div', { class: 'set-label' }, t('discover.targetAgent')),
       el('div', { class: 'set-control' }, sel)),
-    el('div', { class: 'muted disc-hint' },
-      S.sandbox ? t('discover.stagedNote') : t('discover.directNote'))
+    el('div', { class: 'muted disc-hint' }, t('discover.directNote'))
   );
   const cancel = el('button', { class: 'btn', onclick: closeModal }, t('common.cancel'));
   const okBtn = el('button', {
     class: 'btn primary', onclick: async () => {
+      // Installing writes new files into the agent's global skills directory —
+      // a mutation, so it asks like every other one before starting the clone.
+      const ok = await confirmWrite({
+        action: t('verb.install'),
+        targets: targetPaths([{ agentId: sel.value, scope: 'global', projectId: null }], 'skills'),
+        detail: t('confirm.installDetail', { repo: raw })
+      });
+      if (!ok) return;
       okBtn.disabled = true;
       okBtn.classList.add('loading');
       okBtn.textContent = t('discover.installing');
@@ -1940,7 +2308,6 @@ async function discInstallFromInput() {
       if ((r.skipped || []).length) parts.push(t('discover.skipped', { n: r.skipped.length }));
       if ((r.findings || []).length) parts.push(t('discover.securityWarn', { n: r.findings.length }));
       toast(parts.join(' · '), (r.findings || []).length ? 'warn' : 'ok');
-      if (S.sandbox) toast(t('discover.stagedToast'), '');
     }
   }, t('discover.install'));
   openModal(t('discover.installTitle', { name: raw }), body, [cancel, okBtn]);
@@ -1954,9 +2321,17 @@ async function discSearch() {
   const goBtn = $('#disc-go');
   if (goBtn) { goBtn.classList.add('loading'); goBtn.disabled = true; }
   renderDiscResults($('#disc-results'));
-  const r = await window.ak.searchRegistry({ q: S.discQ, limit: 30 });
-  S.discLoading = false;
-  if (goBtn) { goBtn.classList.remove('loading'); goBtn.disabled = false; }
+  let r;
+  try {
+    r = await window.ak.searchRegistry({ q: S.discQ, limit: 30 });
+  } catch (e) {
+    // The button stayed in its loading state forever when the invoke rejected.
+    reportUiError('error', e);
+    r = { ok: false, error: (e && e.message) || String(e) };
+  } finally {
+    S.discLoading = false;
+    if (goBtn) { goBtn.classList.remove('loading'); goBtn.disabled = false; }
+  }
   if (!r.ok) { S.discError = r.error; S.discResults = []; }
   else { S.discResults = r.skills; S.discTotal = r.total; }
   renderDiscResults($('#disc-results'));
@@ -1987,7 +2362,7 @@ function renderDiscResults(container) {
   }
   const card = el('div', { class: 'card' },
     el('div', { class: 'card-head' },
-      el('h3', {}, t('discover.resultsTitle')),
+      el('h2', {}, t('discover.resultsTitle')),
       el('span', { class: 'sub' }, t('discover.resultsCount', { shown: S.discResults.length, total: S.discTotal }))
     ),
     el('div', { class: 'card-body' },
@@ -2024,13 +2399,18 @@ async function discInstall(item) {
       el('div', { class: 'set-label' }, t('discover.targetAgent')),
       el('div', { class: 'set-control' }, select)
     ),
-    el('div', { class: 'muted disc-hint' },
-      S.sandbox ? t('discover.stagedNote') : t('discover.directNote'))
+    el('div', { class: 'muted disc-hint' }, t('discover.directNote'))
   );
   const cancel = el('button', { class: 'btn', onclick: closeModal }, t('common.cancel'));
   const okBtn = el('button', {
     class: 'btn primary', onclick: async () => {
       const agentId = select.value;
+      const ok = await confirmWrite({
+        action: t('verb.install'),
+        targets: targetPaths([{ agentId, scope: 'global', projectId: null }], 'skills'),
+        detail: t('confirm.installDetail', { repo: item.repo })
+      });
+      if (!ok) return;
       okBtn.disabled = true;
       okBtn.classList.add('loading');
       okBtn.textContent = t('discover.installing');
@@ -2041,7 +2421,6 @@ async function discInstall(item) {
       if ((r.skipped || []).length) parts.push(t('discover.skipped', { n: r.skipped.length }));
       if ((r.findings || []).length) parts.push(t('discover.securityWarn', { n: r.findings.length }));
       toast(parts.join(' · '), (r.findings || []).length ? 'warn' : 'ok');
-      if (S.sandbox) toast(t('discover.stagedToast'), '');
     }
   }, t('discover.install'));
   openModal(t('discover.installTitle', { name: item.name }), body, [cancel, okBtn]);
@@ -2113,12 +2492,17 @@ function viewSettings() {
       S.settings = r.settings;
       toast(t('common.saved'), 'ok');
       render();
-    } else toast(r.error || t('toast.saveFailed'), 'err');
+    } else {
+      toast(r.error || t('toast.saveFailed'), 'err');
+      // The control still showed the rejected value, so the UI claimed a change
+      // that never reached settings.json. Re-read what was actually stored.
+      render();
+    }
   };
 
   /* --- appearance --------------------------------------------------- */
   const appearance = el('div', { class: 'card' },
-    el('div', { class: 'card-head' }, el('h3', {}, t('settings.appearance'))),
+    el('div', { class: 'card-head' }, el('h2', {}, t('settings.appearance'))),
     el('div', { class: 'card-body' },
       row(t('settings.language'),
         select(cfg.lang || 'auto', [
@@ -2137,7 +2521,7 @@ function viewSettings() {
 
   /* --- behaviour ---------------------------------------------------- */
   const behaviour = el('div', { class: 'card' },
-    el('div', { class: 'card-head' }, el('h3', {}, t('settings.behaviour'))),
+    el('div', { class: 'card-head' }, el('h2', {}, t('settings.behaviour'))),
     el('div', { class: 'card-body' },
       row(t('settings.notifications'), toggle(cfg.notifications !== false, (v) => save({ notifications: v }), t('settings.notifications')), t('settings.notificationsHint')),
       row(t('settings.localStats'),
@@ -2206,7 +2590,20 @@ function viewSettings() {
 
     const checkBtn = el('button', { class: 'btn sm', onclick: (e) => void checkNow(e.currentTarget) }, t('settings.updateCheckNow'));
 
-    // Version comparison — the two numbers plus a one-line verdict.
+    /**
+     * The auto-update settings behind one button.
+     *
+     * Source, interval, beta channel, proxy, silent install and the token are
+     * six controls a user opens once and then never touches again. Inlined in
+     * the card they pushed the version comparison — the one thing that needs a
+     * decision — below the fold, so they now live in a dialog and the card
+     * carries only the state and the two actions.
+     */
+    const openUpdateSettings = () => openUpdateSettingsModal(ucfg, saveUpdate);
+
+    // Version comparison — the two numbers plus a one-line verdict. Both
+    // actions sit at the right end: 检查更新 is the right-most element, so the
+    // eye lands on the primary action rather than having to search for it.
     const versionRow = el('div', { class: 'upd-version' },
       el('div', { class: 'upd-version-cell' },
         el('div', { class: 'set-hint' }, t('settings.updateCurrent')),
@@ -2216,6 +2613,7 @@ function viewSettings() {
         el('div', { class: 'set-hint' }, t('settings.updateLatest')),
         el('div', { class: `upd-version-num mono${u.hasUpdate === true ? ' is-new' : ''}` }, u.latest || '—')),
       el('div', { class: 'spacer' }),
+      el('button', { class: 'btn sm', onclick: openUpdateSettings }, t('settings.updateSettingsBtn')),
       checkBtn);
 
     body.appendChild(versionRow);
@@ -2264,7 +2662,8 @@ function viewSettings() {
         installBtn));
     }
 
-    // Release notes — capped height, preserved line breaks.
+    // The release notes of the single latest release stay on the card; the full
+    // history is the changelog panel below.
     if (u.latest) {
       body.appendChild(el('details', { class: 'upd-notes' },
         el('summary', {}, t('settings.updateNotes')),
@@ -2278,22 +2677,87 @@ function viewSettings() {
       }
     }
 
-    // --- configuration -------------------------------------------------
-    // The release repository is NOT editable here: it is a property of this
-    // build (package.json → repository), and asking the user to type their own
-    // project's address is the single most confusing thing this panel could do.
-    body.appendChild(el('div', { class: 'hrule mt-12' }));
+    return el('div', { class: 'card' },
+      el('div', { class: 'card-head' },
+        el('h2', {}, t('settings.updateTitle')),
+        el('span', { class: 'sub spacer' }, u.latest ? `v${u.latest}` : '')),
+      body);
+  }
+
+  /**
+   * Auto-update settings, behind the card's 更新设置 button.
+   *
+   * Every control writes through `saveUpdate` and re-renders from the snapshot
+   * the main process returns, so a value on screen is always the value the
+   * updater is using. The interval field keeps its draft in S so a re-render
+   * (a poll lands while the user is typing) does not discard half-typed input.
+   *
+   * The release repository is NOT editable: it is a property of this build
+   * (package.json → repository), and asking the user to type their own
+   * project's address is the single most confusing thing this dialog could do.
+   */
+  function openUpdateSettingsModal(ucfg, saveUpdate) {
+    const u = S.update || {};
+    const body = el('div', {});
+
+    const row = (label, control, hint) => {
+      const target = control.matches && control.matches(LABELABLE)
+        ? control
+        : (control.querySelector ? control.querySelector(LABELABLE) : null);
+      const labelNode = target
+        ? (target.id ? null : (target.id = `upd-set-${++setRowSeq}`), el('label', { for: target.id }, label))
+        : null;
+      if (target) {
+        const hintId = hint ? `${target.id}-hint` : null;
+        if (hintId) target.setAttribute('aria-describedby', hintId);
+        if (target.getAttribute('role') === 'switch' && !target.getAttribute('aria-label')) {
+          target.setAttribute('aria-label', label);
+        }
+      }
+      return el('div', { class: 'set-row' },
+        el('div', { class: 'set-label' },
+          labelNode || label,
+          hint ? el('div', { class: 'set-hint' }, hint) : null),
+        el('div', { class: 'set-control' }, control));
+    };
+
+    const switchFor = (on, onChange, name) => {
+      const b = el('button', {
+        class: `switch${on ? ' on' : ''}`,
+        role: 'switch',
+        'aria-checked': on ? 'true' : 'false',
+        'aria-label': name || null
+      }, el('span', { class: 'knob' }));
+      b.addEventListener('click', () => onChange(!on));
+      return b;
+    };
+
     body.appendChild(row(t('settings.updateSource'),
       el('span', { class: 'mono fs-11 muted' }, `github.com/${u.repo || ''}`),
       t('settings.updateSourceHint')));
 
     body.appendChild(row(t('settings.updateAuto'),
-      toggle(ucfg.auto, (v) => void saveUpdate({ auto: v }), t('settings.updateAuto')),
+      switchFor(ucfg.auto, (v) => void saveUpdate({ auto: v }), t('settings.updateAuto')),
       t('settings.updateAutoHint')));
 
-    const minutesValue = S.updateMinutesDraft !== ''
-      ? S.updateMinutesDraft
-      : String(ucfg.minutes || 20);
+    const minutesValue = S.updateMinutesDraft !== '' ? S.updateMinutesDraft : String(ucfg.minutes || 20);
+    /**
+     * One validator for both ways out of this field.
+     *
+     * The input's `onchange` checked 1–1440 but the Save button wrote whatever
+     * was typed (`0`, `99999`) straight to disk, and the failure text was the
+     * hint sentence rather than a statement that nothing was saved.
+     */
+    const commitMinutes = () => {
+      const draft = S.updateMinutesDraft;
+      const value = Math.round(Number(draft === '' ? ucfg.minutes : draft));
+      S.updateMinutesDraft = '';
+      if (!Number.isFinite(value) || value < 1 || value > 1440) {
+        toast(t('settings.updateIntervalInvalid'), 'err');
+        return;
+      }
+      void saveUpdate({ minutes: value });
+    };
     const minutesInput = el('input', {
       class: 'input-inline',
       type: 'number',
@@ -2302,31 +2766,15 @@ function viewSettings() {
       step: '1',
       value: minutesValue,
       oninput: (e) => { S.updateMinutesDraft = e.target.value; },
-      onchange: () => {
-        const value = Math.round(Number(S.updateMinutesDraft));
-        S.updateMinutesDraft = '';
-        if (!Number.isFinite(value) || value < 1 || value > 1440) {
-          toast(t('settings.updateIntervalHint'), 'err');
-          render();
-          return;
-        }
-        void saveUpdate({ minutes: value });
-      }
+      onchange: commitMinutes
     });
     body.appendChild(row(t('settings.updateInterval'),
       el('div', { class: 'flex gap-sm' }, minutesInput,
-        el('button', {
-          class: 'btn sm',
-          onclick: () => {
-            const value = Math.round(Number(S.updateMinutesDraft || ucfg.minutes));
-            S.updateMinutesDraft = '';
-            void saveUpdate({ minutes: value });
-          }
-        }, t('settings.updateSave'))),
+        el('button', { class: 'btn sm', onclick: commitMinutes }, t('settings.updateSave'))),
       t('settings.updateIntervalHint')));
 
     body.appendChild(row(t('settings.updateBeta'),
-      toggle(ucfg.beta, (v) => void saveUpdate({ beta: v }), t('settings.updateBeta')),
+      switchFor(ucfg.beta, (v) => void saveUpdate({ beta: v }), t('settings.updateBeta')),
       t('settings.updateBetaHint')));
 
     // Proxy: auto / direct / the Clash mixed port. A hand-edited settings file
@@ -2339,15 +2787,20 @@ function viewSettings() {
     if (ucfg.proxy && !proxyOptions.some(([v]) => v === ucfg.proxy)) {
       proxyOptions.push([ucfg.proxy, ucfg.proxy]);
     }
-    body.appendChild(row(t('settings.updateProxy'),
-      select(ucfg.proxy || 'auto', proxyOptions, (v) => void saveUpdate({ proxy: v })),
-      t('settings.updateProxyHint')));
+    const proxySel = el('select', { class: 'select-inline' });
+    for (const [v, label] of proxyOptions) {
+      const o = el('option', { value: v }, label);
+      if (v === (ucfg.proxy || 'auto')) o.selected = true;
+      proxySel.appendChild(o);
+    }
+    proxySel.addEventListener('change', () => void saveUpdate({ proxy: proxySel.value }));
+    body.appendChild(row(t('settings.updateProxy'), proxySel, t('settings.updateProxyHint')));
 
     // Silent install: NSIS /S /R. Windows-only wording, but the switch is
     // always visible so the setting is discoverable before it matters.
     if (window.ak.platform === 'win32') {
       body.appendChild(row(t('settings.updateSilent'),
-        toggle(ucfg.silent !== false, (v) => void saveUpdate({ silent: v }), t('settings.updateSilent')),
+        switchFor(ucfg.silent !== false, (v) => void saveUpdate({ silent: v }), t('settings.updateSilent')),
         t('settings.updateSilentHint')));
     }
 
@@ -2373,7 +2826,7 @@ function viewSettings() {
     });
     if (u.encryption === false) tokenInput.disabled = true;
 
-    const tokenRow = el('div', { class: 'flex gap-sm mt-6' },
+    const tokenRow = el('div', { class: 'flex gap-sm' },
       el('span', { class: 'chip' }, badge),
       tokenInput,
       el('button', {
@@ -2406,11 +2859,80 @@ function viewSettings() {
         el('div', { class: 'set-hint', id: 'set-update-token-hint' }, u.encryption === false ? t('settings.updateTokenNoCrypto') : t('settings.updateTokenHint'))),
       el('div', { class: 'set-control' }, tokenRow)));
 
-    return el('div', { class: 'card' },
+    openModal(t('settings.updateSettingsTitle'), body,
+      [el('button', { class: 'btn primary', onclick: closeModal }, t('common.done'))]);
+  }
+
+  /**
+   * Changelog panel: every published release, newest first.
+   *
+   * Fetched on its own, on first render, and cached for the session — the
+   * release history is a separate fact from the update *check* (which the
+   * updater throttles), so it must not go through `updateCheck`: clicking
+   * 检查更新 would then mean "also refetch 30 release bodies". A failure here
+   * says so in place and can be retried, rather than leaving an empty panel
+   * that looks like "this project has no releases".
+   */
+  function changelogCard() {
+    const list = el('div', { class: 'upd-changelog' }, el('div', { class: 'muted' }, t('common.loading')));
+
+    const card = el('div', { class: 'card mt-14' },
       el('div', { class: 'card-head' },
-        el('h3', {}, t('settings.updateTitle')),
-        el('span', { class: 'sub spacer' }, u.latest ? `v${u.latest}` : '')),
-      body);
+        el('h2', {}, t('settings.changelogTitle')),
+        el('span', { class: 'sub spacer' }, t('settings.changelogHint')),
+        el('button', { class: 'btn sm', onclick: () => load() }, '↻')),
+      el('div', { class: 'card-body' }, list));
+
+    const load = async () => {
+      list.innerHTML = '';
+      list.appendChild(el('div', { class: 'muted' }, t('common.loading')));
+      try {
+        const r = await window.ak.updateReleases(20);
+        if (!Array.isArray(r) || !r.length) {
+          list.innerHTML = '';
+          list.appendChild(el('div', { class: 'empty upd-log-empty' }, t('settings.changelogEmpty')));
+          return;
+        }
+        const current = (S.update && S.update.current) || (S.boot && S.boot.version) || '';
+        list.innerHTML = '';
+        for (const rel of r) {
+          // No per-row button: twenty "open the releases page" buttons are one
+          // action repeated twenty times, and each one only navigated away from
+          // the notes the user was reading. The version label itself is the
+          // link — one target per release, and the row still expands to show
+          // what that version changed.
+          const verLabel = el('span', { class: 'upd-log-ver mono' }, `v${rel.version}`);
+          if (rel.url) {
+            verLabel.classList.add('clickable');
+            verLabel.setAttribute('role', 'link');
+            verLabel.setAttribute('tabindex', '0');
+            verLabel.setAttribute('title', t('settings.updateOpenPage'));
+            const open = (e) => { e.preventDefault(); e.stopPropagation(); void window.ak.openReleasePage(rel.url).catch(() => {}); };
+            verLabel.addEventListener('click', open);
+            verLabel.addEventListener('keydown', (e) => {
+              if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); }
+            });
+          }
+          list.appendChild(el('details', { class: 'upd-log-item' },
+            el('summary', {},
+              verLabel,
+              el('span', { class: 'upd-log-date' }, (rel.date || '').slice(0, 10)),
+              String(rel.version) === String(current)
+                ? el('span', { class: 'chip ok' }, t('settings.changelogCurrent'))
+                : null,
+              el('span', { class: 'spacer' }),
+              rel.prerelease ? el('span', { class: 'chip warn' }, t('settings.changelogPre')) : null),
+            el('pre', { class: 'upd-log-notes' }, rel.notes || t('update.noNotes'))));
+        }
+      } catch (e) {
+        reportUiError('error', e);
+        list.innerHTML = '';
+        inlineRetry(list, () => load());
+      }
+    };
+
+    load();
+    return card;
   }
 
   /**
@@ -2435,8 +2957,8 @@ function viewSettings() {
       String(t('settings.localStatsValue', r.counts)).split(' · ')
         .forEach((part) => box.appendChild(el('span', { class: 'nowrap' }, part)));
     }).catch((e) => {
-      // Plain "—" used to hide the failure; the row now says it failed and can
-      // be retried in place (retry re-renders the settings view).
+      // A plain "—" would hide the failure; the row says it failed and can be
+      // retried in place (retry re-renders the settings view).
       reportUiError('error', e);
       inlineRetry(box, () => render());
     });
@@ -2445,16 +2967,17 @@ function viewSettings() {
 
   /* --- storage ------------------------------------------------------ */
 
+  // No backup row: the store keeps no file copies, and a `backups\` directory
+  // left by an older build is deleted on the next launch (settings.rs
+  // `remove_legacy_backups`). Pointing the user at a folder that no longer
+  // exists would be worse than saying nothing.
   const storage = el('div', { class: 'card' },
-    el('div', { class: 'card-head' }, el('h3', {}, t('settings.storage'))),
+    el('div', { class: 'card-head' }, el('h2', {}, t('settings.storage'))),
     el('div', { class: 'card-body' },
       el('div', { class: 'alert info' }, t('settings.writePolicy')),
       el('dl', { class: 'kv mt-12' },
         el('dt', {}, t('settings.storeRoot')), el('dd', { class: 'mono' }, S.boot.storeRoot),
-        el('dt', {}, t('settings.backups')), el('dd', { class: 'mono' }, S.boot.storeRoot + '\\backups'),
-        el('dt', {}, t('settings.auditLog')), el('dd', { class: 'mono' }, S.boot.storeRoot + '\\audit.jsonl'),
-        el('dt', {}, t('settings.sandbox')), el('dd', {}, S.sandbox ? t('settings.sandboxOn') : t('settings.sandboxOff')),
-        el('dt', {}, t('settings.stagedChanges')), el('dd', {}, t('settings.pendingCount', { n: S.pending.length }))
+        el('dt', {}, t('settings.auditLog')), el('dd', { class: 'mono' }, S.boot.storeRoot + '\\audit.jsonl')
       ),
       el('div', { class: 'mt-12' },
         el('button', { class: 'btn', onclick: () => window.ak.openStore() }, t('settings.openStore')))
@@ -2463,7 +2986,7 @@ function viewSettings() {
   /* --- adapters ----------------------------------------------------- */
   const adapters = el('div', { class: 'card' },
     el('div', { class: 'card-head' },
-      el('h3', {}, t('settings.adapters')),
+      el('h2', {}, t('settings.adapters')),
       el('span', { class: 'sub spacer' }, t('settings.declared', { n: S.boot.agents.length }))),
     el('div', { class: 'card-body' },
       el('div', { class: 'muted fs-11 mb-8' }, t('settings.adaptersHint')),
@@ -2472,9 +2995,11 @@ function viewSettings() {
     ));
 
   wrap.appendChild(el('div', { class: 'grid grid-2' }, appearance, behaviour));
-  // Full width: the update card holds version comparison, release notes,
-  // channel/proxy/token controls — half a column squeezes the token row.
+  // Full width: the update card holds the version comparison and the latest
+  // release notes; half a column squeezes them. The channel/proxy/token
+  // controls moved behind its 更新设置 button.
   wrap.appendChild(el('div', { class: 'mt-14' }, updateCard()));
+  wrap.appendChild(changelogCard());
   wrap.appendChild(el('div', { class: 'grid grid-2 mt-14' }, storage, adapters));
   return wrap;
 }
@@ -2501,7 +3026,16 @@ function applyTheme(pref) {
 
 async function openAsset(id) {
   S.selected = id;
-  const r = await window.ak.readAsset(id);
+  let r;
+  try {
+    r = await window.ak.readAsset(id);
+  } catch (e) {
+    // No catch here meant a rejected invoke turned the row click into a dead
+    // click: no panel, no toast, nothing.
+    reportUiError('error', e);
+    S.selected = null;
+    return toast(t('toast.readFailed'), 'err');
+  }
   if (!r.ok) return toast(r.error, 'err');
   const a = r.asset;
   const editable = a.writable && (a.kind === 'skill' || a.kind === 'rule' || a.kind === 'memory');
@@ -2546,7 +3080,7 @@ async function openAsset(id) {
   ));
 
   /* actions */
-  const actions = el('div', { class: 'flex gap-sm my-14' });
+  const actions = el('div', { class: 'flex flex-wrap gap-sm my-14' });
   if (a.kind === 'skill' && a.writable) {
     actions.appendChild(el('button', { class: 'btn primary', onclick: () => openSkillEditor(a) }, t('editor.edit')));
   }
@@ -2558,7 +3092,12 @@ async function openAsset(id) {
     actions.appendChild(el('button', { class: 'btn primary', onclick: () => openMcpEditor(a) }, t('mcp.editServer')));
     actions.appendChild(el('button', { class: 'btn danger', onclick: () => doDelete(a) }, t('common.remove')));
   }
-  actions.appendChild(el('button', { class: 'btn', onclick: () => openDistribute(a) }, t('distribute.go') + '…'));
+  // Same gate as the context menu (`showCtxMenu`): a plugin cache or a
+  // host-owned file has no writable destination, and offering the button there
+  // opened an empty picker.
+  if (a.writable && DISTRIBUTE_KEY[a.kind]) {
+    actions.appendChild(el('button', { class: 'btn', onclick: () => openDistribute(a) }, t('distribute.go') + '…'));
+  }
   if (a.kind !== 'mcp' && a.writable) {
     actions.appendChild(el('button', { class: 'btn danger', onclick: () => doDelete(a) }, t('verb.delete')));
   }
@@ -2596,6 +3135,15 @@ async function saveSelected() {
   const content = ta.value;
   const d = await window.ak.diff(S.selected, content);
   if (d.ok && d.lines.length === 0) return toast(t('editor.noChanges'), 'warn');
+  const asset = (S.data?.assets || []).find((a) => a.id === S.selected);
+  // The diff already ran, so the dialog can name the file that changes; the
+  // write itself waits for the answer.
+  const ok = await confirmWrite({
+    action: t('verb.update'),
+    targets: [asset ? asset.file : S.selected],
+    detail: t('confirm.saveAssetDetail', { name: asset ? asset.name : S.selected })
+  });
+  if (!ok) return;
   const r = await window.ak.saveMarkdown(S.selected, content);
   if (!r.ok) {
     if (r.blocked) {
@@ -2604,10 +3152,9 @@ async function saveSelected() {
         [el('button', { class: 'btn', onclick: closeModal }, t('common.close'))]);
       return;
     }
-    return toast(r.error || t('toast.writeFailed'), 'err');
-  }
-  S.dirty = false;
-  toast(t('toast.savedBackup', { tx: r.txId }), 'ok');
+    return reportWriteFailure(r, 'toast.writeFailed');
+  }  S.dirty = false;
+  toast(t('toast.savedBackup'), 'ok');
   await rescan(true);
   openAsset(S.selected);
 }
@@ -2622,11 +3169,14 @@ async function doDelete(a) {
   const r = a.kind === 'mcp' ? await window.ak.deleteMcp(a.id) : await window.ak.deleteAsset(a.id);
   if (!r.ok) return toast(r.error, 'err');
   S.checked.delete(a.id);   // keep the batch bar honest after a drawer delete
-  toast(t('toast.deleted', { tx: r.txId }), 'ok');
+  toast(t('toast.deleted'), 'ok');
   // A delete is the one destructive action the user is most likely to walk
   // away from — it must reach them even if they were not looking at the window.
   maybeNotify('notify.deleted', { name: a.name });
-  closeDrawer();
+  // The asset is gone; the unsaved edit can no longer be written, so the discard
+  // guard must not ask about it on the way out.
+  S.dirty = false;
+  void closeDrawer();
   $('#scrim').classList.remove('on');
   await rescan(true);
 }
@@ -2688,6 +3238,12 @@ function openSkillEditor(asset) {
   const bodyVal = asset ? asset.raw ? asset.raw.replace(/^---[\s\S]*?\n---\n/, '') : '' : '';
 
   const f = {};
+  /** A label that is actually attached to its control (click-to-focus works). */
+  let fieldSeq = 0;
+  const lab = (text, control) => {
+    if (!control.id) control.id = `ed-field-${++fieldSeq}`;
+    return el('label', { for: control.id }, text);
+  };
   const mk = (key, label, hint, value, ph, locked) => {
     const i = el('input', { placeholder: ph || '', value: value ?? '' });
     // A skill's name is its directory name. Letting the field be edited on an
@@ -2700,7 +3256,7 @@ function openSkillEditor(asset) {
       i.setAttribute('aria-readonly', 'true');
     }
     f[key] = i;
-    return el('div', { class: 'form-row' }, el('label', {}, label), i,
+    return el('div', { class: 'form-row' }, lab(label, i), i,
       (hint || locked) ? el('div', { class: 'form-hint' }, locked ? t('editor.nameLocked') : hint) : null);
   };
 
@@ -2731,6 +3287,15 @@ function openSkillEditor(asset) {
   save.addEventListener('click', async () => {
     const targets = picker.get();
     if (!targets.length) return toast(t('editor.selectTarget'), 'warn');
+    // Directory-level list: the skill's folder name comes from the form and is
+    // validated by the engine, so naming `<dir>\<name>` here could print a path
+    // that never gets created.
+    const ok = await confirmWrite({
+      action: t(asset ? 'verb.update' : 'verb.create'),
+      targets: targetPaths(targets, 'skills'),
+      detail: t(asset ? 'confirm.skillUpdateDetail' : 'confirm.skillCreateDetail', { name: f.name.value.trim() })
+    });
+    if (!ok) return;
     const r = await window.ak.saveSkill({
       skillId: asset ? asset.id : null,
       data: {
@@ -2750,9 +3315,10 @@ function openSkillEditor(asset) {
         [el('button', { class: 'btn', onclick: closeModal }, t('common.close'))]);
       return;
     }
-    if (!r.ok) return toast(r.error || t('toast.writeFailed'), 'err');
+    if (!r.ok) { reopenCovered(); return reportWriteFailure(r, 'toast.writeFailed'); }
     closeModal();
-    toast(t('toast.written', { verb: t(asset ? 'verb.updated' : 'verb.created'), n: r.written.length, tx: r.txId }), 'ok');
+    coveredSnap = null;
+    toast(t('toast.written', { verb: t(asset ? 'verb.updated' : 'verb.created'), n: r.written.length }), 'ok');
     await rescan(true);
   });
 
@@ -2767,7 +3333,7 @@ function kvLines(obj, sep) {
 /**
  * MCP server editor.
  * A structured form, not a JSON text box. The engine already validates
- * transports (core/validate.js), and a JSON textarea made the user the
+ * transports (`core/validate.rs`), and a JSON textarea made the user the
  * integration's last line of defence against a typo that the validator would
  * have caught two fields earlier. The raw JSON box stays available under
  * "advanced" for configs this form cannot express (headers, custom types),
@@ -2800,13 +3366,20 @@ function openMcpEditor(asset) {
   const envI = linesBox('editor editor-short', kvLines(cfg.env, '='));
   const headersI = linesBox('editor editor-short', kvLines(cfg.headers, ': '));
 
+  /** Attach each label to its control, so clicking the text focuses the field. */
+  let mcpFieldSeq = 0;
+  const mcpLab = (text, control) => {
+    if (!control.id) control.id = `mcp-field-${++mcpFieldSeq}`;
+    return el('label', { for: control.id }, text);
+  };
+
   const stdioBox = el('div', {},
-    el('div', { class: 'form-row' }, el('label', {}, t('editor.mcpCommand')), cmdI),
-    el('div', { class: 'form-row' }, el('label', {}, t('editor.mcpArgs')), argsI,
+    el('div', { class: 'form-row' }, mcpLab(t('editor.mcpCommand'), cmdI), cmdI),
+    el('div', { class: 'form-row' }, mcpLab(t('editor.mcpArgs'), argsI), argsI,
       el('div', { class: 'form-hint' }, t('editor.mcpArgsHint'))));
   const httpBox = el('div', {},
-    el('div', { class: 'form-row' }, el('label', {}, t('editor.mcpUrl')), urlI),
-    el('div', { class: 'form-row' }, el('label', {}, t('editor.mcpHeaders')), headersI,
+    el('div', { class: 'form-row' }, mcpLab(t('editor.mcpUrl'), urlI), urlI),
+    el('div', { class: 'form-row' }, mcpLab(t('editor.mcpHeaders'), headersI), headersI,
       el('div', { class: 'form-hint' }, t('editor.mcpHeadersHint'))));
 
   /** Which transport section is on screen — a display toggle, not a re-render. */
@@ -2878,15 +3451,15 @@ function openMcpEditor(asset) {
 
   const node = el('div', {},
     el('div', { class: 'alert info' }, t('mcp.siblingNote')),
-    el('div', { class: 'form-row' }, el('label', {}, t('editor.serverName')), nameI),
+    el('div', { class: 'form-row' }, mcpLab(t('editor.serverName'), nameI), nameI),
     el('div', { class: 'form-grid' },
-      el('div', { class: 'form-row' }, el('label', {}, t('editor.mcpTransport')), transportSel),
-      el('div', { class: 'form-row' }, el('label', {}, t('th.scope')), scopeSel)),
+      el('div', { class: 'form-row' }, mcpLab(t('editor.mcpTransport'), transportSel), transportSel),
+      el('div', { class: 'form-row' }, mcpLab(t('th.scope'), scopeSel), scopeSel)),
     el('div', { class: 'form-row' },
-      el('label', {}, t('th.agent')), agentSel),
+      mcpLab(t('th.agent'), agentSel), agentSel),
     form,
     el('div', { class: 'form-row' },
-      el('label', {}, t('editor.mcpEnv')), envI,
+      mcpLab(t('editor.mcpEnv'), envI), envI,
       el('div', { class: 'form-hint' }, t('editor.mcpEnvHint'))),
     el('details', { class: 'mt-12' },
       el('summary', { class: 'muted fs-11' }, t('editor.mcpAdvanced')),
@@ -2899,6 +3472,17 @@ function openMcpEditor(asset) {
     const parsed = buildConfig();
     if (parsed.error) return toast(t('err.badJson', { msg: parsed.error }), 'err');
     if (!parsed.command && !parsed.url) return toast(t('editor.mcpNeedTransport'), 'err');
+    // The engine merges the server into the agent's MCP config file; the
+    // adapter declares which file that is, so it is resolved the same way the
+    // distribution dialog resolves its directories.
+    const ok = await confirmWrite({
+      action: t(asset ? 'verb.update' : 'verb.create'),
+      targets: asset && asset.file
+        ? [asset.file]
+        : targetPaths([{ agentId: agentSel.value, scope: scopeSel.value, projectId: null }], 'mcp'),
+      detail: t(asset ? 'confirm.mcpUpdateDetail' : 'confirm.mcpCreateDetail', { name: nameI.value.trim() })
+    });
+    if (!ok) return;
     const r = await window.ak.upsertMcp({
       name: nameI.value.trim(), config: parsed,
       agentId: agentSel.value, scope: scopeSel.value, projectId: null,
@@ -2910,9 +3494,10 @@ function openMcpEditor(asset) {
         [el('button', { class: 'btn', onclick: closeModal }, t('common.close'))]);
       return;
     }
-    if (!r.ok) return toast(r.error || t('toast.writeFailed'), 'err');
+    if (!r.ok) { reopenCovered(); return reportWriteFailure(r, 'toast.writeFailed'); }
     closeModal();
-    toast(t('toast.mcpSaved', { tx: r.txId }), 'ok');
+    coveredSnap = null;
+    toast(t('toast.mcpSaved'), 'ok');
     await rescan(true);
   });
 
@@ -2926,6 +3511,31 @@ function openMcpEditor(asset) {
  * agents would be harder to reason about than N small reversible ones.
  * Read-only assets (cached plugins) are skipped with a note.
  */
+/**
+ * Mark the batch bar busy for the duration of a serial loop.
+ *
+ * The bar was the only feedback a long multi-asset write had, and it stayed
+ * clickable: a second click started a second loop over the same assets. Now the
+ * buttons are disabled and the count becomes progress (aria-busy tells AT).
+ */
+function batchBusy() {
+  const bar = document.querySelector('.batchbar');
+  if (!bar) return { update() {}, done() {} };
+  const buttons = [...bar.querySelectorAll('button')];
+  const count = bar.querySelector('.count');
+  const before = count ? count.textContent : '';
+  bar.setAttribute('aria-busy', 'true');
+  for (const b of buttons) b.disabled = true;
+  return {
+    update(n, total) { if (count) count.textContent = t('batch.progress', { n, total }); },
+    done() {
+      bar.removeAttribute('aria-busy');
+      for (const b of buttons) b.disabled = false;
+      if (count) count.textContent = before;
+    }
+  };
+}
+
 async function doBatchDelete(selected) {
   const deletable = selected.filter((a) => a.writable);
   const skipped = selected.length - deletable.length;
@@ -2936,12 +3546,18 @@ async function doBatchDelete(selected) {
     confirmLabel: t('verb.delete'), danger: true
   });
   if (!ok) return;
+  const busy = batchBusy();
   let done = 0, failed = 0, lastTx = null;
-  for (const a of deletable) {
-    try {
-      const r = a.kind === 'mcp' ? await window.ak.deleteMcp(a.id) : await window.ak.deleteAsset(a.id);
-      if (r.ok) { done++; lastTx = r.txId; } else failed++;
-    } catch (e) { failed++; }
+  try {
+    for (const a of deletable) {
+      busy.update(done + failed + 1, deletable.length);
+      try {
+        const r = a.kind === 'mcp' ? await window.ak.deleteMcp(a.id) : await window.ak.deleteAsset(a.id);
+        if (r.ok) { done++; lastTx = r.txId; } else failed++;
+      } catch (e) { failed++; }
+    }
+  } finally {
+    busy.done();
   }
   S.checked.clear();
   if (skipped) toast(t('batch.noWritable'), 'warn');
@@ -2983,17 +3599,34 @@ function openBatchDistribute(selected) {
   const go = el('button', { class: 'btn primary' }, t('batch.distribute'));
   go.addEventListener('click', async () => {
     if (!chosen.length) return toast(t('distribute.none'), 'warn');
+    const ok = await confirmWrite({
+      action: t('verb.distribute'),
+      targets: targetPaths(chosen, key, true),
+      detail: t('confirm.batchDistributeDetail', { assets: movable.length, targets: chosen.length })
+    });
+    if (!ok) return;
     let written = 0, failed = 0, lastTx = null;
-    for (const a of movable) {
-      try {
-        const r = await window.ak.distribute(a.id, chosen);
-        if (r.ok) { written += r.written.length; lastTx = r.txId; } else failed++;
-      } catch (e) { failed++; }
+    const total = movable.length;
+    // Same reason as the delete loop: this is N sequential IPC writes with the
+    // modal still up, so the button must show progress and refuse re-entry.
+    go.disabled = true;
+    try {
+      for (const [i, a] of movable.entries()) {
+        go.textContent = t('batch.progress', { n: i + 1, total });
+        try {
+          const r = await window.ak.distribute(a.id, chosen);
+          if (r.ok) { written += r.written.length; lastTx = r.txId; } else failed++;
+        } catch (e) { failed++; }
+      }
+    } finally {
+      go.disabled = false;
+      go.textContent = t('batch.distribute');
     }
     closeModal();
+    coveredSnap = null;
     S.checked.clear();
     if (written) toast(t('toast.batchDistributed', { n: written }), 'ok');
-    if (failed) toast(`${failed} failed`, 'err');
+    if (failed) toast(t('toast.someFailed', { n: failed }), 'err');
     await rescan(true);
     void lastTx;
   });
@@ -3012,9 +3645,19 @@ async function doExportBundle(selected) {
 }
 
 async function doImportBundle() {
+  // The picker and the write are one IPC call, so the only place to ask is
+  // before it: the manifest decides which agent each asset lands in, and those
+  // are always the installed agents' own directories.
+  const homes = [...new Set(S.boot.agents.filter((a) => a.installed).map((a) => a.home))];
+  const ok = await confirmWrite({
+    action: t('verb.import'),
+    targets: homes,
+    detail: t('confirm.importDetail')
+  });
+  if (!ok) return;
   const r = await window.ak.importBundle();
   if (!r.ok) return toast(r.canceled ? t('toast.pickCancelled') : r.error, 'warn');
-  toast(t('bundle.imported', { n: r.imported.length, tx: r.txId }), 'ok');
+  toast(t('bundle.imported', { n: r.imported.length }), 'ok');
   await rescan(true);
 }
 
@@ -3064,26 +3707,49 @@ function showCtxMenu(e, a) {
   m.classList.add('on');
 }
 
-function openDistribute(asset) {  const key = asset.kind === 'rule' ? 'rule' : asset.kind === 'memory' ? 'memory' : 'skill';
+/**
+ * Adapter directory list that holds each distributable kind.
+ *
+ * `targetPicker` above has always used the plural list names; this picker used
+ * the singular kind (`a.globals['skill']`), which does not exist in the
+ * bootstrap payload — every destination was filtered out and the dialog opened
+ * empty. Keep the mapping in one place so the two pickers cannot drift again.
+ */
+const DISTRIBUTE_KEY = { skill: 'skills', rule: 'rules', memory: 'memory', mcp: 'mcp' };
+
+function openDistribute(asset) {
+  const key = DISTRIBUTE_KEY[asset.kind] || 'skills';
   const box = el('div', { class: 'picker-box' });
-  const chosen = [];
+  const chosen = new Map();
+
+  const addTarget = (id, target, label, rels) => {
+    const cb = el('input', { type: 'checkbox', 'aria-label': label });
+    cb.addEventListener('change', () => {
+      if (cb.checked) chosen.set(id, target); else chosen.delete(id);
+    });
+    box.appendChild(el('label', { class: 'check-row' }, cb,
+      el('span', {}, el('b', {}, label), el('span', { class: 'muted' }, `  ${rels.join(', ')}`))));
+  };
+
   for (const a of S.boot.agents) {
     if (!a.installed) continue;
-    const rels = a.globals[key] || a.projects[key] || [];
+    const rels = a.globals[key] || [];
     if (!rels.length) continue;
-    const id = `${a.id}|global`;
-    const cb = el('input', { type: 'checkbox' });
-    cb.addEventListener('change', () => { if (cb.checked) chosen.push({ agentId: a.id, scope: 'global' }); });
-    box.appendChild(el('label', { class: 'check-row' }, cb,
-      el('span', {}, el('b', {}, a.label), el('span', { class: 'muted' }, `  ${rels.join(', ')}`))));
+    addTarget(`${a.id}|global`, { agentId: a.id, scope: 'global', projectId: null }, a.label, rels);
   }
+  // A project destination is (registered project × installed agent): the engine
+  // resolves it as registry[projectId] + that agent's project-relative dir, so
+  // the agent half must come from the clicked row, never a fixed id.
   for (const p of (S.data?.projects || [])) {
-    const id = `${p.id}|project`;
-    const cb = el('input', { type: 'checkbox' });
-    cb.addEventListener('change', () => { if (cb.checked) chosen.push({ agentId: 'workbuddy', scope: 'project', projectId: p.id }); });
-    box.appendChild(el('label', { class: 'check-row' }, cb,
-      el('span', {}, el('b', {}, p.name), el('span', { class: 'muted' }, t('projects.countBy', { scope: 'project', n: p.counts[key] || 0, kind: key })))));
+    for (const a of S.boot.agents) {
+      if (!a.installed) continue;
+      const rels = a.projects[key] || [];
+      if (!rels.length) continue;
+      addTarget(`${a.id}|${p.id}`, { agentId: a.id, scope: 'project', projectId: p.id },
+        `${a.label} · ${p.name}`, rels);
+    }
   }
+  if (!box.children.length) box.appendChild(el('div', { class: 'empty' }, t('distribute.none')));
 
   const node = el('div', {},
     el('div', { class: 'alert info' }, t('distribute.writeNote')),
@@ -3091,11 +3757,19 @@ function openDistribute(asset) {  const key = asset.kind === 'rule' ? 'rule' : a
 
   const go = el('button', { class: 'btn primary' }, t('distribute.go'));
   go.addEventListener('click', async () => {
-    if (!chosen.length) return toast(t('distribute.selectDest'), 'warn');
-    const r = await window.ak.distribute(asset.id, chosen);
+    if (!chosen.size) return toast(t('distribute.selectDest'), 'warn');
+    const picks = [...chosen.values()];
+    const ok = await confirmWrite({
+      action: t('verb.distribute'),
+      targets: targetPaths(picks, key, true),
+      detail: t('confirm.distributeDetail', { name: asset.name, n: picks.length })
+    });
+    if (!ok) return;
+    const r = await window.ak.distribute(asset.id, picks);
     closeModal();
-    if (!r.ok) return toast(r.error || t('toast.distributeFailed'), 'err');
-    toast(t('toast.distributed', { n: r.written.length, tx: r.txId }), 'ok');
+    coveredSnap = null;
+    if (!r.ok) return reportWriteFailure(r, 'toast.distributeFailed');
+    toast(t('toast.distributed', { n: r.written.length }), 'ok');
     for (const s of r.skipped || []) toast(`${s.target.agentId}: ${zhText(s.reason)}`, 'warn');
     await rescan(true);
   });

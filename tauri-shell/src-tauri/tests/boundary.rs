@@ -8,7 +8,7 @@
 //! sharing one journal, and a socket that never answers. Each test therefore
 //! asserts a property that must hold no matter how the implementation is
 //! written (bytes on disk, line count, elapsed time), and each has a mutation
-//! that makes it red (recorded in the delivery report).
+//! that makes it red.
 
 mod common;
 
@@ -38,8 +38,8 @@ impl Fixture {
         Fixture { dir, root }
     }
 
-    fn store(&self, sandbox: bool) -> Store {
-        Store::new(&self.root, sandbox)
+    fn store(&self) -> Store {
+        Store::new(&self.root)
     }
 }
 
@@ -116,7 +116,7 @@ fn a_path_past_max_path_is_written_and_read_back_byte_for_byte() {
         "超出路径上限".repeat(4)
     );
 
-    let store = fx.store(false);
+    let store = fx.store();
     let tx = store.transaction(
         &[Op::write(&target, &content)],
         &json!({ "kind": "skill", "action": "create", "assetName": "far-away" }),
@@ -136,10 +136,6 @@ fn a_path_past_max_path_is_written_and_read_back_byte_for_byte() {
         "the asset read path cannot read back what the write path produced"
     );
 
-    // `real()` is pure path maths, so it must be the identity when the sandbox
-    // is off — a shadow mapping applied here would write somewhere else.
-    assert_eq!(store.real(&target), target);
-
     // Nothing half-written may be left behind: the temp file `atomic_write`
     // creates and renames sits in the same directory as the target.
     let parent = Path::new(&target).parent().expect("parent");
@@ -148,44 +144,12 @@ fn a_path_past_max_path_is_written_and_read_back_byte_for_byte() {
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names, vec!["SKILL.md".to_string()], "leftover files: {:?}", names);
-}
-
-/// In sandbox mode the same long path must land under the shadow root, and
-/// `pending.json` must describe both sides of it.
-#[test]
-fn store_real_maps_a_path_past_max_path_into_the_sandbox_tree() {
-    let fx = Fixture::new("long-shadow");
-    let target = long_target(&fx.dir, "SKILL.md");
-    let store = fx.store(true);
-
-    let real = store.real(&target);
-    assert_ne!(real, target, "sandbox mode must reroute the write");
-    assert!(
-        real.starts_with(&format!("{}{}", fx.root, std::path::MAIN_SEPARATOR)),
-        "the shadow path is not under the store root: {}",
-        real
-    );
-
-    let tx = store.transaction(
-        &[Op::write(&target, "shadowed\n")],
-        &json!({ "kind": "skill", "action": "create" }),
-    );
-    assert_eq!(tx["ok"], json!(true), "the staged write was refused: {}", tx);
     assert_eq!(
-        std::fs::read(verbatim_join(&real)).ok(),
-        Some(b"shadowed\n".to_vec()),
-        "the staged bytes are not at the shadow path"
+        names,
+        vec!["SKILL.md".to_string()],
+        "leftover files: {:?}",
+        names
     );
-
-    let pending = read(&store.pending_file());
-    let changes = serde_json::from_str::<Value>(&pending).expect("pending.json");
-    let first = &changes["changes"][0];
-    // `pending.real` is the path the *caller* asked for, `shadow` is where the
-    // bytes actually went — `unshadow(shadow)` must give the caller's path back.
-    assert_eq!(first["real"], json!(target), "{}", pending);
-    assert_eq!(first["shadow"], json!(real), "{}", pending);
-    assert_eq!(store.unshadow(&real), target, "the shadow path does not map back");
 }
 
 /* ------------------------------------------------------------------ */
@@ -223,7 +187,7 @@ fn write_once(store: &Store, path: &str, content: &str) -> Value {
 fn eight_threads_writing_different_files_keep_the_journal_intact() {
     let fx = Fixture::new("conc-distinct");
     let root = fx.root.clone();
-    let store = Arc::new(fx.store(false));
+    let store = Arc::new(fx.store());
     let barrier = Arc::new(Barrier::new(8));
     let failures = Arc::new(AtomicUsize::new(0));
 
@@ -257,11 +221,19 @@ fn eight_threads_writing_different_files_keep_the_journal_intact() {
         }
     });
 
-    assert_eq!(failures.load(Ordering::Relaxed), 0, "some writes failed or lost content");
+    assert_eq!(
+        failures.load(Ordering::Relaxed),
+        0,
+        "some writes failed or lost content"
+    );
 
     let audit = read(&store.audit_file());
     let lines: Vec<&str> = audit.split('\n').filter(|l| !l.is_empty()).collect();
-    assert_eq!(lines.len(), 200, "audit.jsonl must hold exactly one line per transaction");
+    assert_eq!(
+        lines.len(),
+        200,
+        "audit.jsonl must hold exactly one line per transaction"
+    );
     for (n, line) in lines.iter().enumerate() {
         serde_json::from_str::<Value>(line)
             .unwrap_or_else(|e| panic!("line {} is not valid JSON ({}): {}", n + 1, e, line));
@@ -271,17 +243,16 @@ fn eight_threads_writing_different_files_keep_the_journal_intact() {
     // store keeps is still parseable — a half-renamed settings.json would break
     // the next launch.
     let mut leftovers: Vec<String> = Vec::new();
-    let mut backups: Vec<String> = Vec::new();
-    collect(&fx.dir, "", &mut leftovers, &mut backups);
-    assert!(leftovers.is_empty(), "temp files left behind: {:?}", leftovers);
-    for rel in &backups {
-        // A transaction directory without a readable `tx.json` is a backup that
-        // cannot be rolled back — worse than none, because the UI lists it.
-        let body = std::fs::read_to_string(Path::new(&fx.root).join(rel))
-            .unwrap_or_else(|e| panic!("backup {} is unreadable: {}", rel, e));
-        serde_json::from_str::<Value>(&body)
-            .unwrap_or_else(|e| panic!("backup {} is not JSON: {}", rel, e));
-    }
+    collect(&fx.dir, "", &mut leftovers);
+    assert!(
+        leftovers.is_empty(),
+        "temp files left behind: {:?}",
+        leftovers
+    );
+    assert!(
+        !fx.dir.join("backups").exists(),
+        "200 transactions must not create a backup tree"
+    );
     for name in ["settings.json", "meta.json", "pending.json"] {
         let p = format!("{}{}{}", fx.root, std::path::MAIN_SEPARATOR, name);
         if let Ok(text) = std::fs::read_to_string(&p) {
@@ -291,10 +262,9 @@ fn eight_threads_writing_different_files_keep_the_journal_intact() {
     }
 }
 
-/// Walk the store tree, collecting temp files and backup `tx.json`s by relative
-/// path. Recursive because a leftover can sit next to any target, not just at
-/// the root.
-fn collect(dir: &Path, base: &str, temp: &mut Vec<String>, backups: &mut Vec<String>) {
+/// Walk the store tree, collecting temp files by relative path. Recursive
+/// because a leftover can sit next to any target, not just at the root.
+fn collect(dir: &Path, base: &str, temp: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -306,11 +276,9 @@ fn collect(dir: &Path, base: &str, temp: &mut Vec<String>, backups: &mut Vec<Str
             format!("{}/{}", base, name)
         };
         if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            collect(&entry.path(), &rel, temp, backups);
+            collect(&entry.path(), &rel, temp);
         } else if name.contains("agentkeeper-tmp") {
             temp.push(rel);
-        } else if name == "tx.json" && rel.contains("backups/") {
-            backups.push(rel);
         }
     }
 }
@@ -328,7 +296,7 @@ fn collect(dir: &Path, base: &str, temp: &mut Vec<String>, backups: &mut Vec<Str
 fn four_threads_writing_one_path_leave_exactly_one_writers_content() {
     let fx = Fixture::new("conc-same");
     let root = fx.root.clone();
-    let store = Arc::new(fx.store(false));
+    let store = Arc::new(fx.store());
     let path = format!("{}{}shared.md", root, std::path::MAIN_SEPARATOR);
     let barrier = Arc::new(Barrier::new(4));
     let failed = Arc::new(AtomicUsize::new(0));
@@ -388,7 +356,7 @@ fn four_threads_writing_one_path_leave_exactly_one_writers_content() {
         failed.load(Ordering::Relaxed),
         0,
         "{} of 40 transactions were refused outright",
-         failed.load(Ordering::Relaxed)
+        failed.load(Ordering::Relaxed)
     );
     assert_eq!(
         torn.load(Ordering::Relaxed),
@@ -485,7 +453,11 @@ fn a_target_held_without_delete_sharing_makes_atomic_write_fall_back_in_place() 
     // a different byte count, not as an error.
     let new = "{\"lang\":\"auto\",\"theme\":\"dark\",\"note\":\"回退写入\"}\n";
     let result = settings::atomic_write(&target, new);
-    assert!(result.is_ok(), "the fallback branch reported a failure: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "the fallback branch reported a failure: {:?}",
+        result.err()
+    );
 
     assert_eq!(
         std::fs::read(&target).expect("read the target"),
@@ -501,7 +473,12 @@ fn a_target_held_without_delete_sharing_makes_atomic_write_fall_back_in_place() 
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names, vec!["settings.json".to_string()], "leftover files: {:?}", names);
+    assert_eq!(
+        names,
+        vec!["settings.json".to_string()],
+        "leftover files: {:?}",
+        names
+    );
 
     // Now let go of the handle and read again: the bytes must have reached the
     // disk, not merely a cache or a buffered handle.
@@ -704,8 +681,11 @@ fn a_silent_peer_times_out_the_update_request() {
 /// reading: both call sites pass a deadline of their own.
 #[test]
 fn every_outbound_call_names_its_own_deadline() {
-    // 6 s is the JS `AbortController` value; a default would drift silently.
-    assert_eq!(agentkeeper_shell_lib::core::discover::SEARCH_TIMEOUT_MS, 6000);
+    // 6 s is the fixed policy value; a default would drift silently.
+    assert_eq!(
+        agentkeeper_shell_lib::core::discover::SEARCH_TIMEOUT_MS,
+        6000
+    );
     // The updater allows 30 s per API call and 60 s per download phase; both
     // must stay explicit — `download_to_file` would otherwise inherit a default
     // that a dependency bump can change.
@@ -724,7 +704,7 @@ fn every_outbound_call_names_its_own_deadline() {
 #[test]
 fn the_journal_is_a_plain_appendable_jsonl_file() {
     let fx = Fixture::new("journal");
-    let store = fx.store(false);
+    let store = fx.store();
     settings::audit(&fx.root, &json!({ "kind": "scan", "action": "scan" }));
     settings::audit(&fx.root, &json!({ "kind": "scan", "action": "scan" }));
     let audit = read(&store.audit_file());
@@ -767,17 +747,13 @@ fn heavy_commands_are_async_and_light_commands_are_not() {
         "baseline_diff",
         "set_baseline",
         "audit",
-        "transactions",
         "local_stats",
-        "rollback",
-        "apply_pending",
-        "discard_pending",
+        "update_releases",
     ];
     const LIGHT: &[&str] = &[
         "bootstrap",
         "get_settings",
         "save_settings",
-        "pending",
         "update_status",
         "update_progress",
         "update_cancel",

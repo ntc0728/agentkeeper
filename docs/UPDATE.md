@@ -3,9 +3,9 @@
 AgentKeeper 的更新能力照着 [Agent2API](https://github.com/Agent2API/agent2api) 的桌面端实现落地：
 GitHub Releases 检查 → 通道选择 → 流式下载 → 交给系统安装器。
 
-代码：`tauri-shell/src-tauri/src/core/update/{version,http,token,manager}.rs`
+代码：`tauri-shell/core/src/update/{version,http,token,manager}.rs`
 （不依赖 Tauri，可单测、可被 `ak-scan` / `ak-store` 复用）。
-验收以代码 + `cargo test --tests` 为准（在 `tauri-shell/src-tauri/` 下跑），本文只解释行为与取舍。
+行为以代码 + `cargo test --tests` 为准（在 `tauri-shell/src-tauri/` 下跑），本文解释行为与取舍。
 
 ---
 
@@ -61,10 +61,10 @@ beta 通道的关键分叉：**当前跑的是不是预发布版**。
 
 | | 位置 | 说明 |
 |---|---|---|
-| 数据目录（store 根） | `%APPDATA%\AgentKeeper\agentkeeper` | settings / projects / 审计 / 备份都在这里；可用环境变量 `AK_STORE_ROOT` 覆盖 |
+| 数据目录（store 根） | `%APPDATA%\AgentKeeper\agentkeeper` | settings / projects / 审计日志都在这里；可用环境变量 `AK_STORE_ROOT` 覆盖 |
 | 程序安装落点 | `%LOCALAPPDATA%\AgentKeeper` | 由 NSIS（`installMode = "currentUser"`）决定，不需要管理员权限。应用不读也不知道它的位置，只负责把安装包下载到 `updates/` 再交给系统安装器 |
 
-> **实测值**（ci-mcp-verifier，#27）：`/S` 静默安装 → EXIT=0、耗时 0.64s，默认装到
+> **实测值**：`/S` 静默安装 → EXIT=0、耗时 0.64s，默认装到
 > `%LOCALAPPDATA%\AgentKeeper`，即 `C:\Users\<你>\AppData\Local\AgentKeeper`。
 > 这不是从 `installer.nsi` 推算的；`installMode` 一改，这个落点就跟着变。
 
@@ -96,10 +96,10 @@ store 根的同一约定在 Rust 侧也有一份实现（`tauri-shell/src-tauri/
 ## 6. 令牌
 
 - 用 **Windows DPAPI** 加密，存 `enc1:<base64>`，即 `CryptProtectData(token_utf8)` 的
-  base64。迁移前 Electron 用的是 `safeStorage`，它在 Windows 上恰好**也**是 DPAPI（user
-  scope、无 entropy），所以两边写出的信封**字节兼容**：迁移前存的令牌迁移后照样能解。
+  base64。信封与 Windows `OSCrypt` / DPAPI 的既有格式字节兼容（user scope、无 entropy），
+  机器上已存在的加密令牌可以直接读取。
 - **DPAPI 绑的是 Windows 用户，不是应用**。换台机器、或换一个 Windows 用户登录，密文就
-  解不开了——这是设计意图（令牌随备份流出也不可用），不是缺陷。
+  解不开了——这是设计意图（密文离开本机用户账户即不可用），不是缺陷。
 - UI 永远不回显：`status()` 只报 `filled` / `origin`（`stored` / `env`）。
 - 解不开时**不当作未配置**——配置里明明有密文，静默按匿名跑会让人以为令牌还在生效。
   界面显示具体原因并提示重新保存（新密钥 + 新密文，自愈）。
@@ -112,22 +112,11 @@ store 根的同一约定在 Rust 侧也有一份实现（`tauri-shell/src-tauri/
 GitHub，而不是注册一个 `setInterval(minutes * 60000)`。间隔最长 24 小时——长定时器在
 睡眠/唤醒后会漂移，醒来只补一次比永远不补合理。
 
-> **⚠️ 已知缺口（待认领 —— 下方括注里的那段是迁移前的既有行为，不要当作已实现的）**
->
-> 迁移前由 Electron 的 `main.js` 每 30 秒调一次 `tick()`。这段定时器**没有搬进 Rust 壳**：
-> `lib.rs` 里既没有对应的命令，也没有后台线程在跑，`tick()` 目前只被单测和集成测试调用。
-> 同样，`ak:update-event` 这条事件通道在 Rust 侧也**没有 `emit` 实现** —— 渲染层用
-> `typeof window.ak.onUpdateEvent === 'function'` 做了保护，所以不会报错，只是永远收不到。
->
-> 后果：**自动检查不会自己触发**。界面上的「检查更新」按钮走的是另一条路
-> （`update_check` 命令 → 直接 `check(true)`），所以表现是手动检查正常、自动检查静默失效。
->
-> 需要有人认领：补一个 Tauri 侧的定时器来驱动 `tick()` 并接上事件推送，
-> 或者确认已经有别处在驱动它。
+壳侧由一个 30 秒 ticker 驱动 `tick()`（`lib.rs` 的 `spawn_update_ticker`），到点后把结果
+`emit("update-event", payload)` 推给渲染层。`window.ak.onUpdateEvent` 据此：
 
-（迁移前的行为：自动检查的结果通过 `ak:update-event` 推给渲染层，因此：
-- 「检测到更新」弹窗能出现在任意页面（设置页除外——面板就在眼前，不叠窗）；
-- 同一版本本会话只弹一次（「稍后」不记忆）；「跳过此次版本」按版本号持久化，下个版本照常弹。）
+- 在任意页面弹出「检测到更新」（设置页除外——面板就在眼前，不叠窗）；
+- 同一版本本会话只弹一次（「稍后」不记忆）；「跳过此次版本」按版本号持久化，下个版本照常弹。
 
 ## 8. 配置
 
@@ -146,7 +135,7 @@ GitHub，而不是注册一个 `setInterval(minutes * 60000)`。间隔最长 24 
 
 更新链路的回归分两层，都在 Rust 里跑（`cd tauri-shell/src-tauri && cargo test`）：
 
-**纯函数层** —— `tauri-shell/src-tauri/src/core/update/version.rs` 的单元测试，
+**纯函数层** —— `tauri-shell/core/src/update/version.rs` 的单元测试，
 覆盖版本比较：beta 排序（`beta.2 < beta.10`）、草稿排除、非 semver 写法按「无预发布段」处理。
 挑选规则的边界也钉在这里（`tests/update.rs::update_installer_selection_and_file_name_rules`）。
 
@@ -170,12 +159,12 @@ GitHub，而不是注册一个 `setInterval(minutes * 60000)`。间隔最长 24 
 | `a_truncated_download_leaves_no_installer_behind` | 连接提前断，同样不留文件 |
 
 **安装路径三道闸**（`UpdateManager::verify_installer()`，
-`tauri-shell/src-tauri/src/core/update/manager.rs:1284`）：
+`tauri-shell/core/src/update/manager.rs:1284`）：
 
 1. **必须在下载目录内** —— `canonicalize` 后要求相对路径不出现 `..`；符号链接会被解引用，
    防止拿软链指到目录外面去。
 2. **扩展名必须是 `.exe`** —— `version::allowed_installer_suffixes("win32")` 的返回值
-   **只有 `["exe"]` 一项**。`.msi` 不接受，别按 electron-builder 的习惯以为它会被放行。
+   **只有 `["exe"]` 一项**，`.msi` 不在允许列表内。
 3. **必须是本项目产物** —— 文件名必须包含 `updateAssetKeyword`（默认 `AgentKeeper`）。
    这条是本项目加的、上游没有的闸门：`updateRepo` 配错时，它拦住
    「把别人的安装包装到自己机器上」。真实例子里 `Agent2API_3.1.0_x64-setup.exe`
@@ -183,7 +172,7 @@ GitHub，而不是注册一个 `setInterval(minutes * 60000)`。间隔最长 24 
 
 （另有两条前置输入校验：路径非空、必须是绝对路径。它们不计入三道闸。）
 
-IPC 面的契约由 `tauri-shell/src-tauri/tests/update.rs`（原 `update_ipc_guard.rs`，2026-10-20 合并）守：status 形状、
+IPC 面的契约由 `tauri-shell/src-tauri/tests/update.rs` 守：status 形状、
 参数校验（repo / 间隔 / 代理）、skip、令牌在无安全存储时被拒绝、install 拒绝非法路径；
 并且断言**每条守卫消息都是英文、且在词典里有对应条目**（见 DESIGN §2.1 的契约）。
 
@@ -202,23 +191,31 @@ git tag v0.3.0 && git push origin v0.3.0
 想在本地先自测：
 
 ```bash
-cd tauri-shell/src-tauri
-cargo tauri build              # → target/release/bundle/nsis/
+npm run tauri:bundle           # 前端 → dist，构建，归档到 release/
 ```
+
+产物：`release/AgentKeeper_<ver>_x64-setup.exe` 与 `release/AgentKeeper_<ver>_x64-portable.zip`。
 
 ### `.github/workflows/release.yml` 的实际步骤
 
 | # | 步骤 | 说明 |
 |---|---|---|
 | 1 | `actions/checkout@v4` | |
-| 2 | `actions/setup-node@v4`（Node 20） | **没有 `npm ci`** —— `package.json` 目前还是 Electron 的，跑一次 `npm ci` 会把 Electron 拉下来，然后在清理阶段被删掉 |
+| 2 | `actions/setup-node@v4`（Node 20） | **没有 `npm ci`** —— 前端没有 npm 依赖，Node 只用来跑 `tauri:i18n` 与 `copy-frontend.js` |
 | 3 | `npm run tauri:i18n` | i18n 闸，放在构建**之前**：漏翻译在这里被抓到只是重跑一次，发布后被看到就是中文界面里的一句英文 |
-| 4 | `node tauri-shell/copy-frontend.js` | 生成 `tauri-shell/dist`。该目录被 git-ignore，全新 checkout 里没有它，不生成就会打出一个空壳 |
+| 4 | `node tauri-shell/copy-frontend.js` | 重新生成 `tauri-shell/dist`。该目录**不入库**（`.gitignore` 排除——入库副本可能相对 `src/renderer` 悄悄过期），这一步保证可执行文件带的是本次提交的渲染层 |
 | 5 | Stamp the release version | 用 tag 号回写 `tauri.conf.json` 与 `Cargo.toml` —— **见下方警告** |
 | 6 | `dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache@v2` | target `x86_64-pc-windows-msvc` |
 | 7 | `cargo install tauri-cli --version "^2" --locked` | |
-| 8 | `cargo tauri build` | 产物落在 `tauri-shell/src-tauri/target/release/bundle/nsis/` |
-| 9 | `softprops/action-gh-release@v2` | 只上传 `bundle/nsis/*.exe`；tag 含 `beta` / `rc` / `alpha` 时自动标记 pre-release |
+| 8 | `cargo tauri build` + `package-release.js --no-build` | 产物落在 `tauri-shell/target/release/bundle/nsis/` 与 `release/*.zip` |
+| 9 | `softprops/action-gh-release@v2` | 上传**安装包 exe + 便携 zip**；tag 含 `beta` / `rc` / `alpha` 时自动标记 pre-release |
+
+**两条发布通道**：
+
+| 触发 | 结果 |
+|---|---|
+| push tag `vX.Y.Z` | 正式版，版本号从 tag 戳进构建 |
+| push 到 `main` | **Pre-release** `v<树内版本>-ci.<run_number>` —— 每次提交都上 Releases 页，但 GitHub 的 `/releases/latest` 自动排除 pre-release，稳定通道用户不受影响；`-ci.N` 按 semver 排在正式版之下 |
 
 > **⚠️ 版本号必须回写 `Cargo.toml` + `tauri.conf.json`（第 5 步）——这是整条发布链最容易翻车的地方。**
 >
@@ -231,7 +228,7 @@ cargo tauri build              # → target/release/bundle/nsis/
 ### 要点
 
 - **更新器只读 GitHub Release API 的 `assets[]`，从不解析 `latest.yml` / `.blockmap` /
-  `latest.json`** —— 那三个是 electron-updater 的产物，与本更新器无关。（Rust 源码里对这三者
+  `latest.json`** —— 那三个属于其他更新器的格式，与本更新器无关。（Rust 源码里对这三者
   零引用，可以自己 grep 验证。）
 - **资产挑选规则**：排除 `-portable` / 归档 / 其他平台 → 优先名字含 `setup|install`
   → 其次按架构 → 最后取第一个。所以**只上传安装包即可**；portable 传上去也不会被选中

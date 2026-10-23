@@ -1,39 +1,36 @@
-//! `src/mcp/server.js` — the stdio MCP server, in Rust.
+//! The stdio MCP server.
 //!
 //! An agent launches `agentkeeper-mcp.exe` and speaks MCP over stdin/stdout:
-//! newline-delimited JSON-RPC 2.0. It exposes the same tools as the JS build so
+//! newline-delimited JSON-RPC 2.0. It exposes the same tools as the reference build so
 //! an agent's existing tool list keeps working, and every mutating tool goes
 //! through [`super::keeper::Keeper`] — the same transaction layer the UI uses,
-//! including the shadow-layer gate (an agent may never apply pending changes).
+//! with the same validation, audit and failure-undo guarantees.
 //!
 //! ## Contract an agent relies on
 //!
 //! * stdout carries **exactly** one compact JSON object per line; anything
 //!   else corrupts the stream. Diagnostics go to stderr only.
 //! * `initialize` / `ping` / `tools/list` / `tools/call` and silence for
-//!   `notifications/*`, with the same JSON-RPC error codes as the JS
+//!   `notifications/*`, with the JSON-RPC error codes the spec names
 //!   (`-32601` unknown method, `-32602` unknown tool, `-32603` internal).
 //! * A panic inside a handler becomes a `-32603` response, never a process
 //!   exit: [`dispatch`] runs behind `catch_unwind`, mirroring the `try/catch`
-//!   that wraps `handle()` in the JS (which can never die this way). It works
+//!   that wraps `handle()` in a way that can never die this way. It works
 //!   in release builds too — see [`dispatch`] on `panic = "unwind"`.
 //! * Tool results are `{ content: [{ type: "text", text }] }`, where `text` is
 //!   pretty-printed JSON — so the strings inside it are matched by other
 //!   agents' prompts and must not be reworded.
 //!
-//! ## Three deliberate differences from the JavaScript
+//! ## Three deliberate differences from the plainest reading of the spec
 //!
 //! * A malformed line answers with `-32700 parse error` instead of being
 //!   silently dropped: `handle_line` must never return `None` for a line an
 //!   agent actually sent, or the agent waits forever on a reply that will not
 //!   come. Blank lines still produce nothing (they are line-ending noise).
-//! * [`Store::apply_pending`] needs `&mut self`, so the non-sandboxed branch
-//!   builds a `Store` over the same root rather than mutating the keeper's.
-//!   State lives on disk (`pending.json`), so the result is identical.
 //! * A tool result with `ok: false` carries `isError: true` (see
-//!   [`is_tool_error`]). The JS omits it, so spec-following clients reported
-//!   "asset not found" as a successful answer. Nothing internal depends on
-//!   the old shape; MCP clients are external and the spec is the contract.
+//!   [`is_tool_error`]): without it, spec-following clients report
+//!   "asset not found" as a successful answer. Nothing internal branches on
+//!   the shape; MCP clients are external and the spec is the contract.
 
 use serde_json::{json, Map, Value};
 use std::io::{BufRead, Write};
@@ -48,26 +45,19 @@ use super::scan;
 use super::settings;
 use super::store::Store;
 
-/// What `initialize` answers, and what the JS answers verbatim.
+/// What `initialize` answers, and what the reference answers verbatim.
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "agentkeeper";
 
-/// `agentkeeper`'s version, as `package.json` reports it in the JS build.
+/// `agentkeeper`'s version, as `package.json` reports it in the reference build.
 fn server_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// The shadow-layer gate.
-///
-/// Applying from here while the sandbox is on would let an agent bypass the
-/// human-approval step the whole design rests on — so it is refused, with
-/// exactly the text the JS sends (and that `scripts/selftest.js` §15b greps).
-const SANDBOX_GATE: &str = "sandbox is ON — staged changes await human approval in the AgentKeeper desktop UI. To let agents apply directly, start this server with AGENTKEEPER_SANDBOX=0.";
-
 /// `discover.noInstalledAgent` — shared by `create_skill` and `install_skill`.
 const NO_INSTALLED_AGENT: &str = "no installed agent found; pass agentId explicitly";
 
-/// `read_asset` truncates the file body at 60 000 characters, like the JS.
+/// `read_asset` truncates the file body at 60 000 characters.
 const READ_CONTENT_LIMIT: usize = 60_000;
 
 /* ------------------------------------------------------------------ */
@@ -88,7 +78,7 @@ fn b(desc: &str) -> Value {
 
 /// The declared tool list, as `tools/list` returns it.
 ///
-/// Every entry mirrors `TOOLS` in `src/mcp/server.js` — same names, same
+/// Every entry mirrors the tool table below — same names, same
 /// descriptions, same `inputSchema`. An agent matches on those strings, so a
 /// rename here is a breaking change to a published API.
 pub fn tools() -> Vec<Value> {
@@ -126,7 +116,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "create_skill",
-            "description": "Create a new skill for an agent (SKILL.md with YAML frontmatter). With the sandbox on (default) the write is staged for human approval.",
+            "description": "Create a new skill for an agent (SKILL.md with YAML frontmatter). Validated and security-scanned first, then written in one reversible transaction.",
             "inputSchema": { "type": "object", "properties": {
                 "name": s("skill name, lowercase-with-hyphens, must match the folder name"),
                 "description": s("what the skill does and when the agent should use it"),
@@ -144,43 +134,18 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "delete_asset",
-            "description": "Delete an asset (backed up first, reversible via rollback_transaction). MCP configs use delete_mcp instead.",
+            "description": "Delete an asset. MCP configs use delete_mcp instead.",
             "inputSchema": { "type": "object", "properties": { "assetId": s("asset id") }, "required": ["assetId"] }
         }),
         json!({
             "name": "distribute_asset",
-            "description": "Copy an asset to other agents/projects (one reversible transaction). Only writable kinds.",
+            "description": "Copy an asset to other agents/projects (one write-through transaction). Only writable kinds.",
             "inputSchema": { "type": "object", "properties": {
                 "assetId": s("asset id"),
                 "targets": { "type": "array", "items": { "type": "object", "properties": {
                     "agentId": s("target agent"), "scope": { "type": "string", "enum": ["global", "project"] }, "projectId": s("required when scope=project")
                 }, "required": ["agentId", "scope"] } }
             }, "required": ["assetId", "targets"] }
-        }),
-        json!({
-            "name": "list_pending",
-            "description": "Staged (shadow-layer) changes waiting to be applied. Non-empty means the human still needs to press Apply in the desktop app.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }),
-        json!({
-            "name": "apply_pending",
-            "description": "Apply every staged change to the real agent directories (backup + atomic rename + journal). Refused while the sandbox is on — apply from the AgentKeeper desktop UI instead.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }),
-        json!({
-            "name": "discard_pending",
-            "description": "Drop all staged changes. Nothing was ever written to the real directories.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }),
-        json!({
-            "name": "list_transactions",
-            "description": "Recent write transactions with ids, for rollback.",
-            "inputSchema": { "type": "object", "properties": { "limit": n("default 20, max 200") } }
-        }),
-        json!({
-            "name": "rollback_transaction",
-            "description": "Restore every file touched by a transaction to its pre-change state.",
-            "inputSchema": { "type": "object", "properties": { "txId": s("transaction id (tx-…)") }, "required": ["txId"] }
         }),
         json!({
             "name": "baseline_diff",
@@ -202,7 +167,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "import_bundle",
-            "description": "Import an agentkeeper-bundle folder previously exported. One reversible transaction.",
+            "description": "Import a folder exported by AgentKeeper. One reversible transaction.",
             "inputSchema": { "type": "object", "properties": { "dir": s("directory that contains agentkeeper-bundle/") }, "required": ["dir"] }
         }),
         json!({
@@ -216,7 +181,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "install_skill",
-            "description": "Install skills from a GitHub repo (owner/repo) into an agent's global skills directory. Every skill is validated and security-scanned first; with the sandbox on the result is STAGED for human approval, not written.",
+            "description": "Install skills from a GitHub repo (owner/repo) into an agent's global skills directory. Every skill is validated and security-scanned first, then written in one reversible transaction.",
             "inputSchema": { "type": "object", "properties": {
                 "repo": s("GitHub repo as owner/repo or a github.com URL"),
                 "agentId": s("target agent (default: first installed agent)")
@@ -229,7 +194,7 @@ pub fn tools() -> Vec<Value> {
 /* JSON-shaped helpers                                                 */
 /* ------------------------------------------------------------------ */
 
-/// `String(args.x || '')` — the coercion every handler in the JS applies.
+/// `String(args.x || '')` — the coercion every handler in the reference applies.
 fn arg_str(args: &Value, key: &str) -> String {
     match args.get(key) {
         Some(v) if js_truthy(v) => js_string(v),
@@ -237,7 +202,7 @@ fn arg_str(args: &Value, key: &str) -> String {
     }
 }
 
-/// `Number(v)`, with JS's falsy-zero: `Number(x) || default` also falls back
+/// `Number(v)`，falsy-zero 口径：`Number(x) || default` also falls back
 /// on `0`, which is what `Math.max(1, Number(args.limit) || 100)` relies on.
 fn js_number(v: Option<&Value>) -> f64 {
     match v {
@@ -256,7 +221,7 @@ fn js_number(v: Option<&Value>) -> f64 {
 }
 
 /// `Math.min(Math.max(1, Number(args[key]) || default), max)` — the clamp
-/// `list_assets`, `list_transactions` and `search_registry` all share.
+/// `list_assets` and `search_registry` share.
 fn clamp_count(args: &Value, key: &str, fallback: f64, max: f64) -> usize {
     let raw = js_number(args.get(key));
     let v = if raw.is_nan() || raw == 0.0 {
@@ -280,7 +245,7 @@ fn str_of(v: &Value, key: &str) -> String {
     v.get(key).map(js_string).unwrap_or_default()
 }
 
-/// Insert only when the JS would not have produced `undefined`:
+/// Insert only when the value is not already `undefined`:
 /// `JSON.stringify` drops `undefined` values, so the key disappears entirely.
 fn put(m: &mut Map<String, Value>, key: &str, v: Option<&Value>) {
     if let Some(v) = v {
@@ -315,9 +280,7 @@ fn text(result: Value) -> Value {
     let failed = is_tool_error(&result);
     let body = match result {
         Value::String(s) => s,
-        other => {
-            serde_json::to_string_pretty(&attach(other)).unwrap_or_else(|_| "{}".to_string())
-        }
+        other => serde_json::to_string_pretty(&attach(other)).unwrap_or_else(|_| "{}".to_string()),
     };
     let mut out = json!({ "content": [{ "type": "text", "text": body }] });
     if failed {
@@ -328,11 +291,11 @@ fn text(result: Value) -> Value {
     out
 }
 
-/// `core/errors.js` `attach()` — resolve an English message back to a code.
+/// Resolve an English message back to a code.
 ///
 /// Only the messages the MCP surface can produce are indexed (the full table
-/// lives in `core/errors.js` and covers the IPC layer too). Two lookup rules,
-/// same as the JS: an exact match first, then the longest parameterised prefix
+/// covers the IPC layer too). Two lookup rules, same as the reference
+/// implementation: an exact match first, then the longest parameterised prefix
 /// whose stem is at least 12 characters — a shorter stem would match prose
 /// that merely starts the same way.
 fn attach(result: Value) -> Value {
@@ -342,7 +305,11 @@ fn attach(result: Value) -> Value {
     if m.contains_key("code") {
         return Value::Object(m);
     }
-    let Some(error) = m.get("error").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+    let Some(error) = m
+        .get("error")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+    else {
         return Value::Object(m);
     };
     if let Some((code, params)) = code_of(&error) {
@@ -373,7 +340,10 @@ const EXACT_CODES: [(&str, &str); 16] = [
     ),
     ("config must be an object", "mcp.configNotObject"),
     ("no assets selected", "bundle.noSelection"),
-    ("nothing exportable in selection", "bundle.nothingExportable"),
+    (
+        "nothing exportable in selection",
+        "bundle.nothingExportable",
+    ),
     ("nothing importable found", "bundle.nothingImportable"),
     ("manifest unreadable", "bundle.manifestUnreadable"),
     (
@@ -390,7 +360,10 @@ const EXACT_CODES: [(&str, &str); 16] = [
 
 /// (prefix, code) — longest prefix wins, so this list is ordered by length.
 const PREFIX_CODES: [(&str, &str); 12] = [
-    ("config file is corrupt, refusing to overwrite", "store.configCorrupt"),
+    (
+        "config file is corrupt, refusing to overwrite",
+        "store.configCorrupt",
+    ),
     ("cannot resolve skill directory for", "skill.dirUnresolved"),
     ("no MCP config file declared for", "mcp.noConfigFile"),
     ("json mutate aborted for", "store.jsonMutateAborted"),
@@ -445,7 +418,11 @@ fn brief_asset(a: &Value) -> Value {
     put(&mut m, "writable", a.get("writable"));
     m.insert(
         "issues".to_string(),
-        json!(a.get("issues").and_then(|v| v.as_array()).map(|l| l.len()).unwrap_or(0)),
+        json!(a
+            .get("issues")
+            .and_then(|v| v.as_array())
+            .map(|l| l.len())
+            .unwrap_or(0)),
     );
     m.insert(
         "security".to_string(),
@@ -470,12 +447,12 @@ fn brief_asset(a: &Value) -> Value {
 /* context                                                             */
 /* ------------------------------------------------------------------ */
 
-/// The store root — `resolveStoreRoot()` in `src/mcp/server.js:35`.
+/// The store root — same resolution as the GUI (`AK_STORE_ROOT` first).
 ///
 /// Identical to `src/lib.rs`: `AK_STORE_ROOT`, else
 /// `<APPDATA>\AgentKeeper\agentkeeper`. The MCP server and the GUI must land
-/// on the same directory or an agent's staged writes are invisible to the
-/// human who has to approve them.
+/// on the same directory or an agent's writes are invisible to the human
+/// reading the transaction journal.
 fn store_root() -> String {
     if let Ok(explicit) = std::env::var("AK_STORE_ROOT") {
         return explicit;
@@ -498,13 +475,10 @@ fn user_home() -> String {
 }
 
 /// `buildContext()` — one keeper for the life of the process, exactly as the
-/// JS builds it once in `main()`.
+/// 在 `main()` 里构建一次。
 fn context() -> &'static Keeper {
     static CTX: OnceLock<Keeper> = OnceLock::new();
-    CTX.get_or_init(|| {
-        let sandbox = settings::sandbox_from_env();
-        Keeper::new(Store::new(&store_root(), sandbox), &user_home())
-    })
+    CTX.get_or_init(|| Keeper::new(Store::new(&store_root()), &user_home()))
 }
 
 /// `keeper.lastScan` — the scan cache, held in an `Arc` so a tool that only
@@ -553,7 +527,7 @@ fn effective_or_assets(payload: &Value) -> &[Value] {
 }
 
 /// `(id, fingerprint)` over the scan's `assets` — the input `baselineDiff` /
-/// `setBaseline` take in the JS.
+/// `setBaseline` take.
 fn fingerprints(payload: &Value) -> Vec<(String, String)> {
     arr_of(payload, "assets")
         .iter()
@@ -570,7 +544,11 @@ fn first_installed_agent(keeper: &Keeper) -> String {
     let payload = fresh_scan(keeper);
     arr_of(&payload, "agents")
         .iter()
-        .find(|a| a.get("installed").and_then(|v| v.as_bool()).unwrap_or(false))
+        .find(|a| {
+            a.get("installed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
         .map(|a| str_of(a, "id"))
         .unwrap_or_default()
 }
@@ -676,7 +654,6 @@ fn stats(keeper: &Keeper, _args: &Value) -> Value {
         .collect();
     text(json!({
         "storeRoot": keeper.store.root_str(),
-        "sandbox": keeper.store.sandbox(),
         "total": summary.get("total").cloned().unwrap_or(json!(0)),
         "byKind": summary.get("by").cloned().unwrap_or_else(|| json!({})),
         "byOrigin": summary.get("byOrigin").cloned().unwrap_or_else(|| json!({})),
@@ -750,17 +727,12 @@ fn create_skill(keeper: &Keeper, args: &Value) -> Value {
         put(&mut m, "issues", r.get("issues"));
         return text(Value::Object(m));
     }
-    invalidate(keeper); // staged content must show up in the next read
+    invalidate(keeper); // the new file must show up in the next read
     text(json!({
         "ok": true,
-        "staged": keeper.store.sandbox(),
         "txId": r.get("txId").cloned().unwrap_or(Value::Null),
         "files": r.get("written").cloned().unwrap_or_else(|| json!([])),
-        "note": if keeper.store.sandbox() {
-            "staged in the shadow layer — apply in the AgentKeeper UI"
-        } else {
-            "written directly"
-        }
+        "note": "written directly"
     }))
 }
 
@@ -784,13 +756,12 @@ fn update_asset(keeper: &Keeper, args: &Value) -> Value {
         return refused(&r);
     }
     invalidate(keeper);
-    // `files: r.written` in the JS (`src/mcp/server.js:304`): when the keeper
+    // `files` mirrors `r.written`: when the keeper
     // did not report what it wrote, `undefined` is dropped by `JSON.stringify`
     // and the key is absent. Emitting `files: []` here would tell an agent
     // "nothing was written" when the truth is "not reported".
     let mut out = Map::new();
     out.insert("ok".to_string(), json!(true));
-    out.insert("staged".to_string(), json!(keeper.store.sandbox()));
     out.insert(
         "txId".to_string(),
         r.get("txId").cloned().unwrap_or(Value::Null),
@@ -818,74 +789,6 @@ fn distribute_asset(keeper: &Keeper, args: &Value) -> Value {
         .cloned()
         .unwrap_or_default();
     let r = keeper.distribute(&arg_str(args, "assetId"), &targets);
-    if r.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-        invalidate(keeper);
-    }
-    text(r)
-}
-
-fn list_pending(keeper: &Keeper, _args: &Value) -> Value {
-    // read_pending returns the changes array itself — earlier code assumed
-    // {changes:[]} and always reported zero.
-    let pending = keeper.store.read_pending();
-    let changes: Vec<Value> = pending
-        .iter()
-        .take(50)
-        .map(|c| {
-            json!({
-                "op": c.get("op").cloned().unwrap_or(Value::Null),
-                "target": c.get("real").cloned().unwrap_or(Value::Null),
-                "bytes": c.get("bytes").cloned().unwrap_or(json!(0)),
-                "at": c.get("at").cloned().unwrap_or(Value::Null)
-            })
-        })
-        .collect();
-    text(json!({
-        "count": pending.len(),
-        "sandbox": keeper.store.sandbox(),
-        "note": if pending.is_empty() {
-            "nothing staged"
-        } else {
-            "staged changes await human approval in the AgentKeeper UI"
-        },
-        "changes": changes
-    }))
-}
-
-fn apply_pending(keeper: &Keeper, _args: &Value) -> Value {
-    // The shadow layer exists so an agent can stage, never silently
-    // overwrite. Applying from here while the sandbox is on would let an AI
-    // bypass the human-approval step the whole design rests on — so it is
-    // refused, matching the documented security model.
-    if keeper.store.sandbox() {
-        return text(json!({ "ok": false, "error": SANDBOX_GATE }));
-    }
-    let mut store = Store::new(keeper.store.root_str(), keeper.store.sandbox());
-    let r = store.apply_pending();
-    if r.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-        invalidate(keeper);
-    }
-    text(r)
-}
-
-fn discard_pending(keeper: &Keeper, _args: &Value) -> Value {
-    let r = keeper.store.discard_pending();
-    if r.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-        invalidate(keeper);
-    }
-    text(r)
-}
-
-fn list_transactions(keeper: &Keeper, args: &Value) -> Value {
-    let limit = clamp_count(args, "limit", 20.0, 200.0);
-    text(Value::Array(settings::list_transactions(
-        keeper.store.root_str(),
-        limit,
-    )))
-}
-
-fn rollback_transaction(keeper: &Keeper, args: &Value) -> Value {
-    let r = keeper.store.rollback(&arg_str(args, "txId"));
     if r.get("ok").and_then(|v| v.as_bool()) == Some(true) {
         invalidate(keeper);
     }
@@ -949,7 +852,7 @@ fn install_skill(keeper: &Keeper, args: &Value) -> Value {
     }
     let r = discover::install_from_repo(keeper, &repo, &agent_id);
     if r.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-        invalidate(keeper); // staged content must show up in the next read
+        invalidate(keeper); // the write must show up in the next read
     }
     text(r)
 }
@@ -969,7 +872,7 @@ fn respond(id: Option<Value>, result: Value) -> Value {
     Value::Object(m)
 }
 
-/// `fail(code, message)` — a notification's error is dropped, like the JS.
+/// `fail(code, message)` — a notification's error is dropped.
 fn fail(id: Option<Value>, code: i32, message: String) -> Value {
     let Some(id) = id else {
         return Value::Null;
@@ -998,18 +901,19 @@ fn call_tool(keeper: &Keeper, req: &Value) -> Value {
         "update_asset" => update_asset(keeper, &args),
         "delete_asset" => delete_asset(keeper, &args),
         "distribute_asset" => distribute_asset(keeper, &args),
-        "list_pending" => list_pending(keeper, &args),
-        "apply_pending" => apply_pending(keeper, &args),
-        "discard_pending" => discard_pending(keeper, &args),
-        "list_transactions" => list_transactions(keeper, &args),
-        "rollback_transaction" => rollback_transaction(keeper, &args),
         "baseline_diff" => baseline_diff(keeper, &args),
         "set_baseline" => set_baseline(keeper, &args),
         "export_bundle" => export_bundle(keeper, &args),
         "import_bundle" => import_bundle(keeper, &args),
         "search_registry" => search_registry(keeper, &args),
         "install_skill" => install_skill(keeper, &args),
-        _ => return fail(req.get("id").cloned(), -32602, format!("unknown tool: {}", name)),
+        _ => {
+            return fail(
+                req.get("id").cloned(),
+                -32602,
+                format!("unknown tool: {}", name),
+            )
+        }
     };
     let failed = is_tool_error(&result);
     let mut out = respond(req.get("id").cloned(), result);
@@ -1023,15 +927,14 @@ fn call_tool(keeper: &Keeper, req: &Value) -> Value {
 
 /// `ok: false` on a tool result, per the MCP `tools/call` contract.
 ///
-/// `src/mcp/server.js` sets `isError` only in the `.catch()` of `tools/call`
-/// (a *thrown* handler); a handler that resolves with `{ ok: false, error }`
-/// comes back as an ordinary result with no `isError`. A client that follows
-/// the spec therefore renders "asset not found" as a successful answer.
+/// A business failure (`{ ok: false, error }`) is marked `isError: true` here.
+/// Only marking *thrown* handlers would let a spec-compliant client render
+/// "asset not found" as a successful answer.
 ///
-/// That is a defect in the JS, not a behaviour worth preserving — and unlike
-/// the rest of this port there is no parity obligation once the JS build is
-/// gone: the consumers are third-party MCP clients, and the spec says a tool
-/// execution failure must be flagged. See the module header.
+/// A business failure is not a behaviour worth preserving: the consumers are
+/// third-party MCP clients, and the spec says a tool execution failure must be
+/// flagged.
+/// See the module header.
 fn is_tool_error(result: &Value) -> bool {
     result.is_object() && result.get("ok").and_then(|v| v.as_bool()) == Some(false)
 }
@@ -1043,7 +946,7 @@ fn is_tool_error(result: &Value) -> bool {
 /// request that carried no `id`). `handle_line` turns `Null` into `None`.
 ///
 /// The body runs inside [`guarded`] — the equivalent of the `try { … } catch`
-/// around `handle()` in `src/mcp/server.js:453`. Without it a single `unwrap()`
+/// around `handle()`. Without it a single `unwrap()`
 /// or slice out of bounds kills the process mid-stream, and the agent sees a
 /// dropped transport rather than an error it can report.
 ///
@@ -1072,7 +975,7 @@ fn guarded(id: Option<Value>, f: impl FnOnce() -> Value) -> Value {
 
 /// The panic payload as text. `panic!("literal")` carries a `&str`,
 /// `panic!("{}", x)` a `String`; anything else falls back to the fixed
-/// message `src/mcp/server.js:455` answers with.
+/// message this implementation answers with.
 fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         return (*s).to_string();
@@ -1110,7 +1013,7 @@ fn dispatch_inner(keeper: &super::keeper::Keeper, req: &Value) -> Value {
 /// Read one JSON-RPC request and return one response, or `None` when the line
 /// carries nothing to answer (blank, or a notification).
 ///
-/// One call per line, no batching: the JS server behaves the same way and an
+/// One call per line, no batching: the reference server behaves the same way and an
 /// agent client that pipelined requests would break on it either way.
 pub fn handle_line(line: &str) -> Option<Value> {
     let trimmed = line.trim();
@@ -1119,7 +1022,7 @@ pub fn handle_line(line: &str) -> Option<Value> {
     }
     let Ok(msg) = serde_json::from_str::<Value>(trimmed) else {
         eprintln!("[agentkeeper-mcp] bad json line ignored");
-        // The JS drops the line silently; an agent that sent it is waiting for
+        // The reference drops the line silently; an agent that sent it is waiting for
         // a reply that will never come, so answer with a parse error instead.
         return Some(json!({
             "jsonrpc": "2.0",
@@ -1138,11 +1041,7 @@ pub fn handle_line(line: &str) -> Option<Value> {
 /// Run the loop until stdin closes. Returns the process exit code.
 pub fn serve() -> i32 {
     let keeper = context();
-    eprintln!(
-        "[agentkeeper-mcp] store: {} · sandbox: {}",
-        keeper.store.root_str(),
-        keeper.store.sandbox()
-    );
+    eprintln!("[agentkeeper-mcp] store: {}", keeper.store.root_str());
 
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
@@ -1185,14 +1084,11 @@ mod tests {
         dir
     }
 
-    fn keeper_at(root: &std::path::Path, home: &std::path::Path, sandbox: bool) -> Keeper {
-        Keeper::new(
-            Store::new(&root.to_string_lossy(), sandbox),
-            &home.to_string_lossy(),
-        )
+    fn keeper_at(root: &std::path::Path, home: &std::path::Path) -> Keeper {
+        Keeper::new(Store::new(&root.to_string_lossy()), &home.to_string_lossy())
     }
 
-    /// The scan payload cache is process-global, like the JS `lastScan`; drop
+    /// The scan payload cache is process-global, like `lastScan`; drop
     /// it so one test never reads another test's scan.
     fn clean_slate() {
         *last_scan().lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -1213,7 +1109,9 @@ mod tests {
 
     /// `JSON.parse(result.content[0].text)` — what an MCP client does.
     fn payload_of(resp: &Value) -> Value {
-        let raw = resp["result"]["content"][0]["text"].as_str().unwrap_or("{}");
+        let raw = resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("{}");
         serde_json::from_str(raw).unwrap_or(Value::Null)
     }
 
@@ -1221,15 +1119,21 @@ mod tests {
     fn initialize_reports_the_protocol_and_server_name() {
         let root = temp("init");
         let home = temp("init-home");
-        let k = keeper_at(&root, &home, true);
+        let k = keeper_at(&root, &home);
 
-        let resp = dispatch(&k, &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }));
+        let resp = dispatch(
+            &k,
+            &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
+        );
         assert_eq!(resp["jsonrpc"], json!("2.0"));
         assert_eq!(resp["id"], json!(1));
         assert_eq!(resp["result"]["protocolVersion"], json!("2024-11-05"));
         assert_eq!(resp["result"]["serverInfo"]["name"], json!("agentkeeper"));
         assert!(resp["result"]["serverInfo"]["version"].is_string());
-        assert_eq!(resp["result"]["capabilities"]["tools"]["listChanged"], json!(false));
+        assert_eq!(
+            resp["result"]["capabilities"]["tools"]["listChanged"],
+            json!(false)
+        );
 
         // ping answers an empty result; a notification answers nothing.
         let ping = dispatch(&k, &json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" }));
@@ -1239,14 +1143,17 @@ mod tests {
             &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })
         )
         .is_null());
-        assert!(handle_line("   ").is_none(), "a blank line is not a request");
+        assert!(
+            handle_line("   ").is_none(),
+            "a blank line is not a request"
+        );
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
-    fn tools_list_declares_every_tool_the_js_declares() {
+    fn tools_list_declares_every_tool() {
         let declared = tools();
         let names: Vec<&str> = declared
             .iter()
@@ -1264,11 +1171,6 @@ mod tests {
                 "update_asset",
                 "delete_asset",
                 "distribute_asset",
-                "list_pending",
-                "apply_pending",
-                "discard_pending",
-                "list_transactions",
-                "rollback_transaction",
                 "baseline_diff",
                 "set_baseline",
                 "export_bundle",
@@ -1287,21 +1189,24 @@ mod tests {
     fn tools_list_is_wrapped_as_a_json_rpc_result() {
         let root = temp("list");
         let home = temp("list-home");
-        let k = keeper_at(&root, &home, true);
-        let resp = dispatch(&k, &json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/list" }));
+        let k = keeper_at(&root, &home);
+        let resp = dispatch(
+            &k,
+            &json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/list" }),
+        );
         assert_eq!(resp["result"]["tools"][0]["name"], json!("list_assets"));
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 20);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 15);
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
-    fn read_and_write_tools_round_trip_through_the_shadow_tree() {
+    fn read_and_write_tools_round_trip_against_a_real_tree() {
         let _guard = assets::lock_for_test();
         clean_slate();
         let root = temp("rw");
         let home = temp("rw-home");
-        let k = keeper_at(&root, &home, true);
+        let k = keeper_at(&root, &home);
 
         let dir = home.join("skills").join("pdf");
         let file = dir.join("SKILL.md");
@@ -1327,7 +1232,12 @@ mod tests {
         assets::remember(std::slice::from_ref(&asset), std::slice::from_ref(&asset));
 
         // --- read tool --------------------------------------------------
-        let out = payload_of(&call(&k, 1, "read_asset", json!({ "assetId": "skill:pdf" })));
+        let out = payload_of(&call(
+            &k,
+            1,
+            "read_asset",
+            json!({ "assetId": "skill:pdf" }),
+        ));
         assert_eq!(out["ok"], json!(true), "{}", out);
         assert_eq!(out["asset"]["name"], json!("pdf"));
         assert_eq!(out["asset"]["agent"], json!("Claude Code"));
@@ -1336,7 +1246,7 @@ mod tests {
         assert!(out["asset"].get("project").is_none(), "{}", out["asset"]);
         assert_eq!(out["content"], json!("---\nname: pdf\n---\nbody\n"));
 
-        // --- write tool: staged, never written --------------------------
+        // --- write tool: lands on the real path, one transaction --------
         let out = payload_of(&call(
             &k,
             2,
@@ -1349,92 +1259,19 @@ mod tests {
             }),
         ));
         assert_eq!(out["ok"], json!(true), "{}", out);
-        assert_eq!(out["staged"], json!(true), "{}", out);
-        assert_eq!(
-            out["note"],
-            json!("staged in the shadow layer — apply in the AgentKeeper UI")
-        );
+        // The note must not promise an undo: the write path keeps an in-memory
+        // snapshot for the *failure* case only, so "reversible" was a claim the
+        // tool could no longer stand behind.
+        assert_eq!(out["note"], json!("written directly"));
         // claude-code keeps global skills in `~/.claude/skills`.
         let target = home.join(".claude").join("skills").join("new-skill");
         assert!(
-            !target.exists(),
-            "sandbox: the real tree must be untouched"
-        );
-        let pending = k.store.read_pending();
-        assert_eq!(pending.len(), 1, "{:?}", pending);
-        assert_eq!(pending[0]["op"], json!("write"));
-        assert_eq!(
-            pending[0]["real"],
-            json!(target.join("SKILL.md").to_string_lossy())
-        );
-
-        // --- list_pending reports it ------------------------------------
-        let out = payload_of(&call(&k, 3, "list_pending", json!({})));
-        assert_eq!(out["count"], json!(1), "{}", out);
-        assert_eq!(out["sandbox"], json!(true));
-        assert_eq!(
-            out["note"],
-            json!("staged changes await human approval in the AgentKeeper UI")
+            target.join("SKILL.md").is_file(),
+            "the write must reach the real agent tree: {:?}",
+            target
         );
 
         assets::invalidate();
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::remove_dir_all(&home).ok();
-    }
-
-    #[test]
-    fn apply_pending_is_refused_while_the_sandbox_is_on() {
-        let _guard = assets::lock_for_test();
-        clean_slate();
-        let root = temp("gate");
-        let home = temp("gate-home");
-        let k = keeper_at(&root, &home, true);
-
-        // Stage one change so the refusal is not a "nothing to do" no-op.
-        let probe = home.join("gate.md");
-        let p = probe.to_string_lossy().into_owned();
-        let tx = k.store.transaction(
-            &[crate::core::store::Op::write(&p, "gate probe\n")],
-            &json!({ "kind": "rule", "action": "update" }),
-        );
-        assert_eq!(tx["ok"], json!(true), "{}", tx);
-        assert_eq!(k.store.read_pending().len(), 1);
-
-        let out = payload_of(&call(&k, 1, "apply_pending", json!({})));
-        assert_eq!(out["ok"], json!(false), "{}", out);
-        assert_eq!(out["error"], json!(SANDBOX_GATE));
-        assert_eq!(
-            k.store.read_pending().len(),
-            1,
-            "a refused apply must leave the queue intact"
-        );
-        assert!(!probe.exists(), "a refused apply must not touch the real tree");
-
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::remove_dir_all(&home).ok();
-    }
-
-    #[test]
-    fn apply_pending_works_once_the_sandbox_is_off() {
-        let _guard = assets::lock_for_test();
-        clean_slate();
-        let root = temp("apply");
-        let home = temp("apply-home");
-        // sandbox off — the branch the gate does not cover.
-        let k = keeper_at(&root, &home, false);
-        let probe = home.join("gate.md");
-        let p = probe.to_string_lossy().into_owned();
-        let tx = k.store.transaction(
-            &[crate::core::store::Op::write(&p, "gate probe\n")],
-            &json!({ "kind": "rule", "action": "update" }),
-        );
-        assert_eq!(tx["ok"], json!(true), "{}", tx);
-
-        let out = payload_of(&call(&k, 1, "apply_pending", json!({})));
-        assert_eq!(out["ok"], json!(true), "{}", out);
-        assert_eq!(probe.exists(), true);
-        assert!(k.store.read_pending().is_empty());
-
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&home).ok();
     }
@@ -1445,15 +1282,21 @@ mod tests {
         clean_slate();
         let root = temp("err");
         let home = temp("err-home");
-        let k = keeper_at(&root, &home, true);
+        let k = keeper_at(&root, &home);
 
         // unknown tool → -32602
         let resp = call(&k, 1, "no_such_tool", json!({}));
         assert_eq!(resp["error"]["code"], json!(-32602));
-        assert_eq!(resp["error"]["message"], json!("unknown tool: no_such_tool"));
+        assert_eq!(
+            resp["error"]["message"],
+            json!("unknown tool: no_such_tool")
+        );
 
         // unknown method → -32601
-        let resp = dispatch(&k, &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/nope" }));
+        let resp = dispatch(
+            &k,
+            &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/nope" }),
+        );
         assert_eq!(resp["error"]["code"], json!(-32601));
         assert_eq!(
             resp["error"]["message"],
@@ -1461,7 +1304,7 @@ mod tests {
         );
 
         // a tool failure is a *result*, not a protocol error, and carries the
-        // stable code the JS `errors.attach` would add.
+        // stable code `errors.attach` would add.
         let out = payload_of(&call(&k, 3, "read_asset", json!({ "assetId": "ghost:1" })));
         assert_eq!(out["ok"], json!(false), "{}", out);
         assert_eq!(out["error"], json!("asset not found: ghost:1"));
@@ -1493,7 +1336,7 @@ mod tests {
         let resp = guarded(Some(json!(8)), || panic!("plain payload"));
         assert_eq!(resp["error"]["message"], json!("plain payload"));
 
-        // A non-string payload falls back to the fixed JS text (server.js:455).
+        // A non-string payload falls back to the fixed text.
         let resp = guarded(Some(json!(9)), || panic::panic_any(42u32));
         assert_eq!(resp["error"]["message"], json!("internal error"));
 
@@ -1511,26 +1354,32 @@ mod tests {
     fn dispatch_answers_normally_behind_the_panic_guard() {
         let root = temp("guard");
         let home = temp("guard-home");
-        let k = keeper_at(&root, &home, true);
+        let k = keeper_at(&root, &home);
 
         // tools/list and an unknown method survive the wrapper unchanged.
-        let resp = dispatch(&k, &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 20);
-        let resp = dispatch(&k, &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/nope" }));
-        assert_eq!(resp["error"]["code"], json!(-32601));
-        assert!(
-            dispatch(&k, &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
-                .is_null()
+        let resp = dispatch(
+            &k,
+            &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
         );
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 15);
+        let resp = dispatch(
+            &k,
+            &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/nope" }),
+        );
+        assert_eq!(resp["error"]["code"], json!(-32601));
+        assert!(dispatch(
+            &k,
+            &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })
+        )
+        .is_null());
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&home).ok();
     }
 
     /// A tool that resolves `{ ok: false }` must still be flagged as a failed
-    /// execution. `src/mcp/server.js` does not do this (it only sets `isError`
-    /// on a thrown handler), which is why an MCP client showed "asset not
-    /// found" as a normal answer. Deliberate divergence — see
+    /// execution: a spec-compliant client otherwise renders "asset not found"
+    /// as a normal answer. Deliberate — see
     /// [`is_tool_error`].
     ///
     /// A *successful* result must not carry the flag: `isError: true` on a
@@ -1542,7 +1391,7 @@ mod tests {
         clean_slate();
         let root = temp("iserr");
         let home = temp("iserr-home");
-        let k = keeper_at(&root, &home, true);
+        let k = keeper_at(&root, &home);
 
         let resp = call(&k, 1, "read_asset", json!({ "assetId": "ghost:1" }));
         assert_eq!(resp["result"]["content"][0]["text"].is_string(), true);
@@ -1562,8 +1411,11 @@ mod tests {
     fn stdout_stays_one_compact_line_per_response() {
         let root = temp("compact");
         let home = temp("compact-home");
-        let k = keeper_at(&root, &home, true);
-        let resp = dispatch(&k, &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
+        let k = keeper_at(&root, &home);
+        let resp = dispatch(
+            &k,
+            &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+        );
         let line = serde_json::to_string(&resp).unwrap();
         assert!(!line.contains('\n'), "stdout would be split mid-object");
         assert!(line.starts_with("{\"jsonrpc\":\"2.0\""));
@@ -1590,12 +1442,12 @@ mod tests {
     }
 
     #[test]
-    fn delete_asset_stages_in_sandbox_and_refuses_host_owned() {
+    fn delete_asset_removes_the_skill_and_refuses_host_owned() {
         let _guard = assets::lock_for_test();
         clean_slate();
         let root = temp("del");
         let home = temp("del-home");
-        let k = keeper_at(&root, &home, true);
+        let k = keeper_at(&root, &home);
         let (dir, skill) = seed_skill(&home, "---\nname: pdf\n---\nbody\n");
         let plugin = json!({
             "id": "plugin:x", "kind": "plugin", "name": "x",
@@ -1608,23 +1460,20 @@ mod tests {
             &[skill.clone(), plugin.clone()],
         );
 
-        // sandboxed delete: the real tree is untouched. The staged queue stays
-        // empty too — `_recordPending` skips a path with no shadow copy (a
-        // delete only stages when the target was staged before), exactly like
-        // the JS `store.js` line 224 guard.
-        let out = payload_of(&call(&k, 1, "delete_asset", json!({ "assetId": "skill:pdf" })));
+        // The delete lands on the real path, inside a reversible transaction.
+        let out = payload_of(&call(
+            &k,
+            1,
+            "delete_asset",
+            json!({ "assetId": "skill:pdf" }),
+        ));
         assert_eq!(out["ok"], json!(true), "{}", out);
         assert!(
             out["txId"].as_str().unwrap_or("").starts_with("tx-"),
             "{}",
             out
         );
-        assert!(dir.exists(), "sandbox: the real tree must be untouched");
-        assert!(
-            k.store.read_pending().is_empty(),
-            "{:?}",
-            k.store.read_pending()
-        );
+        assert!(!dir.exists(), "the delete must land on disk");
 
         // host-owned: the deliberate refusal, with its stable code. (Call 1
         // invalidated the cache on success, so re-seed both assets.)
@@ -1632,7 +1481,12 @@ mod tests {
             &[skill.clone(), plugin.clone()],
             &[skill.clone(), plugin.clone()],
         );
-        let out = payload_of(&call(&k, 2, "delete_asset", json!({ "assetId": "plugin:x" })));
+        let out = payload_of(&call(
+            &k,
+            2,
+            "delete_asset",
+            json!({ "assetId": "plugin:x" }),
+        ));
         assert_eq!(out["ok"], json!(false), "{}", out);
         assert_eq!(
             out["error"],
@@ -1640,18 +1494,39 @@ mod tests {
         );
         assert_eq!(out["code"], json!("asset.hostOwnedDelete"));
 
-        // unknown id: `asset not found` exactly, like the JS.
-        let out = payload_of(&call(&k, 3, "delete_asset", json!({ "assetId": "ghost:1" })));
+        // unknown id: `asset not found` exactly.
+        let out = payload_of(&call(
+            &k,
+            3,
+            "delete_asset",
+            json!({ "assetId": "ghost:1" }),
+        ));
         assert_eq!(out["ok"], json!(false), "{}", out);
         assert_eq!(out["error"], json!("asset not found"));
         assert_eq!(out["code"], json!("asset.notFound"));
 
-        // with the sandbox off the same call deletes for real.
-        let k2 = keeper_at(&root, &home, false);
-        assets::remember(std::slice::from_ref(&skill), std::slice::from_ref(&skill));
-        let out = payload_of(&call(&k2, 4, "delete_asset", json!({ "assetId": "skill:pdf" })));
+        // Re-creating the folder proves the second call is a real delete, not
+        // a replay of the first one's state.
+        let (dir2, skill2) = seed_skill(
+            &home,
+            "---
+name: pdf
+---
+body
+",
+        );
+        assets::remember(std::slice::from_ref(&skill2), std::slice::from_ref(&skill2));
+        let out = payload_of(&call(
+            &k,
+            4,
+            "delete_asset",
+            json!({ "assetId": "skill:pdf" }),
+        ));
         assert_eq!(out["ok"], json!(true), "{}", out);
-        assert!(!dir.exists(), "write-through: the delete must land on disk");
+        assert!(
+            !dir2.exists(),
+            "write-through: the delete must land on disk"
+        );
 
         assets::invalidate();
         std::fs::remove_dir_all(&root).ok();
@@ -1659,15 +1534,16 @@ mod tests {
     }
 
     #[test]
-    fn distribute_asset_stages_a_copy_for_another_agent() {
+    fn distribute_asset_copies_to_another_agent() {
         let _guard = assets::lock_for_test();
         clean_slate();
         let root = temp("dist");
         let home = temp("dist-home");
-        let k = keeper_at(&root, &home, true);
+        let k = keeper_at(&root, &home);
         let (_, skill) = seed_skill(&home, "---\nname: pdf\n---\nbody\n");
         // A successful write invalidates the cache, so re-seed before each call.
-        let reseed = || assets::remember(std::slice::from_ref(&skill), std::slice::from_ref(&skill));
+        let reseed =
+            || assets::remember(std::slice::from_ref(&skill), std::slice::from_ref(&skill));
         reseed();
 
         let out = payload_of(&call(
@@ -1686,16 +1562,11 @@ mod tests {
         assert!(dest.contains(".cursor"), "{}", dest);
         assert!(dest.ends_with("pdf"), "{}", dest);
         assert!(
-            !std::path::Path::new(&dest).exists(),
-            "sandbox: the copy is staged, not written"
+            std::path::Path::new(&dest).join("SKILL.md").is_file(),
+            "the copy reaches the real agent tree: {}",
+            dest
         );
         assert_eq!(out["skipped"], json!([]), "{}", out);
-        let pending = k.store.read_pending();
-        assert!(
-            pending.iter().any(|c| c["real"] == json!(dest)),
-            "{:?}",
-            pending
-        );
 
         // same location is skipped, not copied.
         reseed();
@@ -1737,12 +1608,13 @@ mod tests {
         clean_slate();
         let root = temp("exp");
         let home = temp("exp-home");
-        let k = keeper_at(&root, &home, true);
+        let k = keeper_at(&root, &home);
         let (_, skill) = seed_skill(&home, "---\nname: pdf\n---\nbody\n");
         assets::remember(std::slice::from_ref(&skill), std::slice::from_ref(&skill));
         let out_dir = temp("exp-out");
 
-        // error branches, each with the stable code the JS `errors.attach` adds.
+        // error branches, each with the stable code the reference
+        // implementation's `errors.attach` adds.
         let out = payload_of(&call(
             &k,
             1,
@@ -1774,10 +1646,9 @@ mod tests {
         assert_eq!(out["count"], json!(1));
         let bundle = out_dir.join("agentkeeper-bundle");
         assert_eq!(out["out"], json!(bundle.to_string_lossy()), "{}", out);
-        let manifest: Value = serde_json::from_str(
-            &std::fs::read_to_string(bundle.join("manifest.json")).unwrap(),
-        )
-        .unwrap();
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(bundle.join("manifest.json")).unwrap())
+                .unwrap();
         assert_eq!(manifest["schema"], json!(1));
         assert_eq!(manifest["app"], json!("agentkeeper"));
         assert_eq!(manifest["assets"].as_array().unwrap().len(), 1);
@@ -1785,7 +1656,10 @@ mod tests {
         assert_eq!(manifest["assets"][0]["kind"], json!("skill"));
         assert_eq!(manifest["assets"][0]["agentId"], json!("claude-code"));
         assert!(
-            manifest["assets"][0]["dir"].as_str().unwrap_or("").starts_with("files/"),
+            manifest["assets"][0]["dir"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("files/"),
             "{}",
             manifest
         );
@@ -1793,7 +1667,7 @@ mod tests {
         // import into a *fresh* home — the same slug would be skipped there.
         let root2 = temp("imp");
         let home2 = temp("imp-home");
-        let k2 = keeper_at(&root2, &home2, true);
+        let k2 = keeper_at(&root2, &home2);
         let out = payload_of(&call(
             &k2,
             4,
@@ -1808,17 +1682,20 @@ mod tests {
         );
         assert_eq!(out["imported"], json!(["pdf"]), "{}", out);
         let target = home2.join(".claude").join("skills").join("pdf");
-        assert!(!target.exists(), "sandbox: an import is staged, not written");
-        let pending = k2.store.read_pending();
         assert!(
-            pending.iter().any(|c| c["real"] == json!(target.to_string_lossy())),
-            "{:?}",
-            pending
+            target.join("SKILL.md").is_file(),
+            "the import reaches the real agent tree: {:?}",
+            target
         );
 
         // a folder without a manifest is refused, not guessed at.
         let junk = temp("imp-junk");
-        let out = payload_of(&call(&k2, 5, "import_bundle", json!({ "dir": junk.to_string_lossy() })));
+        let out = payload_of(&call(
+            &k2,
+            5,
+            "import_bundle",
+            json!({ "dir": junk.to_string_lossy() }),
+        ));
         assert_eq!(out["ok"], json!(false), "{}", out);
         assert_eq!(
             out["error"],
@@ -1833,13 +1710,12 @@ mod tests {
     }
 
     #[test]
-    fn transactions_are_listed_and_rolled_back() {
+    fn write_through_updates_land_and_leave_only_an_audit_line() {
         let _guard = assets::lock_for_test();
         clean_slate();
         let root = temp("tx");
         let home = temp("tx-home");
-        // sandbox off: the write lands on disk, so the tx and its backup are real.
-        let k = keeper_at(&root, &home, false);
+        let k = keeper_at(&root, &home);
 
         let file = home.join("rule-a.md");
         std::fs::write(&file, "old body\n").unwrap();
@@ -1869,7 +1745,8 @@ mod tests {
         );
         assert_eq!(out["code"], json!("asset.hostOwnedEdit"));
 
-        // a write-through update, then the tx shows up in list_transactions.
+        // A write-through update: the tool answers the new state and no
+        // transaction tooling exists to answer for.
         let out = payload_of(&call(
             &k,
             2,
@@ -1877,38 +1754,35 @@ mod tests {
             json!({ "assetId": "rule:a", "content": "new body\n" }),
         ));
         assert_eq!(out["ok"], json!(true), "{}", out);
-        assert_eq!(out["staged"], json!(false), "{}", out);
+        // `txId` stays a correlation id for the audit line, nothing more.
         let tx_id = out["txId"].as_str().unwrap_or_default().to_string();
         assert!(tx_id.starts_with("tx-"), "{}", out);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "new body\n");
 
-        let out = payload_of(&call(&k, 3, "list_transactions", json!({ "limit": 50 })));
-        let rows = out.as_array().cloned().unwrap_or_default();
-        let row = rows
-            .iter()
-            .find(|r| r["txId"] == json!(tx_id))
-            .expect("the write tx must be listed");
-        assert_eq!(row["hasBackup"], json!(true), "{}", row);
-        assert_eq!(row["action"], json!("update"), "{}", row);
-
-        // rollback restores the pre-change content byte for byte.
-        let out = payload_of(&call(
-            &k,
-            4,
-            "rollback_transaction",
-            json!({ "txId": tx_id }),
-        ));
-        assert_eq!(out["ok"], json!(true), "{}", out);
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "old body\n");
-
-        let out = payload_of(&call(
-            &k,
-            5,
-            "rollback_transaction",
-            json!({ "txId": "tx-nope" }),
-        ));
-        assert_eq!(out["ok"], json!(false), "{}", out);
-        assert_eq!(out["error"], json!("transaction tx-nope not found"));
+        let audit =
+            std::fs::read_to_string(std::path::Path::new(&root).join("audit.jsonl")).unwrap();
+        assert!(
+            audit.contains(&tx_id),
+            "the write must be journalled in audit.jsonl: {audit}"
+        );
+        // The retired tools are gone from the surface, not just unregistered: a
+        // name an agent can still call is a capability that still exists.
+        for gone in ["rollback_transaction", "list_transactions"] {
+            let resp = call(&k, 3, gone, json!({ "txId": tx_id, "limit": 50 }));
+            assert_eq!(
+                resp["error"]["code"],
+                json!(-32602),
+                "{} must not resolve: {}",
+                gone,
+                resp
+            );
+            assert!(
+                resp.get("result").is_none(),
+                "{} must not answer a payload: {}",
+                gone,
+                resp
+            );
+        }
 
         assets::invalidate();
         std::fs::remove_dir_all(&root).ok();
@@ -1924,15 +1798,23 @@ mod tests {
         clean_slate();
         let root = temp("scan");
         let home = temp("scan-home");
-        let k = keeper_at(&root, &home, true);
+        let k = keeper_at(&root, &home);
 
         let mk = |home: &std::path::Path, name: &str, body: &str| {
             let dir = home.join(".claude").join("skills").join(name);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("SKILL.md"), body).unwrap();
         };
-        mk(&home, "pdf", "---\nname: pdf\ndescription: make pdfs\n---\nbody\n");
-        mk(&home, "excel", "---\nname: excel\ndescription: spreadsheet wrangling\n---\nbody\n");
+        mk(
+            &home,
+            "pdf",
+            "---\nname: pdf\ndescription: make pdfs\n---\nbody\n",
+        );
+        mk(
+            &home,
+            "excel",
+            "---\nname: excel\ndescription: spreadsheet wrangling\n---\nbody\n",
+        );
 
         let out = payload_of(&call(&k, 1, "scan", json!({})));
         assert_eq!(out["ok"], json!(true), "{}", out);
@@ -1940,7 +1822,6 @@ mod tests {
 
         let out = payload_of(&call(&k, 2, "stats", json!({})));
         assert_eq!(out["storeRoot"], json!(root.to_string_lossy()), "{}", out);
-        assert_eq!(out["sandbox"], json!(true));
         assert!(out["byKind"]["skill"].as_u64().unwrap_or(0) >= 2, "{}", out);
         let agents = out["agents"].as_array().cloned().unwrap_or_default();
         let claude = agents
@@ -1955,7 +1836,10 @@ mod tests {
         let out = payload_of(&call(&k, 4, "list_assets", json!({ "search": "PDF" })));
         assert_eq!(out["total"], json!(1), "{}", out);
         assert_eq!(out["assets"][0]["name"], json!("pdf"));
-        let pdf_id = out["assets"][0]["id"].as_str().unwrap_or_default().to_string();
+        let pdf_id = out["assets"][0]["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         let out = payload_of(&call(&k, 5, "list_assets", json!({ "agentId": "cursor" })));
         assert_eq!(out["total"], json!(0), "{}", out);
         let out = payload_of(&call(&k, 6, "list_assets", json!({ "limit": 1 })));
@@ -1974,8 +1858,16 @@ mod tests {
         assert_eq!(out["gone"], json!([]), "{}", out);
         assert_eq!(out["hasBaseline"], json!(true));
 
-        mk(&home, "pdf", "---\nname: pdf\ndescription: make pdfs\n---\nbody v2\n");
-        mk(&home, "extra", "---\nname: extra\ndescription: extra\n---\nbody\n");
+        mk(
+            &home,
+            "pdf",
+            "---\nname: pdf\ndescription: make pdfs\n---\nbody v2\n",
+        );
+        mk(
+            &home,
+            "extra",
+            "---\nname: extra\ndescription: extra\n---\nbody\n",
+        );
         std::fs::remove_dir_all(home.join(".claude").join("skills").join("excel")).unwrap();
         let _ = payload_of(&call(&k, 9, "scan", json!({}))); // rescan, so the diff sees it
         let out = payload_of(&call(&k, 10, "baseline_diff", json!({})));
@@ -1998,11 +1890,7 @@ mod tests {
             "{}",
             out
         );
-        assert!(
-            ids("gone").iter().any(|id| id.contains("excel")),
-            "{}",
-            out
-        );
+        assert!(ids("gone").iter().any(|id| id.contains("excel")), "{}", out);
 
         assets::invalidate();
         std::fs::remove_dir_all(&root).ok();

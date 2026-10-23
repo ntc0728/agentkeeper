@@ -3,8 +3,8 @@
 > 面向 AI 编码 Agent 的资产控制平面。统一发现、校验、编辑、分发与审计
 > 全局与项目级的 **skills / MCP / 插件 / 规则 / 记忆库**。
 >
-> 桌面壳：**Tauri 2**。业务逻辑：**Rust**（`tauri-shell/src-tauri/src/core/`）。
-> 前端：与早期 Electron 版**同一份**零依赖原生 DOM（`src/renderer/`）。
+> 桌面壳：**Tauri 2**。业务逻辑：**Rust**（`tauri-shell/core/src/`）。
+> 前端：零依赖原生 DOM（`src/renderer/`），无框架、无构建步骤。
 
 ---
 
@@ -64,13 +64,13 @@ Tauri v2 + React + Rust。repo registry、visual editor、config bundle 导出/�
    skillhub-local → │ 18-agent 适配器  ·  跨 agent 矩阵/分发    │  ← 借鉴
     AgentCorral   → │ scope toggle  ·  bundle  ·  merged view  │  ← 借鉴
                     ├──────────────────────────────────────────┤
-     AgentKeeper   │ 写入事务层：validate→backup→atomic→journal │
-     独有          │ 影子层：staging + Apply/Discard           │
-                    │ 结构化回滚：按目录树 byte-for-byte 还原    │
+     AgentKeeper   │ 写入事务层：validate→capture→write→journal│
+     独有          │ 直写真实目录 · 二次确认 · 失败自动还原     │
+                    │ 内存快照：整棵目录树逐字节还原             │
                     └──────────────────────────────────────────┘
 ```
 
-**一句话差异**：其余三家解决"看见"和"编辑"，AgentKeeper 解决**"编辑之后还能安全地活下来"**。
+**一句话差异**：其余三家解决「看见」和「编辑」，AgentKeeper 解决**「编辑之后还能安全地活下来」**。
 
 ---
 
@@ -82,7 +82,7 @@ Tauri v2 + React + Rust。repo registry、visual editor、config bundle 导出/�
 │  index.html · styles.css · app.js（零依赖，原生 DOM，未 fork）     │
 └───────────────────────────┬─────────────────────────────────────┘
                             │ window.ak.*  ← tauri-bridge.js
-                            │ （保留 Electron preload 的函数形状）
+                            │ （桥接层保持 window.ak 的函数形状）
 ┌───────────────────────────┴─────────────────────────────────────┐
 │  Tauri command 层 —— src/lib.rs                                  │
 │  40 个 #[tauri::command]，逐个校验入参，只做形状适配              │
@@ -97,12 +97,12 @@ Tauri v2 + React + Rust。repo registry、visual editor、config bundle 导出/�
 │  model.rs / yaml.rs / jsonc.rs / toml_splice.rs  格式层（保序）   │
 │  validate.rs   写入前校验（error 阻断 / warn 放行）                │
 │  security.rs   13 条投毒/凭据/编码执行模式                         │
-│  store.rs      ★ 影子层 · 备份 · 原子写 · 事务 · 回滚 · 审计       │
+│  store.rs      ★ 内存快照 · 原子写 · 事务 · 失败还原 · 审计        │
 │  keeper.rs     变更服务层（CRUD/分发/diff，永不绕过校验）          │
 │  registry.rs   项目注册表                                         │
 │  discover.rs   注册表搜索 + 从 GitHub 安装                         │
 │  update/       软件更新内核：version · http · token · manager      │
-│  mcp.rs        stdio MCP server（20 个工具，第二个入口）           │
+│  mcp.rs        stdio MCP server（15 个工具，第二个入口）           │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -112,13 +112,10 @@ Tauri v2 + React + Rust。repo registry、visual editor、config bundle 导出/�
 |---|---|---|
 | GUI | `agentkeeper-shell` | 桌面应用 |
 | MCP | `agentkeeper-mcp` | Agent 通过 stdio 调用 |
-| 扫描 | `ak-scan` | 打印 `ak:scan` 的完整 payload（迁移期曾用于 parity diff，见 §6.1） |
+| 扫描 | `ak-scan` | 无头打印 `ak:scan` 的完整 payload，供脚本与 CI 取数 |
 
-扫描入口最初也是为跨运行时对齐造的：Rust 单测只能证明自洽，要证明「和迁移前的实现等价」，
-得把 GUI 里的逻辑搬到命令行上，跟旧 Node 实现的输出逐字段比对。那套比对已随旧 `core/`
-一并移除。`ak-scan` 因为能单独跑一次
-无头扫描而保留；写入侧的 `ak-store` 除对齐没有别的用途，已于 2026-10-20 随 harness 一起
-删除（从 tag `pre-electron-removal` 可取回）。
+`core::` 不认识 Tauri 类型，所以同一套逻辑有三个入口；`ak-scan` 能单独跑一次无头扫描，
+写入只走 GUI 与 MCP 两条通道。
 
 ### 2.1 错误文案与中文翻译
 
@@ -126,24 +123,17 @@ Tauri v2 + React + Rust。repo registry、visual editor、config bundle 导出/�
 
 | 层 | 现状 | 位置 |
 |---|---|---|
-| **JS 侧（迁移前基准，已随 `core/` 移除）** | 81 条稳定 code：`code → [英文模板, 占位符数]`，渲染层按 code 取中文模板 | 旧 `core/errors.js`；`code → 中文` 的词典仍保留在 `src/renderer/engine-zh.js` |
-| **Rust 侧（当前发布）** | `#[tauri::command]` 返回 `{ok:false, error:"<英文句子>"}`，**不带 code**；只有 MCP 的 `tools/call` 会补 code（英文→code 表） | `tauri-shell/src-tauri/src/lib.rs` · `tauri-shell/src-tauri/src/core/keeper.rs` · `tauri-shell/src-tauri/src/core/store.rs` · `tauri-shell/src-tauri/src/core/mcp.rs` |
+| **Rust 侧（当前发布）** | `#[tauri::command]` 返回 `{ok:false, error:"<英文句子>"}`，**不带 code**；只有 MCP 的 `tools/call` 会补 code（英文→code 表） | `tauri-shell/src-tauri/src/lib.rs` · `tauri-shell/core/src/keeper.rs` · `tauri-shell/core/src/store.rs` · `tauri-shell/core/src/mcp.rs` |
 
 渲染层的 `zhError(payload)` 先试 `code → 中文模板`，取不到再退回**句子词典** `zhText()`。
 所以 Rust 侧能不能显示中文，完全取决于它吐出的句子在不在句子词典里——
 **没有 code 兜底，漏一条就露一句英文**。
 
-#### 覆盖情况：由审计脚本持续守着
+#### 覆盖情况：由脚本守住
 
-迁移前那道闸（`selftest.js` §18）只审计 JS 引擎文件。引擎换成 Rust 之后它就失效了：
-JS 侧不再产出消息，而 Rust 侧每条消息都直达渲染层，中间没有任何拦路的东西。
-Rust 侧的审计补上这一半：刮 `src-tauri/src/**/*.rs` 里的**全部字符串字面量**，用结构性规则
+`scripts/tauri-i18n.js` 刮 `tauri-shell/{core,src-tauri}/src/**/*.rs` 里的**全部字符串字面量**，用结构性规则
 （panic / 日志 / 输入匹配器等）排掉不上屏的那些，剩下的逐条查词典，漏一条就 exit 1。
-
-> **注**：迁移期一度出现了两个口径不同的审计脚本——`scripts/tauri-i18n.js` 与
-> `scripts/i18n-engine-audit.js`（后者抽全部字面量再用 `looksSentence` 过滤，是前者的
-> 严格超集）。**保留 `tauri-i18n.js` 并删掉另一个**（team-lead 裁决），功能并入前者，
-> 所以现在只有一个脚本、一个口径。
+它同时校验 `CODE_ZH`：Rust 侧产出的 code 必须在 `src/renderer/engine-zh.js` 里有中文。
 
 `scripts/tauri-i18n.js` 当前结果：
 
@@ -153,24 +143,16 @@ Rust 侧的审计补上这一半：刮 `src-tauri/src/**/*.rs` 里的**全部字
 | 覆盖 | 117 EXACT + 66 PATTERNS | 句子词典的规模 |
 | 硬编码中文残留 | 0 | 对外发出的中文已清零；`src-tauri/src/` 里剩下的中文只在测试夹具与注释里 |
 | 日志面豁免 | 3 | 只进日志，不上屏 |
-| CLI 白名单 / CLI 文件 | 2 / 6 | `ak-store` 等终端提示，不进 WebView |
+| CLI 白名单 / CLI 文件 | 2 / 6 | 终端提示，不进 WebView |
 | MCP 协议面（按文件豁免） | 74 | 协议字段，不走渲染层 |
 | CODE-MISS / CJK-KEY | 0 / 0 | 见下节 |
 | AMBIGUOUS-MULTI（PATTERN×PATTERN） | 0 | 两个正则同时命中 |
 | EXACT SHADOWING（EXACT 遮蔽 PATTERNS） | 1 | 预期内 |
 
-> 上表的数字会随 Rust 侧文案增删而变，**以 `node scripts/tauri-i18n.js` 的实际输出为准**；
-> 这里列出的是登记当时的读数，用来说明闸门在拦什么，不是锁死的指标。
+> 上表的数字会随 Rust 侧文案增删而变，**以 `node scripts/tauri-i18n.js` 的实际输出为准**。
 
-建这个审计时它一次报出 **14 条**漏翻（`assetId is required`、`targets is required`、
-`registry not initialised`；6 条 `spawn_blocking` 失败前缀 `xxx task failed: …`；
-`timed out after Nms`；store 的 3 条；以及 `core/mcp.rs` 的
-`const NO_INSTALLED_AGENT`），已全部补进 `src/renderer/engine-zh.js` 并同步 `dist/`。
-**此前人工扫 5 个文件报出的数字远小于此**——抽样在这个规模上不可靠，
-缺口只能靠脚本守，不能靠扫几眼。
-
-其中 `const` 那一类最容易被漏：它既不在 `"error":` 旁边也不是 `Err(...)`，
-一开始审计完全看不见它，是给脚本补了常量抽取才冒出来的。
+`const` 形式的错误文案既不在 `"error":` 旁边也不是 `Err(...)`，脚本因此单独抽取常量，
+否则这类漏翻不会以 MISS 的形式出现。抽样在这个规模上不可靠：缺口只能靠脚本守。
 
 #### 架构契约（i18n）
 
@@ -189,27 +171,21 @@ Rust 侧的审计补上这一半：刮 `src-tauri/src/**/*.rs` 里的**全部字
 
 > 第 3 条就是 CI 里那道 i18n 检查存在的**全部理由**。它拦的不是"忘了翻译"这种
 > 明显失误，而是"改了英文没改词典"——后者不报错、不红、只有用户看得见。
-> 少了这段因果，后人很容易把那个脚本当成多余的仪式感给删掉。
 
 换个说法定性：**Rust 侧没有 code 体系是健壮性降级，不是功能缺口**——界面照样出中文，
 只是"漏翻"这种失误没了编译期兜底，只能靠脚本兜。
 
-#### 维护提醒：这道闸门认的是旧路径
+#### 维护提醒：字典只有一个来源
 
-`scripts/tauri-i18n.js` 里 `DICT` 常量（`const DICT = path.join(ROOT, 'src', 'renderer',
-'engine-zh.js')`）**硬编码的是迁移前的路径**，全文共 6 处引用该文件。
-
-前端整体搬到 `src/renderer/` 之后，这道闸门会直接找不到字典而 exit 2（报
-`could not run`，而不是"有漏翻"）——**表现为"构建失败"，但根因是路径**。
-
-所以搬前端时，**同一批改动里必须同步改这 6 处**，否则搬完第一次跑 CI，看到的是一条
-误导性的失败信息。
+`scripts/tauri-i18n.js` 的 `DICT` 指向 `src/renderer/engine-zh.js`（全文这样引用 6 次）。
+`src/renderer/` 是唯一真源，移动该文件时必须同步改这 6 处，否则闸门会以 exit 2
+（`could not run`）失败，而不是报告"有漏翻"。
 
 ---
 
 ## 3. 适配器层设计
 
-每个 agent 是一条**纯数据声明**（`tauri-shell/src-tauri/src/core/adapters.rs`），
+每个 agent 是一条**纯数据声明**（`tauri-shell/core/src/adapters.rs`），
 新增 agent 是改数据不是改代码：
 
 ```rust
@@ -226,36 +202,29 @@ GitHub Copilot · Windsurf · Cline · Amp · Continue · Roo Code · Goose · Z
 Warp · Pi · DeepSeek Harness**，外加 `~/.agents/skills` 跨 agent 共享标准目录
 （scan 里作为一个 `shared` 伪条目出现，不占 17 个名额）。
 
-**一致性怎么守**：迁移期的 JS 适配器表曾在假 home 上求值、冻结成两个 Rust 常量
+**一致性怎么守**：`scripts/adapter-table.js` 在假 home 上求值，冻结成两个 Rust 常量
 （`JS_TABLE_JSON` / `JS_RESOLVED_JSON`）固化在 `adapters.rs` 里；
 `adapters.rs` 的测试再拿 `AGENTS` 与 `resolve_home()` 的每个结果逐字段比对。
-`AGENTS` 一改，两边不一致就红——这就是它存在的意义。
+`AGENTS` 一改，两边不一致就红。
 
 #### 新增 agent 的维护规程
 
-重新冻结 `JS_TABLE_JSON` / `JS_RESOLVED_JSON` 的路径**是通的**，但只剩一条：
-`scripts/adapter-table.js`（旧 `core/adapters/index.js` 的残留件，2026-10-20 随 JS 内核一起
-删除时抽出）→ `npm run tauri:adapters` 重算常量。旧 `core/` 没了，所以改表只能改这一个文件；
-改了它就必须同一次跑生成器，别指望 `adapters.rs` 自己变。
+重新冻结常量只有一条路径：`scripts/adapter-table.js` 是生成器的唯一输入，
+`npm run tauri:adapters` 用它重算常量。改了表就必须同一次跑生成器，
+`adapters.rs` 不会自己变。
 
-1. 在 `tauri-shell/src-tauri/src/core/adapters.rs` 的 `AGENTS` 表里加一条纯数据声明；
+1. 在 `tauri-shell/core/src/adapters.rs` 的 `AGENTS` 表里加一条纯数据声明；
 2. 在 `scripts/adapter-table.js` 的 `AGENTS` 里加同一条（这是生成器的输入）；
 3. `npm run tauri:adapters`，让 `JS_TABLE_JSON`（原始声明）与 `JS_RESOLVED_JSON`（假 home 上
    求值后的路径）一起更新；
 4. 在常量附近注明该 agent 的字段来源（官方文档 / 实测路径），让下一个改的人有据可查。
 
-> **测试红了怎么办：先去重算常量，不是删测试。**
+> **测试红了先重算常量，不要删测试。**
 >
-> 这条测试断言 `js.len() == AGENTS.len()`，加第 18 个 agent 而没同步补常量时**必然红**。
-> 这个红是**它唯一的价值所在**——旧 JS 真值没了之后，它是唯一还能证明
-> 「这 17 个适配器的字段没被抄错」的东西。
->
-> 把它删掉，CI 立刻转绿，但也从此再无任何东西能回答"Rust 侧这条声明和原始实现一致吗"。
-> **为了 CI 转绿而删掉一条正在正确报错的测试，是最坏的处置方式。**
-> 正确动作是回到第 2 步，把常量补齐后一起提交。
+> `js.len() == AGENTS.len()` 在加了第 18 个 agent 而没同步常量时必然红——这正是它要报的错。
+> 正确动作是回到第 2 步补齐常量后一起提交。
 
-`detected` 函数**没有**搬到 Rust：JS 侧 `detectAgents()` 被 `ipc.js` import 但从未调用，
-是一段死数据；两边统一用 `installed = existsDir(home)`。
+`installed` 统一取 `existsDir(home)`，不做二次探测。
 
 ### 3.1 扫描时的三个非显然问题
 
@@ -301,54 +270,57 @@ plugins/cache/<marketplace>/<plugin>/<version>/{.codebuddy-plugin/plugin.json, s
 
 > 这是"操作可作用 agent 且不出错"的落点。实现：`core/store.rs`。
 
-### 4.1 六步管线
+### 4.1 写入管线
 
 ```
-validate ──► backup ──► stage(sandbox) ──► atomic write ──► journal ──► [Apply]
-   │            │                                                  │
-   └─阻断       └─backups/<txId>/ 完整目录树快照                  └─回滚 = 再还原快照
+validate ──► capture ──► atomic write ──► journal ──► [auto-restore]
+   │            │                                       │
+   └─阻断       └─内存快照 + 体积预算                     └─失败 = 按快照还原
 ```
 
 1. **validate** — `validate.rs`。`error` 级直接阻断，**磁盘零写入**。
-2. **backup** — 每个待触碰路径快照到 `backups/<txId>/<映射路径>`；记录 `existed`，因此**删除也可还原**。
-3. **stage** — sandbox 开启时写 `sandbox/drive/<盘符>/…`，镜像完整目录结构；真实目录零改动。
-4. **atomic write** — 写 `<path>.agentkeeper-tmp-<pid>-ts>` 再 `rename`。
+2. **capture** — 每个待触碰路径的当前状态读入内存 `Snapshot`（`Absent` / `File` / `Dir` / `Link`），
+   记录 `existed`，因此**删除也可还原**。同一路径被多个 op 触及只快照一次，预算只扣一次。
+   全事务共享一个 `MAX_SNAPSHOT_BYTES`（8 MiB）预算；超出则在**写第一个字节之前**整笔拒绝
+   （`store.snapshotTooLarge`）——半份快照会还原出半新半旧的目录，比直接失败更糟。
+3. **atomic write** — 直接写真实路径：先写 `<path>.agentkeeper-tmp-<pid>-ts>` 再 `rename`。
    Windows 上 rename 遇占用会失败，降级为直写但仍有 tmp 残留可追。
-5. **journal** — `audit.jsonl` 追加一行：`{ts, txId, status, action, kind, agentId, projectId, assetName, targets[]}`。
-6. **Apply / Rollback** — 见下。
+4. **journal** — `audit.jsonl` 追加一行：
+   `{ts, txId, status, action, kind, agentId, projectId, assetName, targets[]}`。
+   事务不落目录，日志行是唯一的持久痕迹。
+5. **auto-restore** — 任一 op 失败即按快照还原**全部**已写路径，不因某个路径还原失败而中途放弃；
+   还原不掉的逐条汇总返回（`restoreErrors[]` + `store.restoreIncomplete`）。
 
-### 4.2 影子层（Shadow Layer）
+### 4.2 直写 + 三层安全网
 
-```
-真实路径  F:\repo\.workbuddy\mcp.json
-             │
-             │ sandbox ON 时 store.real() 重定向
-             ▼
-影子路径  <store>\sandbox\drive\F\repo\.workbuddy\mcp.json
-             │
-             ├─ pending.json 记录 {op, real, shadow, bytes, at}
-             ▼
-        [Apply] ──► 以**一个事务**批量重放到真实路径
-        [Discard] ─► 删除影子文件，真实目录自始至终未被触碰
-```
+写入**没有中间层**：`store` 不做路径重定向，也没有单独的落盘步骤或开关。
+界面显示的目标路径就是实际被写的路径 —— 一旦两者可能不一致，UI 本身就成了误导。
+
+既然写入直接落盘，安全靠三层网兜住：
+
+| 层 | 机制 | 落点 |
+|---|---|---|
+| ① 写前快照 | 每次写入前把被触及路径的当前状态读入内存（含 `existed` 标记） | 进程内存，不落盘 |
+| ② 事务留痕 | 每笔写入向 `audit.jsonl` 追加一行（只追加日志） | `<store>/` |
+| ③ 失败自动还原 | 任一 op 失败即整笔还原；还原不掉的逐条报告 | `store.snapshotTooLarge` / `store.restoreIncomplete` |
+
+写入前另有**二次确认**：新增 / 修改 / 删除都会弹窗，列出即将写入的真实路径。
+设置页除外 —— 设置写的是应用自己的 store，不碰 agent 目录。
 
 设计要点：
 
-- **Apply 是单事务**。N 个待应用变更要么全部生效、要么全部回滚，不存在半应用状态。
-- **`json` op 在 sandbox 下以真实文件为基底**。影子树初始是空的，若直接读会得到 `{}`，
-  写出的 `mcp.json` 会丢掉全部兄弟 server。实现里显式做了 base 回退。
-- **Rollback 会 unshadow 路径**。事务日志记的是"写入时的路径"（sandbox 时为影子路径），
-  回滚时若不映射回影子树就会打到错误位置；同时清理对应 `pending` 条目。
-- **删除时向上清理空目录**。回滚一个新建 skill 时，`skills/<name>/` 会留下空壳——
+- **快照先于写入**。任何一步失败都能回到写入前状态，不存在「改了一半又没快照」的窗口。
+- **快照只在内存里**。没有 `backups/` 目录，也就没有「操作记录里点一下撤销」这条路径：
+  日志是「改了什么」的记录，不是撤销菜单。
+- **`json` op 以真实文件为基底**。因为直接读写真实路径，改写 `mcp.json` 时兄弟 server
+  天然保留，不需要额外的三方合并逻辑。
+- **删除时向上清理空目录**。还原一个新建 skill 时，`skills/<name>/` 会留下空壳——
   部分 agent 会把空目录也枚举出来。
-- **Apply 时对 json 做三方合并**（种子快照 base / 影子结果 ours / 真实文件 theirs）——
-  未冲突的外部修改在 Apply 后保留。Apply 前有备份，可整体回滚。
+- **损坏的 JSON 显式中止**，不当作空配置覆盖，避免静默丢掉兄弟条目。
 
-**实测证据**（安装版二进制，`AK_STORE_ROOT` 指向临时 store）：
-MCP 调 `create_skill` 返回 `staged:true`，真实路径
-`C:\Users\<你>\.workbuddy\skills\<name>` **不存在**，影子副本落在
-`<store>\sandbox\drive\C\Users\<你>\.workbuddy\skills\<name>\SKILL.md`，
-`pending.json` 里是一条 `{op:"write", real, shadow, bytes, at}`。
+**写完之后的现场**（安装版二进制，`AK_STORE_ROOT` 指向临时 store 时应当如此）：
+MCP 调 `create_skill` 后 `C:\Users\<你>\.workbuddy\skills\<name>\SKILL.md` **已存在**，
+`audit.jsonl` 里有该 `txId` 的一行，且 `<store>` 下**不会**出现 `backups/`。
 
 ### 4.3 校验规则（节选）
 
@@ -366,7 +338,7 @@ MCP 调 `create_skill` 返回 `staged:true`，真实路径
 
 ## 5. UI 设计
 
-前端自迁移以来**没有 fork**：`src/renderer/` 是唯一真源，`tauri-shell/copy-frontend.js`
+前端只有一份源码：`src/renderer/` 是唯一真源，`tauri-shell/copy-frontend.js`
 生成 `tauri-shell/dist` 时只注入两处差异（`<html data-shell="tauri">` 与 `tauri-bridge.js`），
 `npm run tauri:check` 保证不漂移。
 
@@ -374,19 +346,21 @@ MCP 调 `create_skill` 返回 `staged:true`，真实路径
 
 | 视图 | 回答的问题 |
 |---|---|
-| **概览** | 我这台机器上一共有多少 agent 资产？谁在吃 context？有几处待应用？ |
+| **概览** | 我这台机器上一共有多少 agent 资产？谁在吃 context？最近改了什么？ |
 | **资产** | 某一个资产具体是什么？归谁所有？可编辑吗？ |
 | **Agent** | 装了哪些 harness，各自认哪些目录？ |
 | **项目** | 哪些仓库带 agent 文件？各贡献了多少？ |
 | **健康检查** | 哪些文件 agent 会静默忽略或读错？ |
-| **操作记录** | 谁在什么时候改了什么？能撤销吗？ |
+| **操作记录** | 谁在什么时候改了什么？ |
 
 ### 5.2 关键交互
 
 - **默认过滤掉缓存噪声**。插件里绝大多数是 host-owned 缓存。资产页默认显示
   "Curated + managed"，切到 "Everything incl. caches" 才全量列出。健康检查永久排除缓存，
   否则厂商的错会被误报成用户的错。
-- **待应用面板置顶**。有 staged 变更时概览顶部出现 STAGED 条，列出 op / 目标路径 / 大小 / 暂存时间。
+- **写入前二次确认**。新增 / 修改 / 删除都在落盘前弹确认框，框内列出即将写入的真实路径。
+  设置页不弹：它写的是应用自己的 store，与 agent 目录无关。这条与「直写」配套存在 ——
+  写入直接落盘，人必须在写之前就看清楚落点。
 - **Diff 先行**。Save 前有 "Preview changes" 生成行级 diff，`Ctrl+S` 直接保存。
 - **只读资产显式声明**。插件缓存 `writable:false`，UI 置灰并显示 read-only chip。
 - **快捷键**：`/` 聚焦搜索，`Esc` 关闭，`Ctrl+S` 保存。
@@ -418,15 +392,14 @@ CSP 有两处声明，浏览器对两份**各自独立执行、取交集**：
     激活／非激活态的文字颜色；toast 192 像素，是底下那行相对时间；右键菜单 182,059 像素，
     同样是某一行 `:hover` 底色。**右键菜单这个 CSSOM 定位的浮层，两组坐标完全一致**
     （`left:760px` / `top:430px`，7 个菜单项），即"悬浮卡片定位"没有受策略影响。
-  - 原因：动态样式全部走 CSSOM（`applyStyle()` 用 `element.style.setProperty`；
-    Electron 时代为此把内联样式全部改写成 CSSOM + 类名，见 §6.5），而 CSSOM 写入不受
-    `style-src` 约束；受约束的是内联 `style="…"` 属性与脚本插入的 `<style>`。
+  - 原因：动态样式全部走 CSSOM（`applyStyle()` 用 `element.style.setProperty`），
+    静态样式写成类名；CSSOM 写入不受 `style-src` 约束，受约束的是内联 `style="…"` 属性
+    与脚本插入的 `<style>`。
   - CDP 探针在两份构装上逐字段相同，佐证 `'unsafe-inline'` 从未真正放开过东西：
     `element.style.setProperty('width','123px')` → 123px（生效）、
     `setAttribute('style','width:77px')` → 仍是 123px（被忽略）、脚本插入的 `<style>` → 不生效。
   - 局限（如实记）：两次构建之间 `core/update/manager.rs` 有并行改动（同仓库多 agent 协作），
     但含"更新分区"的设置页逐字节相同，该改动对结论无影响。
-  - 截图与比对脚本是临时产物（`.tmp-csp-shots/`、`.tmp-csp-cmp.ps1`），未入库。
 
 ---
 
@@ -435,17 +408,28 @@ CSP 有两处声明，浏览器对两份**各自独立执行、取交集**：
 ### 6.1 测试套件
 
 ```bash
-cd tauri-shell/src-tauri && cargo test     # 单元 + 集成，断言数随覆盖增长
+cd tauri-shell && cargo test --workspace   # 单元 + 集成，断言数随覆盖增长
 ```
 
 | 套件 | 覆盖 |
 |---|---|
-| `core::*` 单测 | 格式层往返、校验器、安全模式、影子层、事务回滚、适配器快照对齐、MCP dispatch |
+| `core::*` 单测 | 格式层往返、校验器、安全模式、内存快照与原子写、失败还原、适配器快照对齐、MCP dispatch |
 | `tests/contract.rs` | IPC / 数据契约、资产读写、注册表、格式解析（用真实 keeper 跑临时 store） |
-| `tests/write_path.rs` | 事务、备份、journal、回滚、校验与安全扫描 |
-| `tests/mcp.rs` | MCP 工具 dispatch + 真实子进程协议（原 `mcp_stdio.rs`） |
-| `tests/update.rs` | 更新链路：真实 `TcpListener` 起 HTTP 服务、参数守卫、JS 字面量漂移（见 `docs/UPDATE.md` §9） |
+| `tests/write_path.rs` | 事务、journal、失败还原、校验与安全扫描 |
+| `tests/boundary.rs` | 并发与边界：多线程写、journal 完整性、路径与超时 |
+| `core/tests/mcp.rs` | MCP 工具 dispatch + 真实子进程协议 |
+| `tests/update.rs` | 更新链路：真实 `TcpListener` 起 HTTP 服务、参数守卫、版本比较与安装包挑选 |
 | `npm run tauri:i18n` | Rust 引擎错误文案的中文覆盖：漏一条 exit 1（见 §2.1） |
+
+**分层原则**：纯函数的边界值（参数守卫、版本比较、域名白名单、文件名清洗）在 `core` 的单元测试里，
+集成测试不再重复——两边调用的是同一个函数。下载、调度、journal 这类有状态的端到端行为两层都保留：
+core 侧用 mock 定位快，集成侧用真实 HTTP / 文件系统验证真实路径。
+
+**不写指向已删除文档的引用**。本项目的前身是 JavaScript 实现，迁到 Rust 后留下了大量
+「参考实现 §9」「IPC-contract section 5」这类引用——指向的文档已经不存在，读者无法查阅，
+编号也没有意义。注释只写**行为本身**（「保存设置会追加一条审计记录」），不写指向某个编号的指针。
+JS 语言的**语义事实**（`String(1.0)` 是 `"1"`、`\s` 的空白集、`javascript:` 是 URL scheme）
+要保留——那是 Rust 代码这么写的理由，与是否还有 JS 实现无关。
 
 前端静态校验（纯 Node，不启浏览器，全量 ≈0.5 s）：
 
@@ -454,73 +438,51 @@ npm run check                # 残留扫描 · 桥接↔Rust 命令契约 · ren
 node scripts/check.js bridge # 单独跑某一道：residue / bridge / renderer / ui / i18n / dist
 ```
 
-迁移期抓出的 parity bug（`~` 展开后残留正斜杠、UTF-16 切片、对象型 tags、
-`preserve_order`、重复 early return）当年全部只有跨运行时字节级比对抓得到，单测抓不到——
-那正是当时保留一份 Node 基准当参照物的理由。这套 harness 在旧架构删除前跑完了最后一次
-全量；工具本身已于 2026-10-20 随旧 `core/` 一并移除。
-
 ### 6.2 MCP 协议回归
 
-`cargo test --test mcp` 起真实进程，按客户端顺序走完：
-`initialize` → `notifications/initialized`（必须静默）→ `tools/list`（20 个，名字顺序钉死）→
-`list_assets` / `read_asset` / `stats` / `health_report` → `create_skill`（暂存且真实路径不落地）→
-`list_pending` → `apply_pending`（沙盒拒绝）→ `-32601` / `-32602` / `-32700`（`id:null`）→
+`cargo test -p agentkeeper-core --test mcp` 起真实进程，按客户端顺序走完：
+`initialize` → `notifications/initialized`（必须静默）→ `tools/list`（15 个，名字顺序钉死）→
+`list_assets` / `read_asset` / `stats` / `health_report` → `create_skill`（直接写入真实路径，
+只在 `audit.jsonl` 留一行）→ 已下线的 `rollback_transaction` / `list_transactions` 必须
+返回 `-32601` → `-32602` / `-32700`（`id:null`）→
 无 id 请求与空行静默 → **stdout 行数必须等于应答复的请求数** → 关 stdin 退出码 0。
 
-### 6.3 打包验收（本机实测）
+### 6.3 打包验证
 
 | 项 | 结果 |
 |---|---|
-| 安装包 | 3.7 MiB（Electron 版 69.5 MiB） |
+| 安装包 | 3.86 MiB |
 | 静默安装 | `/S /D=<dir>` → exit 0，无需提权（`currentUser`） |
-| 安装后 | 15.9 MiB / 17 文件；无 `dist/`（前端已内嵌） |
-| `demo-projects` | **不再随包发布**：原 `bundle.resources` 条目已移除，安装目录中没有该目录 |
+| 安装后 | 21.4 MiB；无 `dist/`（前端已内嵌） |
+| `demo-projects` | 不随包发布：`bundle.resources` 中没有该目录 |
 | 冷启动 → 窗口可见 | 0.76 / 0.78 / 0.83 / 0.85 / 0.93 s |
 | 内存 | shell 69 MB（private 46 MB）；整棵进程树含 WebView2 ≈ 480 MB |
 | 关闭 | WM_CLOSE → 50 ms 内 exit 0；WebView2 子进程 8–22 s 内自行退出（运行时回收，非泄漏） |
 | 首启扫描 | 990 个资产 / 519–558 ms |
 
-四张安装版截图见 README 的「验证截图」。
+安装版截图可在 Windows 桌面用 `PrintWindow` 方式生成（产物不入库）。
 
-### 6.4 本机两个"看起来像应用的 bug、其实是工具"的坑
+### 6.4 Windows 桌面的两个约束
 
-**坑一：WebView2 需要 `--no-sandbox --disable-gpu-sandbox`**
+**窗口渲染依赖 WebView2 启动参数。** 部分机器无法初始化 Chromium OS 沙盒，WebView2 渲染
+进程会以 `STATUS_BREAKPOINT`（`0x80000003`）退出，现象是窗口不出现、也没有
+`msedgewebview2.exe` 子进程。`lib.rs::run()` 在创建 webview 前无条件设置
+`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`（`--no-sandbox --disable-gpu-sandbox`，release
+同样生效；用户已显式设置时不覆盖）。GPU 开关不再额外追加：崩溃根因只有 OS 沙盒一条。
 
-这台机器无法初始化 Chromium OS 沙盒。WebView2 不加这两个开关时渲染进程直接
-`STATUS_BREAKPOINT`（`0x80000003`），现象是**窗口永远不出现**、连
-`msedgewebview2.exe` 子进程都没有。`lib.rs::run()` 在创建 webview 之前无条件设置
-`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`（release 同样生效；若用户已显式设置则不覆盖）。
+**截图工具必须声明 DPI 感知。**
 
-历史教训保留在这里：Electron 时代曾把这个和 GPU 崩溃当成两个问题，据此把
-`disable-gpu` / `in-process-gpu` / 关硬件加速一起固化，导致打包版整体卡顿。
-后来 probe 矩阵证明**崩溃根因只有 OS 沙盒一条**，GPU 无辜，已全部移除。
-（`scripts/probe.js` / `probe-matrix.js` 是那次排查留下的 Electron 工具，已于 2026-10-20
-随 Electron 测试链一起删除；结论留在这里，工具不再需要。）
+`PrintWindow` 抓图（不抢前台，前台被全屏程序占据时也能抓）。
+PowerShell 进程默认 **DPI-unaware**：Windows 常见 150% 缩放（144 DPI）下，
+`GetWindowRect` 返回虚拟化尺寸（1455×977），而 `PrintWindow` 按真实物理表面（2160×1410）绘制，
+位图只装得下左上 67%。脚本开头 `[AkWin]::SetProcessDPIAware()` 后位图变为 2182×1466。
+判据：`.app` 栅格是 `248px 1fr`，侧栏实测 372 device px 即 ×1.5。
 
-**坑二：截图工具 DPI 虚拟化 → 截图被裁掉三分之一**
+### 6.5 UI 回归
 
-`shot.ps1` 用 `PrintWindow(h, hdc, 2)` 抓图（不抢前台，前台被全屏程序占据时也能抓）。
-但 PowerShell 进程默认 **DPI-unaware**：本机真实缩放 150%（144 DPI，3840×2160），
-`GetWindowRect` 返回**虚拟化后**的 1455×977，而 `PrintWindow` 按真实 2160×1410 物理表面绘制 ——
-位图只装得下左上 67%，右侧和底部被切掉。
-症状极具误导性：概览页看起来"右列卡片被裁、布局溢出"，差点被当成 CSS 栅格 bug。
-
-修法：脚本开头 `[AkWin]::SetProcessDPIAware()`，位图随之变成 2182×1466。
-判据很简单——`.app` 栅格是 `248px 1fr`，实测侧栏若为 372 device px 就是 ×1.5，
-说明位图分配与绘制比例不一致。
-
-### 6.5 截图验证抓出的真实 bug（Electron 时代，仍适用于同一份前端）
-
-| Bug | 症状 | 根因 | 修法 |
-|---|---|---|---|
-| **IPC payload 不匹配** | 点任意资产行弹 "asset not found" | preload 发 `{ assetId }`，handler 按字符串读，收到的是 `"[object Object]"` | handler 改读对象字段；并新增逐通道真实调用测试 |
-| **CSP 阻断内联样式** | 104 条 `Refused to apply inline style`，进度条宽度/agent 颜色全丢 | `style-src 'self'` 但 `el()` 用 `style="…"` 属性 | `el()` 改走 CSSOM `element.style.setProperty()`；固定样式迁成 CSS 类 |
-| **async 视图崩溃** | `appendChild ... not of type 'Node'` | async 视图返回 Promise 被直接 appendChild | `render()` 识别 Promise，先渲染占位再 swap |
-| **沙盒下 distribute 失效** | 跨 agent 复制报 `copy source missing` | source 被 `store.real()` 重定向到影子树 | op 增加 `fromReal` 标记，源始终从真实树读 |
-| **Health 卡片被挤成一条缝** | 长列表撑破 flex | issue 卡片缺 `min-width: 0` | 补 `min-width: 0` |
-
-> 教训：截图 + console 错误收集是必需环节，不是装饰。上面 5 个 bug 里没有一个会让
-> 进程崩溃或测试变红。
+界面正确性由真机 + CDP 验证：布局溢出、逐元素对比度、`focus-visible`、Tab 序与焦点陷阱、
+缩放三档。静态门禁只覆盖可离线判定的部分（i18n 对齐、桥接契约、dist 一致性、死交互），
+不替代真机走查。
 
 ---
 
@@ -529,7 +491,6 @@ node scripts/check.js bridge # 单独跑某一道：residue / bridge / renderer 
 | 限制 | 影响 | 后续 |
 |---|---|---|
 | 写入后 agent 需重启/重扫才生效 | 面板不显示"已生效"实时态 | 接入各 agent 的 reload 信号 |
-| 沙盒模式默认开启 | 新用户第一次 Apply 才落盘 | 首启引导页说明 |
 | 插件缓存不可编辑 | 只能看不能改 | 引导用户去对应 agent 的插件 UI |
 | symlink 去重按字面路径 | 同一物理文件的两个链接算两条 | `realpath` 归一 |
 | WebView2 运行时未随包分发自带 | 目标机需装 WebView2 Runtime（Win11 自带） | NSIS 增加 bootstrapper 选项 |
@@ -545,13 +506,13 @@ node scripts/check.js bridge # 单独跑某一道：residue / bridge / renderer 
 
 ## 8. 路线图
 
-**v0.2 — 让它有牙（已发）**
-- Rust core 全量替换 Node 实现，扫描 990 资产 0.5 s
-- 安装包 3.7 MiB / currentUser / 无管理员权限
-- 20 个工具的 stdio MCP server 随包分发
+**v0.2 — 当前版本**
+- Rust core 承担全部业务逻辑，扫描 990 资产 0.5 s
+- 安装包 3.86 MiB / currentUser / 无管理员权限
+- 15 个工具的 stdio MCP server 随包分发
 
 **v0.3 — CLI 通道**
-- `ak scan --json`、`ak apply`、`ak doctor`（`ak-scan` / `ak-store` 已是雏形）
+- `ak scan --json`、`ak apply`、`ak doctor`（`ak-scan` 已是雏形）
 - 错误码体系在 Rust 侧补齐
 
 **v0.4 — 团队**
@@ -566,27 +527,36 @@ node scripts/check.js bridge # 单独跑某一道：residue / bridge / renderer 
 agentkeeper/
 ├── src/renderer/                 ★ 前端源码（零依赖原生 DOM），唯一真源
 ├── tauri-shell/
-│   ├── tauri-bridge.js           window.ak ← invoke() 的 shim
-│   ├── src-tauri/
-│   │   ├── src/lib.rs           40 个 Tauri 命令 · 窗口装配 · 更新调度线程 · WebView2 环境
-│   │   ├── src/main.rs          入口（release: windows_subsystem="windows"）
-│   │   ├── src/core/            ★ 全部业务逻辑（见 §2）
-│   │   ├── src/bin/             agentkeeper-mcp · ak-scan
-│   │   ├── tests/               集成测试（contract · write_path · mcp · update）
-│   │   ├── binaries/            externalBin 暂存目录（stage-mcp-bin.js 产出，不入库）
-│   │   ├── tauri.conf.json      CSP · NSIS currentUser · externalBin
+│   ├── Cargo.toml                  workspace 根：members = [core, src-tauri] · release profile
+│   ├── .cargo/config.toml          [build] incremental = false（workspace 级）
+│   ├── tauri-bridge.js             window.ak ← invoke() 的 shim
+│   ├── core/                       ★ agentkeeper-core：业务核心，零 Tauri 依赖
+│   │   ├── src/lib.rs              core 模块树 + JS trim 兼容层
+│   │   ├── src/*.rs                scan · assets · registry · store · keeper · mcp · security
+│   │   ├── src/bin/                agentkeeper-mcp（stdio MCP server）· ak-scan（无头扫描）
+│   │   ├── tests/                  mcp 协议回归
+│   │   └── Cargo.toml              只有非 Tauri 依赖（serde · toml · ureq · windows-sys …）
+│   ├── src-tauri/                  agentkeeper-shell：Tauri 桌面壳
+│   │   ├── src/lib.rs              40 个 Tauri 命令 · 窗口装配 · 更新调度线程 · WebView2 环境
+│   │   ├── src/main.rs             入口（release: windows_subsystem="windows"）
+│   │   ├── tests/                  集成测试（contract · write_path · update · boundary）
+│   │   ├── tauri.conf.json         CSP · NSIS currentUser · externalBin（core 的两个 bin）
 │   │   └── icons/
-│   ├── stage-mcp-bin.js         MCP 二进制 → src-tauri/binaries/<name>-<triple>.exe
-│   ├── copy-frontend.js         src/renderer → dist（唯一受控差异）
-│   ├── shot.ps1                 截图（PrintWindow，DPI 感知）
-│   ├── dist/                    生成物，被编进 exe
-│   └── shots/                   安装版截图
+│   ├── target/                     cargo 共享产物目录（两个 crate 共用）
+│   ├── copy-frontend.js            src/renderer → dist（唯一受控差异）
+│   ├── stage-core-bins.js          core 的两个 bin → src-tauri/binaries/<name>-<triple>.exe
+│   ├── clean-build.js              清孤儿 build 目录（--pdbs/--all 才动 pdb 与缓存）
+│   └── dist/                       生成物，被编进 exe
 ├── scripts/                     check · lint-renderer · ui-audit · tauri-i18n
 │                                · adapter-table · gen-adapters-snapshots · rust-env.ps1/sh
 └── docs/{DESIGN.md,UPDATE.md,MCP-SERVER.md,RUST-ENV.md}
 ```
 
-Electron 时代的 `core/`、`src/main/`、`src/mcp/`、`scripts/fixtures/` 已于 2026-10-20 整棵删除。
+**为什么拆成两个 crate**：`core/` 从不引用 Tauri 类型（实测 0 处），但同处一个 crate 时，
+`agentkeeper-mcp` / `ak-scan` 这两个纯 CLI 会被拖进 336 个 crate 的依赖图（含 18 个
+tauri/wry/webview），并且每个 bin 都要为 fat LTO 付一次全量跨 crate 优化。拆开后 core 的依赖树
+降到 118 个 crate、零 Tauri，两个 CLI 的重链从 44/49 s 降到合计 38 s。「core 不认识 Tauri」
+从约定变成编译期保证。
 
 运行：
 
@@ -595,7 +565,6 @@ source scripts/rust-env.sh        # 新终端需要先接线 cargo / MSVC 环境
 npm run tauri:sync                # 把前端同步进 dist
 cd tauri-shell/src-tauri
 cargo tauri dev                   # 开发
-cargo tauri build                 # 安装包
-cargo test                        # 单元 + 集成
-AGENTKEEPER_SANDBOX=0 cargo tauri dev   # 启动即真实写入模式
+npm run tauri:bundle              # 出包：安装版 + 免安装 zip → release/
+cd tauri-shell && cargo test --workspace   # 单元 + 集成（两个 crate）
 ```

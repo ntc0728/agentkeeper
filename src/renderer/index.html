@@ -41,11 +41,6 @@
       </nav>
 
       <div class="side-foot">
-        <label class="sandbox-switch" data-i18n-title="nav.sandboxTitle">
-          <input type="checkbox" id="sandbox-toggle" checked />
-          <span class="switch-track"><span class="switch-thumb"></span></span>
-          <span class="switch-label" data-i18n="nav.sandbox"></span>
-        </label>
         <div class="side-foot-note" id="store-root">store: —</div>
       </div>
     </aside>
@@ -54,7 +49,7 @@
       <div class="update-banner hidden" id="update-banner">
         <span id="update-text"></span>
         <button class="btn sm" id="update-open" data-i18n="update.open"></button>
-        <button class="icon-btn" id="update-dismiss" data-i18n-title="update.dismiss">✕</button>
+        <button class="icon-btn" id="update-dismiss" aria-label="Dismiss" data-i18n-label="update.dismiss" data-i18n-title="update.dismiss">✕</button>
       </div>
       <div class="scanbar hidden" id="scanbar" aria-live="polite">
         <span class="spinner"></span><span id="scanbar-text"></span>
@@ -82,20 +77,30 @@
 
       <section class="view" id="view-root">
         <!-- Language-neutral loading skeleton shaped like the dashboard it
-             becomes: a row of stat cards, then a list card with rows.
-             The first real render replaces it wholesale. -->
-        <div class="skl-stats" aria-hidden="true">
-          <div class="skl-stat"><div class="skeleton s1"></div><div class="skeleton s2"></div></div>
-          <div class="skl-stat"><div class="skeleton s1"></div><div class="skeleton s3"></div></div>
-          <div class="skl-stat"><div class="skeleton s1"></div><div class="skeleton s2"></div></div>
-          <div class="skl-stat"><div class="skeleton s1"></div><div class="skeleton s3"></div></div>
-        </div>
-        <div class="card" aria-hidden="true">
-          <div class="skeleton skl-head"></div>
-          <div class="skl-item"><span class="skl-dot"></span><div class="skl-lines"><div class="skeleton s2"></div><div class="skeleton s3"></div></div></div>
-          <div class="skl-item"><span class="skl-dot"></span><div class="skl-lines"><div class="skeleton s3"></div><div class="skeleton s2"></div></div></div>
-          <div class="skl-item"><span class="skl-dot"></span><div class="skl-lines"><div class="skeleton s2"></div><div class="skeleton s1"></div></div></div>
-          <div class="skl-item"><span class="skl-dot"></span><div class="skl-lines"><div class="skeleton s3"></div><div class="skeleton s3"></div></div></div>
+             becomes: a row of stat cards, then two half-width list cards that
+             fill the leftover height. The first real render replaces it
+             wholesale. -->
+        <div class="view-fill" aria-hidden="true">
+          <div class="skl-stats">
+            <div class="skl-stat"><div class="skeleton s1"></div><div class="skeleton s2"></div></div>
+            <div class="skl-stat"><div class="skeleton s1"></div><div class="skeleton s3"></div></div>
+            <div class="skl-stat"><div class="skeleton s1"></div><div class="skeleton s2"></div></div>
+            <div class="skl-stat"><div class="skeleton s1"></div><div class="skeleton s3"></div></div>
+          </div>
+          <div class="row-fill col mt">
+            <div class="flex-1-min card skl-panel">
+              <div class="skeleton skl-head"></div>
+              <div class="skl-item"><span class="skl-dot"></span><div class="skl-lines"><div class="skeleton s2"></div><div class="skeleton s3"></div></div></div>
+              <div class="skl-item"><span class="skl-dot"></span><div class="skl-lines"><div class="skeleton s3"></div><div class="skeleton s2"></div></div></div>
+              <div class="skl-item"><span class="skl-dot"></span><div class="skl-lines"><div class="skeleton s2"></div><div class="skeleton s1"></div></div></div>
+            </div>
+            <div class="flex-1-min card skl-panel">
+              <div class="skeleton skl-head"></div>
+              <div class="skl-item"><span class="skl-dot"></span><div class="skl-lines"><div class="skeleton s3"></div><div class="skeleton s3"></div></div></div>
+              <div class="skl-item"><span class="skl-dot"></span><div class="skl-lines"><div class="skeleton s2"></div><div class="skeleton s3"></div></div></div>
+              <div class="skl-item"><span class="skl-dot"></span><div class="skl-lines"><div class="skeleton s3"></div><div class="skeleton s1"></div></div></div>
+            </div>
+          </div>
         </div>
       </section>
     </main>

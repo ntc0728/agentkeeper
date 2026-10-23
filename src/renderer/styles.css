@@ -2,14 +2,19 @@
   --bg: #f4f5f7;
   --surface: #ffffff;
   --surface-2: #fafbfc;
+  /* One step darker than --surface-2, used only as the moving half of the
+     skeleton shimmer. It needed a real token: the animation referenced
+     var(--surface-3, var(--surface-2)), so in both themes the shimmer was a
+     single flat colour and read as a static grey block, not a loading state. */
+  --surface-3: #eef1f5;
   --border: #e4e7ec;
   --border-strong: #d3d8e0;
   --text: #131720;
   --text-2: #5b6472;
   /* AA (4.5:1) for 10–12px auxiliary text: 5.01:1 on --surface (#ffffff),
-     4.83:1 on --surface-2 (#fafbfc) and 4.59:1 on --bg (#f4f5f7).
-     The old #8b94a3 measured 3.06 / 2.95 / 2.81 and shipped as table
-     headers, hints and stat footnotes. */
+     4.83:1 on --surface-2 (#fafbfc) and 4.59:1 on --bg (#f4f5f7). A lighter
+     grey (#8b94a3 measures 3.06 / 2.95 / 2.81) fails AA for table headers,
+     hints and stat footnotes. */
   --text-3: #667080;
   --accent: #2f6bff;
   --accent-soft: #eaf0ff;
@@ -51,8 +56,8 @@
   /* ---- component tokens: every value below MUST be themed in the dark
      blocks, and no component rule may hardcode a colour. ---- */
 
-  /* Sidebar follows the theme (user request 2026-10-18: dark sidebar in a
-     light theme read as a bug). Dark values live in the dark blocks. */
+  /* Sidebar follows the theme: a dark sidebar under a light theme reads as a
+     bug. Dark values live in the dark blocks. */
   --side-bg: #eceff4;
   --side-border: #dfe3ea;
   --side-text: #414a58;
@@ -70,8 +75,6 @@
   --badge-text: #4a5361;
   --badge-warn-bg: #fdf3e2;
   --badge-warn-text: #8a5a12;
-  --track-bg: #d8dde6;
-  --switch-label: #5f6877;   /* 4.88:1 on --side-bg */
   --knob: #ffffff;
   /* Colour of an agent logo whose adapter declares no accent of its own.
      A token, not a literal, so the dark block can darken it in one place. */
@@ -149,6 +152,7 @@
   --bg: #101317;
   --surface: #181c22;
   --surface-2: #1e232b;
+  --surface-3: #2a313b;
   --border: #2a3039;
   --border-strong: #3a424e;
   --text: #e6eaf0;
@@ -174,9 +178,8 @@
   /* controls — dark surfaces, light text; *-text tokens are lifted to keep
      ≥4.5:1 contrast against their soft backgrounds */
   --btn-hover-border: #4a5464;
-  /* Measured 2026-10-20 on the real WebView2 build: white on the dark —accent
-     is 2.83:1 — that "灯箱" blue is too light to carry white text, while it is
-     exactly right as a border/icon/chart colour. The button fill therefore
+  /* White on the dark --accent measures 2.83:1 — too low for text, exactly
+     right as a border/icon/chart colour. The button fill therefore
      gets a deeper derived value (5.30:1 base, 4.81:1 hover). Do NOT "fix" this
      by raising the font weight/size: that is changing the criterion, not
      meeting it. */
@@ -254,17 +257,14 @@
   --badge-text: #cfd6e2;
   --badge-warn-bg: #4a2a12;
   --badge-warn-text: #ffbe7a;
-  --track-bg: #333a48;
-  --switch-label: #9aa3b2;
   --agent-fallback: #6b7280;   /* white label 4.83:1, tile 3.54:1 vs --surface */
   --brand-name: #ffffff;
 }
 
-/* The dark palette lives in ONE place: [data-theme="dark"] above. A duplicate
-   85-declaration block used to sit here under the "system" theme value, but
-   nothing ever sets that attribute value — theme-init.js:12 and
-   app.js:applyTheme() only ever write "dark" or "light" — so it was a second
-   source of truth that silently drifted behind the real one. */
+/* The dark palette lives in ONE place: [data-theme="dark"] above. Do not add a
+   second copy under another theme value — theme-init.js:12 and
+   app.js:applyTheme() only ever write "dark" or "light", so it would drift
+   behind this block. */
 
 /* Native form controls follow the theme too, otherwise selects render
    white-on-white in dark mode. */
@@ -299,11 +299,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .app.collapsed .brand-text,
 .app.collapsed .nav-text,
 .app.collapsed .nav-badge,
-.app.collapsed .switch-label,
 .app.collapsed .side-foot-note { display: none; }
 .app.collapsed .brand,
-.app.collapsed .nav-item,
-.app.collapsed .sandbox-switch { justify-content: center; }
+.app.collapsed .nav-item { justify-content: center; }
 .app.collapsed .brand { padding: 14px 0 10px; flex-direction: column; gap: 8px; }
 .app.collapsed .nav-item { padding: 8px 0; }
 .app.collapsed .side-foot { padding: 12px 8px 14px; }
@@ -358,19 +356,6 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .nav-badge.hidden { display: none; }
 
 .side-foot { padding: 12px 14px 14px; border-top: 1px solid var(--side-foot-border); }
-.sandbox-switch { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
-.sandbox-switch input { display: none; }
-.switch-track {
-  width: 30px; height: 17px; border-radius: var(--r-pill); background: var(--track-bg);
-  position: relative; transition: background .16s; flex: none;
-}
-.switch-thumb {
-  position: absolute; top: 2px; left: 2px; width: 13px; height: 13px;
-  border-radius: var(--r-pill); background: var(--knob); transition: transform .16s;
-}
-.sandbox-switch input:checked + .switch-track { background: var(--accent); }
-.sandbox-switch input:checked + .switch-track .switch-thumb { transform: translateX(13px); }
-.switch-label { font-size: var(--fs-micro); color: var(--switch-label); }
 .side-foot-note {
   margin-top: 8px; font-size: var(--fs-micro); color: var(--side-note); font-family: var(--mono);
   word-break: break-all; line-height: 1.4;
@@ -386,35 +371,83 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 /* Shrinkable, so the action row keeps its single line at normal widths and
    only wraps when the text itself is scaled up. Without this the title block
-   claims its full intrinsic width and pushes the last button onto a new row. */
-/* Grow/shrink: the actions block keeps one line at normal widths, and when the
-   text is scaled to 200% the whole block moves to its own line (the topbar
-   wraps) instead of pushing buttons past the viewport edge. */
-.topbar-title { flex: 1 1 260px; min-width: 0; }
+   claims its full intrinsic width and pushes the last button onto a new row.
+   Measured at 1440px: `flex: 1 1 260px` grew this block to 672px of a 1192px
+   bar and left the search box 189px — 51px under its own basis, truncating the
+   shipped Chinese placeholder by 15px. The title never needs the free space
+   (its longest string is the subtitle), so `flex: 0 1 auto` caps it at its
+   content and hands the remainder to `.topbar-actions`. `min-width: 0` is kept
+   so it still shrinks rather than pushing the buttons off the window. */
+.topbar-title { flex: 0 1 auto; min-width: 0; }
 .topbar-title h1 { margin: 0; font-size: var(--fs-title); font-weight: 650; letter-spacing: -.2px; }
 .topbar-title p { margin: 2px 0 0; font-size: var(--fs-small); color: var(--text-3); }
-.topbar-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; min-width: 0; }
 
-/* The 236px is a starting width, not a floor: as a flex item in the wrapping
-   .topbar-actions row it shrinks (and takes a full row) instead of forcing the
-   toolbar wider than the window. */
-.search-wrap { position: relative; display: flex; align-items: center; flex: 0 1 268px; min-width: 140px; }
-.search-ico { position: absolute; left: 9px; color: var(--text-3); font-size: var(--fs-body); }
+/* The search field: compact by default, but never narrower than its own
+   placeholder needs. Measured in Chromium at 13px: the shipped Chinese string
+   ("按名称、Agent、标签筛选…") needs 162px of content, and the longer English one
+   ("Filter by name, agent, tag…") about 168px. Content box = width − 28px left
+   padding (the search glyph) − 12px right padding (the caret) − 2px borders, so
+   210px clears the Chinese string with room and 216px clears both. The floor is
+   the shorter of the two so the zh UI is not widened by the English string;
+   the ellipsis on `::placeholder` covers anything longer. `flex: 0 1 240px`
+   still lets the field give ground when the window is narrow — the topbar
+   wraps the whole actions block instead of clipping it. */
+.search-wrap { position: relative; display: flex; align-items: center; flex: 0 1 240px; min-width: 210px; }
+/* `.topbar-actions` stays atomic — search + the three buttons are ONE action
+   that a user reads together, and splitting 重新扫描 onto a line of its own
+   below the search box reads as two unrelated controls.
+   `flex-wrap: nowrap` was the shipped value and it clipped: the last button's
+   right edge measured 1495 against a 1440 window. Wrapping is the fix that
+   keeps all four controls on one line; if the row genuinely cannot fit, the
+   WHOLE block moves to its own line, which is what `.topbar`'s `flex-wrap: wrap`
+   is for. `flex: 0 1 auto` (basis 0) is what makes that happen correctly —
+   with the shipped `flex: 1` (basis 0% but growable) the title block ate the
+   free space instead and squeezed the actions to their minimum, which is how
+   重新扫描 ended up wrapped at 1440px with 600px to spare. */
+.topbar-actions {
+  margin-left: auto; display: flex; gap: 8px; align-items: center;
+  flex-wrap: nowrap; flex: 0 1 auto; min-width: 0;
+}
+
+.search-ico { position: absolute; left: 9px; color: var(--text-3); font-size: var(--fs-body); pointer-events: none; }
 .search-wrap input {
-  width: 100%; padding: 7px 30px 7px 26px; border-radius: var(--r-sm);
+  /* The right padding reserves room for the absolutely-positioned <kbd> key
+     hint at right:8px. Reserving it *permanently* is what truncated the
+     placeholder: the hint is a keyboard affordance, not content, so it is
+     faded out by default and the space it would need is given back to the
+     text. The hint fades IN on hover/focus, and by then the placeholder is
+     either gone (focus) or already readable. 12px clears the caret; the kbd
+     appears over the text only while the pointer is on the field. */
+  width: 100%; padding: 7px 12px 7px 28px; border-radius: var(--r-sm);
   border: 1px solid var(--border); background: var(--surface-2); outline: none;
   color: var(--text);
 }
 /* English placeholders are longer than their Chinese counterparts; an input
    clips its placeholder with no ellipsis by default, so "Filter by name, agent,
    tag…" was cut mid-word at 1440px. Widening the box covers the shipped string
-   and the ellipsis keeps any future longer one honest. */
+   and the ellipsis keeps any future longer one honest. The block-level
+   overflow rules below are what make the ellipsis actually reachable: an
+   inline-level box ignores text-overflow on the overflowing text. */
 .search-wrap input::placeholder { text-overflow: ellipsis; }
 .search-wrap input:focus { border-color: var(--accent); background: var(--input-focus-bg); box-shadow: 0 0 0 3px var(--accent-soft); }
 .search-wrap kbd {
   position: absolute; right: 8px; font-size: var(--fs-micro); color: var(--text-3);
-  border: 1px solid var(--border); border-radius: var(--r-xs); padding: 0 4px; background: var(--kbd-bg);
+  border: 1px solid var(--border); border-radius: var(--r-xs); padding: 0 4px;
+  background: var(--kbd-bg); line-height: 1.5; pointer-events: none;
+  opacity: 0; transition: opacity .13s ease;
 }
+/* The hint is a keyboard affordance, not content. It shows on hover, and on
+   focus only once the field is empty — a focused field with text needs no
+   hint, and an empty one hides its own placeholder at the same moment, so the
+   two can never occupy the same pixels. */
+.search-wrap:hover kbd { opacity: 1; }
+.search-wrap:focus-within kbd { opacity: 1; }
+.search-wrap input:not(:placeholder-shown):focus ~ kbd { opacity: 0; }
+.search-wrap input:not(:placeholder-shown):hover ~ kbd { opacity: 0; }
+/* Chromium's native search clear button is painted inside the right padding
+   box, i.e. exactly where the kbd lives. Without the margin it sat under the
+   key hint. */
+.search-wrap input[type="search"]::-webkit-search-cancel-button { margin-right: 4px; }
 
 .btn {
   border: 1px solid var(--border-strong); background: var(--surface);
@@ -449,7 +482,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   padding: 13px 16px; border-bottom: 1px solid var(--border);
   display: flex; align-items: center; gap: 10px;
 }
-.card-head h3 { margin: 0; font-size: var(--fs-body); font-weight: 620; }
+.card-head h2 { margin: 0; font-size: var(--fs-body); font-weight: 620; }
 .card-head .sub { font-size: var(--fs-micro); color: var(--text-3); }
 .card-head .spacer { margin-left: auto; }
 .card-body { padding: 14px 16px; }
@@ -460,6 +493,49 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .grid-2 { grid-template-columns: repeat(2, 1fr); }
 .row { display: flex; gap: 14px; }
 .mt { margin-top: 14px; }
+
+/* ---- fill-the-view layout ----
+ *
+ * `.view` is a flex item with a definite height and `overflow-y:auto`. A child
+ * at `height:100%` therefore resolves against the view's content box, which is
+ * what lets a dashboard panel claim "everything below the stat grid" instead of
+ * floating as a short card above empty background. Each link in the chain must
+ * declare `min-height:0` — a flex item's default `min-height:auto` refuses to
+ * shrink below its content, which is exactly what turns a filling layout into
+ * a scroll-everything layout.
+ *
+ * `.card-fill` overrides the `.card { overflow-x:auto }` rule from the
+ * anti-clipping section: a card that is itself a flex column cannot also be the
+ * horizontal scroll box, so the single scroll container has to be the table
+ * wrapper (`.card-scroll`) inside it.
+ */
+.view-fill { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+.row-fill { flex: 1 1 auto; min-height: 0; }
+/* Stacked variant: one panel per row. Each still claims an equal share of the
+   leftover height, so the pair together fills the container — a single `.col`
+   child would otherwise be sized by its content and leave dead space below.
+   `flex: 1 1 0` (not `auto`) is what makes the shares equal: with `auto` the
+   taller table's content would decide the split. */
+.row-fill.col { display: flex; flex-direction: column; gap: 14px; }
+.row-fill.col > .flex-1-min { flex: 1 1 0; min-height: 0; display: flex; }
+.card-fill { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+/* `.card { overflow-x:auto }` is declared later in the sheet (anti-clipping
+   section) and has the same specificity, so the override needs two classes. */
+.card.card-fill { overflow: hidden; }
+/* A card head must not be squeezed out of the flex column by a tall body. */
+.card-fill > .card-head { flex: none; }
+.card-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
+/* Two same-height panels side by side: both children stretch to the row height
+   instead of one of them deciding how tall the pair is. */
+.row-fill > .flex-1-min { display: flex; min-height: 0; }
+.row-fill > .flex-1-min > .card-fill { width: 100%; }
+/* A panel skeleton stands in for `.card-fill` during the first paint. */
+.skl-panel {
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px 16px; overflow: hidden;
+}
+.skl-panel .skl-lines { flex: 1; min-width: 0; }
 
 /* stat cards */
 .stat {
@@ -501,49 +577,224 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .chip.clickable { cursor: pointer; border: 0; font-family: inherit; }
 .chip.clickable:hover { filter: brightness(.96); }
 
-/* ---- settings rows ---- */
+/* ---- settings rows ----
+   The label/hint block is the reading column and the control is the action
+   column. Two fixes to the width split:
+   · `.set-label` grows from a 0 basis (`flex: 1 1 0`) rather than from its
+     intrinsic width. `flex: 1` means `flex: 1 1 0%` in modern engines but the
+     useful part is the zero basis: the free space goes to the *hint* column,
+     not to the short label, so a row whose control is a 44px switch does not
+     leave a 400px empty gutter between the label and the switch.
+   · `.set-control` gets a flex basis of 0 with a right margin instead of
+     `margin-left:auto`. Both centre the control to the right edge; only the
+     second keeps a wrapping control right-aligned, because a wrapper that has
+     collapsed to zero width and then grows still starts from the right.
+   · 46% is a cap, not the budget: a 320px token field in a 620px modal is
+     52% of the row and must not be clipped by the old 52% ceiling. */
 .set-row {
   display: flex; align-items: flex-start; gap: 16px;
-  padding: 11px 0; border-bottom: 1px solid var(--border);
+  padding: 12px 0; border-bottom: 1px solid var(--border);
 }
 .set-row:last-child { border-bottom: 0; }
-.set-label { flex: 1; font-size: var(--fs-body); font-weight: 500; }
-.set-hint { font-size: var(--fs-micro); color: var(--text-3); font-weight: 400; margin-top: 3px; line-height: 1.45; }
-.set-control { flex-shrink: 0; display: flex; align-items: center; }
+.set-label { flex: 1 1 0; min-width: 0; font-size: var(--fs-body); font-weight: 500; }
+/* A long path or an unbroken token in the label column breaks instead of
+   widening the row; CJK breaks anywhere, so keep the normal rules there. */
+.set-label label { overflow-wrap: anywhere; }
+.set-hint {
+  font-size: var(--fs-micro); color: var(--text-3); font-weight: 400; margin-top: 4px;
+  line-height: 1.5; max-width: 62ch;
+}
+.set-control {
+  flex: 0 1 auto; min-width: 0; margin-left: auto;
+  display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end;
+}
 .items { align-items: center; }
 
 .switch {
-  width: 40px; height: 22px; border-radius: var(--r-md); padding: 0;
+  /* 44×24 rather than 40×22: WCAG 2.2 AA target size is 24×24, and the switch
+     is a standalone control (its label text is not clickable). */
+  width: 44px; height: 24px; border-radius: var(--r-md); padding: 0;
   background: var(--border-strong); border: 0; cursor: pointer;
   position: relative; transition: background .16s ease;
 }
 .switch.on { background: var(--accent); }
 .switch .knob {
-  position: absolute; top: 3px; left: 3px; width: 16px; height: 16px;
+  position: absolute; top: 4px; left: 4px; width: 16px; height: 16px;
   border-radius: var(--r-pill); background: var(--knob); transition: transform .16s ease;
   box-shadow: 0 1px 2px rgba(0, 0, 0, .25);
 }
-.switch.on .knob { transform: translateX(18px); }
+.switch.on .knob { transform: translateX(20px); }
 .switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .input-inline {
-  width: 84px; font-size: var(--fs-small); padding: 5px 8px; border-radius: var(--r-sm);
+  width: 84px; min-width: 0; font-size: var(--fs-small); padding: 5px 8px;
+  border-radius: var(--r-sm);
   border: 1px solid var(--border); background: var(--surface); color: var(--text);
   font-family: var(--mono);
 }
 .input-inline:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+/* A fixed-width field must never force its row wide: the 84px box is a
+   starting width, not a minimum. Shrinking is allowed, growing is not, so a
+   320px token field keeps its size in a 620px modal while a cramped sidebar
+   row can still fit the field and its button side by side. */
+.input-inline { max-width: 100%; flex-shrink: 1; }
+/* `type=password` (the update token) has no default styling and no glyph to
+   size against, so the shipped placeholder `ghp_… / github_pat_…` was the only
+   thing left in the box and it ellipsized to "ghp_…" — which looks like a
+   stored value, not a hint. The wide variant below is 320px, which is what
+   makes the full hint readable; this keeps the shorter boxes honest too. */
+.input-inline::placeholder { color: var(--text-3); opacity: 1; }
+.input-inline:disabled::placeholder { color: var(--text-3); opacity: .6; }
 .stat-label { font-size: var(--fs-micro); color: var(--text-3); display: flex; align-items: center; gap: 6px; }
 .stat-value { font-size: var(--fs-display); font-weight: 650; margin-top: 6px; letter-spacing: -.6px; font-variant-numeric: tabular-nums; }
 .stat-foot { font-size: var(--fs-micro); color: var(--text-3); margin-top: 3px; }
 
-/* tables */
-table.tbl { width: 100%; border-collapse: collapse; }
+/* tables
+ *
+ * COLUMN CONTRACT. `table-layout: fixed` stops the browser from guessing
+ * widths from content: the header row's `width` values decide every column and
+ * the rest of the table obeys them. Without it a three-column table in a wide
+ * card gave all the slack to the label cell ("Agent" stretched over 700px
+ * while the numeric columns were pushed against the right edge), and a
+ * five-column table pulled its short `kind` chip column wide while
+ * squeezing the asset name.
+ *
+ * The four shape rules use `:has()` on the header row because that is the only
+ * purely-CSS way to tell the 3-column dashboard table from the 7-column asset
+ * table: both are `.tbl`, both are `width:100%`, and app.js adds no
+ * distinguishing class. WebView2 is evergreen, so `:has()` is available.
+ * Widths are declared on `th` only — in fixed layout the first row is
+ * authoritative, and app.js already mirrors `.num` onto both `th` and `td`.
+ *
+ * The `.col-*` classes are the same contract, addressed by name. app.js can
+ * adopt them one table at a time; where a class is present it wins over the
+ * shape fallback, because it is the more specific intent.
+ */
+table.tbl {
+  table-layout: fixed; width: 100%; border-collapse: collapse;
+}
+table.tbl th, table.tbl td { overflow: hidden; }
+/* The matrix sizes itself from its rotated headers and its own scroll box;
+   fixed layout would collapse the agent columns to one glyph. */
+table.tbl.matrix { table-layout: auto; min-width: 0; }
+table.tbl.matrix th, table.tbl.matrix td { overflow: visible; }
+
+/* Table floor widths.
+ *
+ * These are deliberately NOT guarded by the `:not(:has([class*="col-"]))`
+ * opt-out that the column widths use. A `min-width` on the table is a floor
+ * for the whole grid, not a per-column guess, and it is what keeps the ONE
+ * flexible column from collapsing to zero: measured at a 600px viewport the
+ * asset table's fixed columns (44 + 92 + 148 + 84 + 84 + 112 = 564px) exceed
+ * the 518px card, which left `col-name` at exactly 0px — a column that is
+ * present in the DOM and invisible on screen. With the floor the table becomes
+ * 720px and scrolls horizontally inside `.card { overflow-x: auto }`, giving the
+ * name column 156px, which is a readable name behind a scrollbar rather than a
+ * silent zero. */
+table.tbl:has(thead > tr > th:last-child:nth-child(7)) { min-width: 720px; }
+table.tbl:has(thead > tr > th:last-child:nth-child(9)) { min-width: 880px; }
+table.tbl:has(thead > tr > th:last-child:nth-child(5)) { min-width: 520px; }
+
+/* FALLBACK SHAPE RULES — the no-new-class safety net.
+ *
+ * These apply only to tables that have NOT opted into the named `.col-*`
+ * contract below, hence `:not(:has([class*="col-"]))` on the table and
+ * `:not([class*="col-"])` on each column. The guard is load-bearing: `:has()`
+ * with a `:last-child:nth-child(n)` argument lands around (0,3,2), which
+ * silently outranks a plain `table.tbl th.col-kind` (0,2,2). Without the
+ * guard these fallbacks kept overriding the explicit intent of every table
+ * app.js had already annotated — measured: `.tbl-recent th.col-kind` was
+ * computed at 92px (the fallback) instead of the 76px it was given.
+ *
+ * This is what makes the column contract hold even for a table app.js never
+ * touches: column count is the only signal available from CSS alone. */
+
+/* three columns: label + two numbers */
+table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(3)) th:nth-child(2):not([class*="col-"]) { width: 76px; }
+table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(3)) th:nth-child(3):not([class*="col-"]) { width: 88px; }
+/* two columns: type + name */
+table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(2)) th:nth-child(1):not([class*="col-"]) { width: 132px; }
+/* five columns: kind / name / agent / scope / relative time */
+table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(5)) th:nth-child(1):not([class*="col-"]) { width: 92px; }
+table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(5)) th:nth-child(3):not([class*="col-"]) { width: 152px; }
+table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(5)) th:nth-child(4):not([class*="col-"]) { width: 116px; }
+table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(5)) th:nth-child(5):not([class*="col-"]) { width: 116px; }
+/* seven columns: select / kind / name / owner / size / tokens / state */
+table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(7)) th:nth-child(1):not([class*="col-"]) { width: 44px; }
+table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(7)) th:nth-child(2):not([class*="col-"]) { width: 92px; }
+table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(7)) th:nth-child(4):not([class*="col-"]) { width: 148px; }
+table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(7)) th:nth-child(5):not([class*="col-"]) { width: 84px; }
+table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(7)) th:nth-child(6):not([class*="col-"]) { width: 84px; }
+table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(7)) th:nth-child(7):not([class*="col-"]) { width: 112px; }
+/* nine columns: project / agents / five kind counters / added / action */
+table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(9)) th:nth-child(2):not([class*="col-"]) { width: 112px; }
+table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(9)) th:nth-child(8):not([class*="col-"]) { width: 112px; }
+table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(9)) th:nth-child(9):not([class*="col-"]) { width: 104px; }
+table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(9)) th:nth-child(n+3):nth-child(-n+7):not([class*="col-"]) { width: 72px; }
+
 table.tbl th {
   text-align: left; font-size: var(--fs-micro); text-transform: uppercase; letter-spacing: .07em;
   color: var(--text-3); font-weight: 600; padding: 8px 12px; border-bottom: 1px solid var(--border);
   background: var(--surface-2); position: sticky; top: 0; z-index: 1;
 }
+table.tbl th.num { text-align: right; }
 table.tbl td { padding: 9px 12px; border-bottom: 1px solid var(--table-border); vertical-align: middle; }
+
+/* ---- named column contract ----
+   The named classes are what app.js attaches when a table has a known shape.
+   They are declared AFTER the `:has()` shape fallbacks on purpose: specificity
+   only follows declaration order for equally specific rules, and
+   `table.tbl:has(...) th:nth-child(n)` (0,3,2) would otherwise beat
+   `table.tbl th.col-num` (0,2,2) and silently ignore the explicit intent.
+   `.col-name` is the only flexible column: it takes every pixel the fixed
+   columns leave, and its content ellipsizes instead of widening the row. */
+table.tbl th.col-check, table.tbl td.col-check { width: 44px; }
+table.tbl th.col-kind, table.tbl td.col-kind { width: 92px; }
+table.tbl th.col-name, table.tbl td.col-name { width: auto; min-width: 0; }
+table.tbl th.col-agent, table.tbl td.col-agent { width: 152px; }
+table.tbl th.col-scope, table.tbl td.col-scope { width: 116px; }
+table.tbl th.col-owner, table.tbl td.col-owner { width: 148px; }
+table.tbl th.col-state, table.tbl td.col-state { width: 112px; }
+table.tbl th.col-time, table.tbl td.col-time { width: 116px; }
+table.tbl th.col-act, table.tbl td.col-act { width: 104px; }
+table.tbl th.col-num, table.tbl td.col-num {
+  width: 84px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+/* ---- per-table tightening -------------------------------------------------
+   The two dashboard panels are half-width cards (~560px at 1440), so the
+   generic widths above do not fit: the agent table has SEVEN numeric columns
+   (5 kinds + total + size) and the recent table has four fixed columns plus a
+   flexible name. At the generic widths the name column fell to ~90px and
+   ellipsized to "deep-res…", which is the same defect in a new place. These two
+   overrides give each panel an arithmetic that adds up inside a half card:
+
+     agents: 140 (label, flexible) + 7 × 56 = 532  → the label absorbs the rest
+     recent: 76 + 8 + 100 + 76 + 88 = 348         → ~200px left for the name
+   The kind column is sized to the widest chip (记忆 — 2 CJK glyphs plus pill
+   padding ≈ 52px) with a little air; wider only steals name width. */
+table.tbl.tbl-agents { min-width: 460px; }
+/* The label column is the only flexible one, so on a full-width card it
+   absorbed ~700px and pushed the seven numeric columns into the far right
+   corner: an unreadable gap between the agent name and its own numbers — the
+   defect this column contract exists to remove, reappearing at full width.
+   Capping it at 260px puts the numbers directly beside the name and leaves
+   the slack on the right of the numeric block, where a table's eye does not
+   travel. `col-agent { width:auto }` still lets a narrower card (≤1200px,
+   where the panels stack) give the remainder back. */
+table.tbl.tbl-agents th.col-agent, table.tbl.tbl-agents td.col-agent { width: 260px; }
+table.tbl.tbl-agents th.col-num, table.tbl.tbl-agents td.col-num { width: 56px; }
+table.tbl.tbl-recent { min-width: 440px; }
+table.tbl.tbl-recent th.col-kind, table.tbl.tbl-recent td.col-kind { width: 76px; }
+table.tbl.tbl-recent th.col-agent, table.tbl.tbl-recent td.col-agent { width: 100px; }
+table.tbl.tbl-recent th.col-scope, table.tbl.tbl-recent td.col-scope { width: 76px; }
+table.tbl.tbl-recent th.col-time, table.tbl.tbl-recent td.col-time { width: 88px; }
+table.tbl th.col-time, table.tbl td.col-time,
+table.tbl th.col-kind, table.tbl td.col-kind,
+table.tbl th.col-state, table.tbl td.col-state,
+table.tbl th.col-scope, table.tbl td.col-scope { white-space: nowrap; }
+table.tbl th.col-agent, table.tbl td.col-agent,
+table.tbl th.col-owner, table.tbl td.col-owner,
+table.tbl th.col-name, table.tbl td.col-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 table.tbl tbody tr { cursor: pointer; }
 table.tbl tbody tr:hover { background: var(--row-hover); }
 /* Read-only inventory tables: rows are informational, so no pointer lie. */
@@ -552,6 +803,12 @@ table.tbl.static tbody tr:hover { background: transparent; }
 table.tbl tbody tr.inert { cursor: default; opacity: .75; }
 table.tbl tbody tr.inert:hover { background: transparent; }
 table.tbl tbody tr.sel { background: var(--accent-soft); }
+table.tbl tbody tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Identity cells are the flexible ones, so their inner block ellipsizes. The
+   old rule left `.t-name` free to wrap, which under `table-layout: fixed`
+   meant a two-line row for a long skill name and a ragged table. */
+table.tbl .t-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+table.tbl .t-mono { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .t-name { font-weight: 550; }
 .t-desc {
   font-size: var(--fs-micro); color: var(--text-3); max-width: 380px;
@@ -559,6 +816,10 @@ table.tbl tbody tr.sel { background: var(--accent-soft); }
 }
 .t-mono { font-family: var(--mono); font-size: var(--fs-micro); color: var(--text-2); }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
+/* app.js marks the per-agent total column with `.strong` so it reads as the
+   summary row among the five kind counters. 600 weight, not 700: the counter
+   is already the largest number in the column. */
+.strong { font-weight: 600; }
 
 .chip {
   display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-micro);
@@ -653,9 +914,17 @@ table.tbl tbody tr.sel { background: var(--accent-soft); }
 .drawer-head .icon-btn { margin-left: auto; }
 .drawer-body { flex: 1; overflow-y: auto; padding: 16px; }
 
-.kv { display: grid; grid-template-columns: 128px 1fr; gap: 6px 12px; font-size: var(--fs-small); }
-.kv dt { color: var(--text-3); }
-.kv dd { margin: 0; word-break: break-word; }
+/* 128px was a hard floor for the term column: an English label longer than
+   that ("Configuration file", "Encrypted at rest") either wrapped to two lines
+   or pushed the value column right, while short labels left a visible gutter.
+   `minmax(96px, max-content)` gives every row the term width it actually needs
+   up to a quarter of the drawer, and lets the value column take the rest. */
+.kv {
+  display: grid; grid-template-columns: minmax(96px, max-content) 1fr;
+  gap: 8px 14px; font-size: var(--fs-small);
+}
+.kv dt { color: var(--text-3); min-width: 0; }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 
 .sec-title {
   font-size: var(--fs-micro); text-transform: uppercase; letter-spacing: .08em; color: var(--text-3);
@@ -746,12 +1015,13 @@ textarea.editor:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(-
 
 /* discover results */
 .grow { flex: 1; min-width: 0; }
-.disc-hint { margin-top: 8px; font-size: var(--fs-small); }
-.disc-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px 2px; border-bottom: 1px solid var(--border); }
+.disc-hint { margin-top: 8px; font-size: var(--fs-small); max-width: 68ch; }
+.disc-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px 8px; border-bottom: 1px solid var(--border); }
 .disc-row:last-child { border-bottom: 0; }
 .disc-main { flex: 1; min-width: 0; }
-.disc-name { font-weight: 600; font-size: var(--fs-body); }
+.disc-name { font-weight: 600; font-size: var(--fs-body); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .disc-desc { color: var(--text-3); font-size: var(--fs-small); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.disc-row .btn { flex: none; }
 .muted { color: var(--text-3); }
 .mono { font-family: var(--mono); }
 .nowrap { white-space: nowrap; }
@@ -760,6 +1030,29 @@ textarea.editor:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(-
 .spread { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .gap-sm { gap: 5px; }
 .pre-wrap { white-space: pre-wrap; }
+/* Target list in the write confirmation: one path per line. Wrapped in a
+   scroll box instead of letting a long list push the dialog buttons out of
+   reach — a delete can touch dozens of files. */
+.write-targets {
+  margin: 10px 0 0; padding: 8px 10px 8px 24px; list-style: disc;
+  max-height: 190px; overflow: auto;
+  background: var(--code-bg); border-radius: var(--r-sm); color: var(--text-2);
+  line-height: 1.5; word-break: break-all;
+}
+.write-targets li { margin: 1px 0; }
+/* Paths that could not be restored (reportWriteFailure). Same scroll-box
+   treatment as the write confirmation: a failed transaction across a
+   distributed skill can touch many paths, and an unbounded list would push the
+   dialog's Close button out of reach. `list-style:none` — these are entries to
+   inspect, not an enumeration to count, and the bullets read as decoration
+   next to a full filesystem path. */
+.restore-list {
+  margin: 0 0 12px; padding: 8px 10px; list-style: none;
+  max-height: 200px; overflow: auto;
+  background: var(--code-bg); border-radius: var(--r-sm); color: var(--text-2);
+  line-height: 1.5; word-break: break-all;
+}
+.restore-list li { margin: 2px 0; }
 code.inline {
   font-family: var(--mono); font-size: var(--fs-micro); background: var(--code-bg);
   padding: 1px 5px; border-radius: var(--r-xs); color: var(--text-2);
@@ -871,8 +1164,7 @@ table.matrix th.rot > div {
   transform: rotate(-58deg); transform-origin: bottom left;
   width: 22px; margin-left: auto; margin-bottom: 6px;
 }
-/* ---------- interaction polish (2026-10-18) ----------
-   User feedback: hover states were too subtle, interactions felt stiff.
+/* ---------- interaction polish ----------
    Every clickable gets one short eased transition; hover lifts; press sinks;
    keyboard focus gets a visible ring. All colours via vars — theme-safe. */
 .btn, .nav-item, .icon-btn, .chip, .switch, input[type="text"],
@@ -918,7 +1210,7 @@ input:focus, select:focus, textarea:focus {
 }
 .btn.loading { pointer-events: none; opacity: .75; }
 .skeleton {
-  background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3, var(--surface-2)) 37%, var(--surface-2) 63%);
+  background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 37%, var(--surface-2) 63%);
   background-size: 400% 100%;
   animation: ak-shimmer 1.2s ease infinite;
   border-radius: var(--r-sm); height: 12px; margin: 10px 0;
@@ -948,21 +1240,28 @@ input:focus, select:focus, textarea:focus {
 @keyframes ak-scan-sweep { 0% { left: -32%; } 100% { left: 100%; } }
 @keyframes ak-fade-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 
-/* ---------- anti-clipping pass (2026-10-18) ----------
-   User feedback: labels/controls overlapped, text wrapped awkwardly or was
-   cut off. Flex children need min-width:0 to shrink; long names ellipsize
+/* ---------- anti-clipping ----------
+   Flex children need min-width:0 to shrink; long names ellipsize
    instead of pushing buttons out of their headers. */
-.set-label { min-width: 0; }
-.set-control { max-width: 52%; min-width: 0; flex-wrap: wrap; justify-content: flex-end; }
+.set-control { max-width: 62%; }
 .set-control > * { max-width: 100%; }
 .input-inline.wide { width: min(320px, 100%); }
 
-.topbar-title { min-width: 0; }
-.topbar-title h1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-.card-head h3 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* ---- type hierarchy and rhythm ----
+   Applied without moving the theme:
+   · `.card-head .sub` is a caption, not a heading: `--fs-micro` at
+     `--text-3` sits four levels below the `--fs-title` page title and two
+     below the `--fs-body` card title. Both keep their measured ratios
+     (5.01:1 and 4.83:1 in light, 6.42:1 in dark on --text-3), so the
+     auxiliary contrast floor is unchanged.
+   · `.card-head h2` no longer wraps into a second line: a long card title
+     ellipsizes instead, which keeps every head one 48px row and stops the
+     body below it from stepping down the card. */
+.card-head h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-head .sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
+.topbar-title { min-width: 0; }
+.topbar-title h1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #modal-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .tl-head { min-width: 0; }
@@ -978,9 +1277,19 @@ input:focus, select:focus, textarea:focus {
   -webkit-box-orient: vertical; line-height: 1.45;
 }
 
-/* wide tables scroll horizontally inside their card instead of being cut */
+/* wide tables scroll horizontally inside their card instead of being cut.
+   A filling card is its own flex column, so the scroll box has to be
+   `.card-scroll` inside it — see the fill-the-view block above. */
 .card { overflow-x: auto; }
 #drawer-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- table rhythm ----
+   One height for every row in every table: the 9px vertical padding plus the
+   13px body line box is ~33px per row, and `tabular-nums` on `.num` keeps the
+   digit columns aligned while the label column scrolls. The last row loses its
+   border so a table does not end on a line of its own under the card edge. */
+table.tbl tbody tr:last-child td { border-bottom: 0; }
+table.tbl.static tbody tr:last-child td { border-bottom: 0; }
 
 /* structural skeleton: shaped like the dashboard (stat cards + list rows) */
 .skl-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 14px; }
@@ -988,7 +1297,7 @@ input:focus, select:focus, textarea:focus {
 .skl-stat .skeleton { margin: 8px 0; }
 .skl-stat .skeleton.s1 { width: 46%; }
 .skl-head { width: 30%; height: 12px; margin: 4px 0 16px; }
-.skl-item { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.skl-item { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .skl-item:last-child { border-bottom: 0; }
 .skl-dot { width: 26px; height: 26px; flex: none; border-radius: var(--r-sm); background: var(--surface-2); animation: ak-pulse 1.2s ease infinite; }
 .skl-lines { flex: 1; min-width: 0; }
@@ -997,8 +1306,12 @@ input:focus, select:focus, textarea:focus {
 
 /* ---- software updates ---------------------------------------------- */
 /* Version comparison: current → latest, with the check button on the right.
-   Values come from the main process; nothing here hardcodes a colour. */
+   Values come from the main process; nothing here hardcodes a colour.
+   `.spacer` inside the row is what pushes the button right; give it a flex
+   basis of 0 so the two version cells stay adjacent to the arrow instead of
+   each claiming a third of the card. */
 .upd-version { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; }
+.upd-version .spacer { margin-left: auto; flex: 1 1 0; min-width: 0; }
 .upd-version-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .upd-version-num { font-size: var(--fs-title); font-weight: 600; letter-spacing: .2px; }
 .upd-version-num.is-new { color: var(--accent); }
@@ -1010,6 +1323,43 @@ input:focus, select:focus, textarea:focus {
 .upd-notes { margin-top: 10px; }
 .upd-notes > summary { cursor: pointer; font-size: var(--fs-small); color: var(--text-2); }
 .upd-notes > summary:hover { color: var(--text); }
+/* ---- update panel ----
+   `.upd-head-actions` is the button pair in the card head. It carries its own
+   right margin instead of relying on `.spacer`, so a card head that has no
+   `.spacer` sibling still puts the actions at the far edge. */
+.upd-head-actions {
+  margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.upd-changelog { display: flex; flex-direction: column; gap: 8px; }
+/* One release row: identity on the left, actions on the right. `flex-wrap` so
+   a narrow card puts the buttons on their own line instead of crushing the
+   version label. */
+.upd-log-item {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 12px; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--surface);
+}
+.upd-log-item:hover { background: var(--row-hover); border-color: var(--btn-hover-border); }
+.upd-log-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.upd-log-main { flex: 1 1 180px; min-width: 0; }
+.upd-log-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.upd-log-ver { font-family: var(--mono); font-size: var(--fs-small); font-weight: 600; }
+/* The version label is the row's only link. It is underlined on hover/focus
+   (and dotted at rest is too noisy here) so it does not read as inert text,
+   and it keeps a visible focus ring: `role="link"` on a <span> is not
+   focusable for a keyboard user without tabindex, which app.js sets. */
+.upd-log-ver.clickable { cursor: pointer; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px; }
+.upd-log-ver.clickable:hover { color: var(--accent); text-decoration-style: solid; }
+.upd-log-ver.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-xs); }
+.upd-log-date { font-size: var(--fs-micro); color: var(--text-3); white-space: nowrap; }
+.upd-log-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.upd-log-notes {
+  white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: auto;
+  background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 10px 12px;
+  font-family: var(--mono); font-size: var(--fs-micro); line-height: 1.6; margin-top: 8px;
+}
+.upd-log-empty { padding: 16px 12px; text-align: center; font-size: var(--fs-small); color: var(--text-3); }
 .update-notes { white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; font-family: var(--mono); font-size: var(--fs-micro); line-height: 1.6; margin: 8px 0 0; }
 .hrule { height: 1px; background: var(--border); }
 .mt-8 { margin-top: 8px; }
@@ -1037,11 +1387,30 @@ details > summary { cursor: pointer; user-select: none; }
  *   600px — narrow: icon rail only, one column, full-bleed overlays
  * Nothing here changes colour; every value still comes from the tokens. */
 
+/* Narrow-window fallback. The two dashboard panels stack at EVERY width (see
+   `.row-fill.col` above — side by side they clipped the agent table's own
+   Agent column to 68px), so this block is about the other half of the filling layout: below
+   1200px a filling layout stops paying. A 720px-tall window asked to divide
+   its height between two tables gets ~330px of body each, and the recent
+   panel — the shorter of the two — scrolls a 3-row list inside a 330px box.
+   From there the panels take their natural height and the view scrolls as a
+   whole, which is what the user expects from a window they shrank. */
+@media (max-width: 1200px) {
+  .view-fill { height: auto; min-height: 0; display: block; }
+  .card-fill { display: block; overflow-x: auto; }
+  .card-scroll { overflow-x: auto; overflow-y: visible; }
+  .skl-panel { display: block; overflow: visible; }
+  /* `flex: 1 1 0` distributes a *fixed* height. With `.view-fill` back to
+     `height:auto` there is no fixed height to distribute, so the two panels
+     were handed 0px each and collapsed to a 2px border (measured at 1120 /
+     900 / 600). Back to content height here; the view scrolls as a whole. */
+  .row-fill.col > .flex-1-min { flex: 0 0 auto; display: block; }
+}
+
 @media (max-width: 900px) {
   .app { grid-template-columns: 208px 1fr; }
   .app.collapsed { grid-template-columns: 60px 1fr; }
-  /* The toolbar is the thing that used to be clipped: let it become rows
-     instead of letting it overflow the viewport. */
+  /* The toolbar must wrap into rows instead of overflowing the viewport. */
   .topbar { flex-wrap: wrap; row-gap: 10px; padding: 12px 16px; }
   .topbar-actions { margin-left: 0; flex-wrap: wrap; }
   .topbar-title { flex: 1 1 auto; }
@@ -1060,8 +1429,8 @@ details > summary { cursor: pointer; user-select: none; }
      the only split that fits, so the toggle's expanded state is overridden. */
   .app, .app.collapsed { grid-template-columns: 56px 1fr; }
   .brand-text, .nav-text, .nav-badge,
-  .switch-label, .side-foot-note { display: none; }
-  .brand, .nav-item, .sandbox-switch { justify-content: center; }
+  .side-foot-note { display: none; }
+  .brand, .nav-item { justify-content: center; }
   /* Rail width (56px) is smaller than the brand row's content: 32px tile +
      10px gap + 26px collapse toggle + 12px padding = 80px. A centred row that
      overflows spills in BOTH directions, so the AK tile landed at left:-12px
@@ -1089,4 +1458,20 @@ details > summary { cursor: pointer; user-select: none; }
   .modal { max-height: 92vh; }
   .batchbar { flex-wrap: wrap; }
   .search-wrap { min-width: 0; }
+  .kv { grid-template-columns: 1fr; gap: 2px 0; }
+  .kv dd { margin-bottom: 8px; }
+  .upd-version { gap: 10px; }
+  .upd-head-actions, .upd-log-actions { margin-left: 0; }
+}
+
+/* Respect the OS motion preference. Every animation in this sheet is
+   decorative (shimmer, pulse, slide, hover lift), so removing them changes no
+   information — it only removes movement for readers who asked for none. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
 }

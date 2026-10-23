@@ -1,100 +1,286 @@
 # AgentKeeper
 
-统一管理 AI 编码 Agent 资产的本地控制平面：**发现 → 校验 → 编辑 → 分发 → 审计 → 回滚**。
+**English** | [简体中文](README.zh-CN.md)
 
-覆盖 5 类资产 × 17 个 Agent × 全局/项目两级作用域。桌面壳是 **Tauri 2**，
-业务逻辑全部在 **Rust**（`tauri-shell/src-tauri/src/core/`），前端是同一份零依赖原生 DOM。
+> One local control plane for AI coding-agent assets — discover, validate, edit,
+> distribute, audit and roll back **skills, MCP servers, plugins, rules and memory**
+> across global and project scopes.
+
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![platform: Windows](https://img.shields.io/badge/platform-Windows-0078D4.svg)](#requirements)
+[![shell: Tauri 2](https://img.shields.io/badge/shell-Tauri%202-24C8DB.svg)](https://tauri.app/)
+[![core: Rust](https://img.shields.io/badge/core-Rust-B7410E.svg)](tauri-shell/src-tauri)
+
+5 asset kinds × 17 agents × 2 scopes, one window. The desktop shell is **Tauri 2**, the
+business logic is **Rust** (`tauri-shell/core/src/`), and the UI is a zero-dependency
+native DOM app (`src/renderer/`) with no build step.
 
 ---
 
-## 环境要求
+## Why
 
-| 依赖 | 说明 |
+An agent's behaviour comes from the files it silently preloads, not only from the model:
+
+| Asset | Carrier | How it fails |
+|---|---|---|
+| Skill | `SKILL.md` + YAML frontmatter | missing `description` → never triggers; folder ≠ `name` → wrong cache key |
+| MCP server | `mcp.json` / `.mcp.json` / `config.toml` | missing `command`/`url` → connect fails; a rewrite swallows sibling servers |
+| Plugin | `.codebuddy-plugin/plugin.json` etc. | version directory drift; cache mistaken for a marketplace |
+| Rule | `AGENTS.md` / `CLAUDE.md` / `.mdc` | empty file still burns tokens; loaded twice by two agents |
+| Memory | `MEMORY.md` + `memory/YYYY-MM-DD.md` | stale, conflicting, unaudited |
+
+Those files are scattered across `~/.claude`, `~/.codex`, `~/.cursor`, `~/.workbuddy` and the hidden
+directories of every repository. AgentKeeper makes them visible, editable, verifiable and reversible
+from one place.
+
+## Features
+
+- **Discover** — scans 17 agents plus the shared `~/.agents/skills` directory; global and project scope.
+- **Show effective state** — which copy actually wins, and what a project scope shadows.
+- **Validate** — frontmatter, JSON/JSONC, TOML and YAML checks; security scan for risky MCP entries.
+- **Edit safely** — every write goes straight into the real agent directory as a transaction: the
+  current state of the paths it touches is captured in memory first, then written atomically and
+  journalled. A write that fails part-way is rolled back to that capture, and a write that cannot
+  be captured completely is refused before anything moves.
+- **Confirm before writing** — every create, update and delete asks for confirmation first, and the
+  dialog lists the real paths about to be written. Settings are the exception: they write to the
+  app's own store, not to an agent directory.
+- **Distribute** — copy a skill/rule/memory/MCP entry to other agents or registered projects.
+- **Audit** — append-only journal plus baseline fingerprints that report silent edits. The journal
+  is a record of what changed, not an undo menu: there is no per-transaction rollback.
+- **Work headless** — the same core ships as a 15-tool stdio MCP server (`agentkeeper-mcp`), so an
+  agent can manage its own assets through the same validate → capture → write → journal path.
+
+## Requirements
+
+| Dependency | Notes |
 |---|---|
-| Rust stable（`x86_64-pc-windows-msvc`） | 编译 `tauri-shell/src-tauri`。Windows 上还需要 **MSVC 生成工具 + Windows SDK** —— rustup 本身不装这两个 |
-| WebView2 Runtime | Windows 11 自带。没装的话窗口不会渲染，见下方故障排查 |
-| Node.js | **只**用来跑几个纯 `fs`/`path` 的辅助脚本（前端同步、lint、i18n 报告、parity 对齐）。**运行应用本身不需要 Node** |
+| Rust stable (`x86_64-pc-windows-msvc`) | builds `tauri-shell/src-tauri`; needs MSVC build tools + Windows SDK |
+| WebView2 Runtime | included with Windows 11 |
+| Node.js | only for the `fs`/`path` helper scripts (frontend sync, lint, i18n gate). Running the app does not need Node |
 
-rustup 装的时候带了 `--no-modify-path`，所以**新开的终端里 `cargo` 常常不在 PATH**。
-先接线环境变量：
+`rustup` is often installed with `--no-modify-path`, so `.cargo\bin` is on neither the user nor the
+machine `PATH` and a fresh shell cannot find `cargo`. Pick the line for your shell:
+
+```bat
+:: CMD — run this once per window (or use the persistent option below)
+set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
+```
 
 ```bash
 source scripts/rust-env.sh        # Git Bash / bash
-.\scripts\rust-env.ps1            # PowerShell / CMD
+.\scripts\rust-env.ps1            # PowerShell
 ```
 
-`cargo tauri info` 应能同时识别 rustc / MSVC / WebView2 三项。已装组件与磁盘占用见
-[`docs/RUST-ENV.md`](docs/RUST-ENV.md)。
+CMD cannot run a `.ps1`, and `for /f`-style wrappers around it only capture its output without
+exporting anything — the `set` above is what actually puts `cargo` on `PATH`. It is also all CMD
+needs: `cargo build`/`cargo tauri` find the MSVC linker through the registry, so `INCLUDE`/`LIB` are
+not required (verified by a full `--release` link with only this `set`).
 
-## 快速开始
+To make it permanent instead of per-window, add `.cargo\bin` to the user `PATH` once. Run this in
+PowerShell, not CMD:
+
+```powershell
+$bin = Join-Path $env:USERPROFILE '.cargo\bin'
+$old = [Environment]::GetEnvironmentVariable('PATH', 'User')
+if ($old -notlike "*$bin*") {
+  [Environment]::SetEnvironmentVariable('PATH', "$old;$bin", 'User')
+}
+```
+
+Open a new window afterwards. Avoid `setx PATH ...` here: it expands `%USERPROFILE%` in the existing
+value (this machine's raw `PATH` is `REG_EXPAND_SZ` and contains it), and it silently truncates values
+over 1024 characters.
+
+`cargo tauri info` should report rustc, MSVC and WebView2. Installed components and disk usage:
+[`docs/RUST-ENV.md`](docs/RUST-ENV.md).
+
+## Build from source
+
+Day-to-day development:
+
+```bat
+set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
+npm run tauri:sync
+cd tauri-shell\src-tauri
+cargo tauri dev
+```
+
+Releasing — **one command, two artifacts, one obvious folder**:
+
+```bat
+set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
+npm run tauri:bundle
+```
+
+```
+release/
+  AgentKeeper_<ver>_x64-setup.exe        NSIS installer
+  AgentKeeper_<ver>_x64-portable.zip     install-free archive
+```
+
+`npm run tauri:bundle` runs `tauri:sync` → `tauri:core-bins` → `cargo tauri build` → staging, then
+copies both artifacts into `release/` at the repository root and verifies each copy byte-for-byte. It
+exits non-zero if either artifact is missing. `--no-build` stages what is already in `target/release`;
+`--portable-only` skips the installer.
+
+The portable archive holds `agentkeeper-shell.exe`, `agentkeeper-mcp.exe`, `ak-scan.exe` and a
+short `README-PORTABLE.txt`; unzip and run, nothing is installed (no shortcut, no uninstall entry —
+the app writes no Windows registry keys at all). Both forms share `%APPDATA%\AgentKeeper` for
+settings, so set `AK_STORE_ROOT` to keep two copies apart.
+
+The MCP server and the headless scanner live in a separate crate, `tauri-shell/core`, with **no
+Tauri dependency** — so they link 114 crates instead of 311 and never pull in a WebView stack they
+do not call. `cargo tauri build` only sees the binaries of the crate it builds, so they are staged
+as sidecars for `bundle.externalBin` by `npm run tauri:core-bins` (which `tauri:bundle` runs for
+you).
+
+That arrangement is also what makes the sidecar possible at all. When the two binaries were
+`[[bin]]` targets of the Tauri crate, the setup was circular: `tauri-build` runs as that crate's
+build script for every target, so a clean `target/` could not build a sidecar the build script
+insisted already existed. The core crate has no build script, so the sidecar is produced by
+something that does not care.
+
+There are no npm dependencies to install — `package.json` only declares the helper scripts.
+
+`tauri:sync` is not optional: Tauri compiles `tauri-shell/dist` into the executable, and `dist` is
+generated from `src/renderer` with exactly two controlled differences (`<html data-shell="tauri">`
+and an extra `tauri-bridge.js`). `npm run tauri:check` fails when the two drift apart.
+
+`dist/` is **not in git** — it is a build artefact, and a committed copy could silently be older
+than `src/renderer` (the build does not check freshness, it just compiles whatever is in `dist/`).
+`tauri.conf.json` therefore runs `copy-frontend.js` as `beforeBuildCommand` / `beforeDevCommand`, so
+`cargo tauri build` and `cargo tauri dev` always regenerate it. A fresh clone with no `dist/` builds
+correctly: the command creates it.
+
+To verify the copy instead of writing it, use `npm run tauri:check` (or `npm run tauri:sync -- --check`).
+A bare `npm run tauri:sync --check` runs `tauri:sync` with no arguments — npm only forwards flags after
+`--`, so `--check` is dropped and the sync writes.
+
+### Release artifacts
+
+| | Installer | Portable |
+|---|---|---|
+| File | `release/AgentKeeper_<ver>_x64-setup.exe` | `release/AgentKeeper_<ver>_x64-portable.zip` |
+| Size | 3.86 MiB | 7.81 MiB (21.3 MiB unpacked) |
+| Install mode | `currentUser` → `%LOCALAPPDATA%\AgentKeeper`, no admin rights | none — unzip anywhere and run `agentkeeper-shell.exe` |
+| Footprint | 21.4 MiB after install | 21.3 MiB in the folder |
+| Uninstall | `uninstall.exe /S` | delete the folder |
+| Frontend | embedded in the executable (no `dist/` on disk) | same |
+| Cold start → window visible | 45–180 ms | 171–178 ms |
+
+Silent install: `AgentKeeper_<ver>_x64-setup.exe /S /D=<absolute path>` (`/D=` last, unquoted).
+
+Both artifacts are produced from one build; publishing the zip does not confuse the in-app updater,
+which discards it on two independent rules (`-?portable\b` and the `.zip` archive pattern in
+`core/update/version.rs`). Only the NSIS setup is ever offered as an update.
+
+## Architecture
+
+```
+src/renderer/            native DOM UI (index.html · app.js · styles.css · i18n.js · engine-zh.js)
+tauri-shell/dist/        generated copy of src/renderer, compiled into the executable (not in git)
+tauri-shell/             Rust workspace
+  core/                  agentkeeper-core — no Tauri dependency
+    src/                 scan · assets · registry · adapters · store · keeper · mcp · security · update
+    src/bin/             agentkeeper-mcp (stdio MCP server) · ak-scan (headless scan)
+  src-tauri/             agentkeeper-shell — the Tauri app
+    src/lib.rs           #[tauri::command] surface + window bootstrap
+scripts/                 check · lint-renderer · ui-audit · tauri-i18n · adapter-table · package-release
+release/                 build output: installer + portable zip (git-ignored)
+docs/                    DESIGN.md · UPDATE.md · MCP-SERVER.md · RUST-ENV.md
+```
+
+`core::` never sees a Tauri type, which is why the same logic has three entry points: the GUI,
+the MCP server and `ak-scan`.
+
+### Safety model
+
+- Frontend has no Node integration; only the named functions exposed by `tauri-bridge.js`.
+- Two CSP layers (webview config and a stricter document-level meta tag); `connect-src 'none'`
+  in the document layer.
+- Paths are resolved from the registry — the renderer never passes a bare path (the only exception
+  is "import project", which must be an existing directory).
+- Writes go straight to the real agent directory through a transactional pipeline:
+  validate → capture in memory → atomic write → journal. A failed write is rolled back to that
+  capture; nothing is retained afterwards.
+- Nothing is held back for approval: a write either lands in the real directory or is blocked by
+  validation, and what the UI shows is exactly what gets written.
+- Every create, update and delete is confirmed first, and the dialog lists the real target paths.
+  Settings are exempt — they write to the app's own store, never to an agent directory.
+- Tauri plugins are limited to `dialog` (pick a directory) and `opener` (reveal in Explorer).
+
+## Testing
 
 ```bash
-npm install                 # 只给 Node 侧的校验/对齐脚本用
-
-npm run tauri:sync          # src/renderer → tauri-shell/dist（幂等，可先 --check）
-cd tauri-shell/src-tauri
-cargo tauri dev             # 开发运行（等价的裸命令是 `cargo run`，default-run 已锁定 GUI）
-cargo tauri build           # 出安装包 → target/release/bundle/nsis/
+npm test                  # only the tests a change can affect — the default while iterating
+npm run test:all          # every test (333), before a commit
+npm test -- --list        # print what would run, run nothing
 ```
 
-`tauri:sync` 不可跳过：Tauri 把 `tauri-shell/dist` 编进 exe，而 `dist` 是从
-`src/renderer` 生成的，中间只有两处受控差异（`<html data-shell="tauri">` 与
-`tauri-bridge.js`）。`npm run tauri:check` 会在两者不一致时报错。
+`npm test` reads `git status` and picks the test targets the changed files can break; `npm run test:all`
+runs everything. Which script to run for which change, and what each one does, is in
+[`docs/BUILDING.md`](docs/BUILDING.md).
 
-### 安装包
+The full suite directly:
 
-| | |
+```bash
+cd tauri-shell
+cargo test --workspace             # unit + integration, both crates
+cargo test -p agentkeeper-core --test mcp   # real stdio MCP protocol regression
+```
+
+Static gates for the frontend and bridge (Node only, no browser, ≈0.5 s):
+
+```bash
+npm run check                    # residue · bridge · tree · renderer · ui · i18n · dist (8 gates)
+npm run tauri:i18n               # Chinese coverage of Rust engine strings (CI runs this before building)
+node scripts/check.js bridge     # or one gate only: residue / bridge / tree / renderer / ui / i18n / dist
+```
+
+Behaviour is owned by the Rust tests. Visual and keyboard acceptance needs a real WebView2 on an
+interactive desktop, so it runs outside CI.
+
+## Documentation
+
+| Document | Contents |
 |---|---|
-| 产物 | `tauri-shell/src-tauri/target/release/bundle/nsis/AgentKeeper_<ver>_x64-setup.exe` |
-| 体积 | 3.7 MiB（Electron 版同名安装包 69.5 MiB） |
-| 安装模式 | `currentUser` —— 装到 `%LOCALAPPDATA%\AgentKeeper`，**不需要管理员权限** |
-| 安装后占用 | 15.9 MiB：shell + `agentkeeper-mcp.exe` + `ak-scan.exe` + `uninstall.exe`（`ak-store.exe` 已于 2026-10-20 随迁移期 parity harness 移除） |
-| 前端资源 | 编进 exe（安装目录里没有 `dist/`） |
-| 示例项目 | **不再随包发布**（原 `demo-projects/` 已移出 `bundle.resources`）；示例内容见 `scripts/fixtures/`，仅供测试 |
-| 本机实测 | 冷启动到窗口可见 0.76–0.93 s；shell 常驻 69 MB，整棵进程树（含 WebView2）约 480 MB |
+| [`docs/DESIGN.md`](docs/DESIGN.md) | problem statement, architecture, write pipeline, adapter table, UI model |
+| [`docs/UPDATE.md`](docs/UPDATE.md) | update pipeline: release layout, signature, proxy, installer |
+| [`docs/MCP-SERVER.md`](docs/MCP-SERVER.md) | the 17 MCP tools and their schemas |
+| [`docs/RUST-ENV.md`](docs/RUST-ENV.md) | local toolchain, components, disk usage |
+| [`docs/BUILDING.md`](docs/BUILDING.md) | which script to run for which change; the two build profiles and why |
 
-静默安装：`AgentKeeper_<ver>_x64-setup.exe /S /D=<绝对路径>`（`/D=` 放最后、不加引号）。
+## Troubleshooting
 
-### 本机的 WebView2 硬性约束
-
-这台机器无法初始化 Chromium OS 沙盒，WebView2 若不加 `--no-sandbox --disable-gpu-sandbox`
-就**不渲染**（`render-process-gone` / `STATUS_BREAKPOINT`）。`src/lib.rs` 的 `run()` 在
-webview 创建前无条件设置 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`，release 包同样生效
-（若用户已显式设置该变量则不覆盖）。
-安全性不受影响：前端无 Node 集成、CSP 锁定、插件只授予 dialog / opener。
-
-### 故障排查
-
-| 现象 | 处置 |
+| Symptom | Fix |
 |---|---|
-| `cargo: command not found` | 先 `source scripts/rust-env.sh`（或 PowerShell 跑 `.\scripts\rust-env.ps1`） |
-| `linker 'link.exe' not found` | MSVC 环境变量没接上，同上；确认装了"使用 C++ 的桌面开发"或 VS 生成工具 |
-| 窗口一片空白 / 进程起了但没界面 | 本机 WebView2 沙盒起不来，确认 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 已带 `--no-sandbox --disable-gpu-sandbox`（见上一节）；或确认装了 WebView2 Runtime |
-| 改了前端但界面没变 | 忘了 `npm run tauri:sync`；`npm run tauri:check` 会告诉你 `dist` 是否过期 |
-| 依赖下载卡住 | 已配 rsproxy.cn 稀疏索引（见 `docs/RUST-ENV.md`），若换机器需重配 |
-| 写入"没生效" | 沙盒默认开启，写入只进影子层，需在界面点「应用」；或用 `AGENTKEEPER_SANDBOX=0` 启动 |
-| store 与桌面应用对不上 | MCP 侧与 GUI 侧必须指向同一个 `AK_STORE_ROOT` |
+| `cargo: command not found` | `source scripts/rust-env.sh` (bash) or `. .\scripts\rust-env.ps1` (PowerShell) |
+| `resource path binaries\agentkeeper-mcp-x86_64-pc-windows-msvc.exe doesn't exist` | the sidecar was not staged — run `npm run tauri:core-bins` before `cargo tauri build` |
+| `npm run tauri:sync --check` still rewrote `dist/` | npm drops flags before `--`; use `npm run tauri:check` |
+| `linker 'link.exe' not found` | MSVC environment not wired up — same commands; install "Desktop development with C++" |
+| Window never appears | the host cannot initialise the Chromium OS sandbox; `src/lib.rs` sets `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` with `--no-sandbox --disable-gpu-sandbox` before the webview is created |
+| Frontend change not visible | forgot `npm run tauri:sync`; `npm run tauri:check` reports stale `dist` |
+| Dependency download stalls | the mirror is in `%USERPROFILE%\.cargo\config.toml`, not in the repo — see `docs/RUST-ENV.md` |
+| A write "did nothing" | check *Operations* for the transaction: an `error` row means validation blocked it and nothing was written |
+| MCP and GUI disagree | both sides must point at the same `AK_STORE_ROOT` |
 
----
+## Contributing
 
-## 验证
+- Issues and pull requests are welcome. Keep a change focused: one behaviour per PR.
+- Run `npm run check` and `cargo test` before opening a PR; both must pass.
+- Frontend edits go into `src/renderer/` only — `tauri-shell/dist/` is generated (not in git) and
+  rebuilt by every `cargo tauri build` / `cargo tauri dev`.
+- New strings need both languages: `src/renderer/i18n.js` (UI) and `src/renderer/engine-zh.js`
+  (Rust engine sentences), or `npm run check` fails.
+- Adding an agent touches two places: `core/adapters.rs` and `scripts/adapter-table.js`, then
+  `npm run tauri:adapters`.
+- The repository holds product files only: no audit/planning documents, no local absolute
+  paths, no debug artefacts. Anything that describes how a change was made belongs in the PR,
+  not in the tree.
 
-```bash
-cd tauri-shell/src-tauri
-cargo test                       # 单元 + 集成；断言数随覆盖增长，以实际输出为准
-cargo test --test mcp            # 真实进程级 MCP 协议回归
-```
+## License
 
-前端与桥接的静态门禁（纯 Node，不启浏览器，全量 ≈0.5 s）：
+MIT — see [`LICENSE`](LICENSE).
 
-```bash
-npm run check                    # 残留扫描 · 桥接↔Rust 命令契约 · renderer 规则 · UI 审计 · i18n · dist 一致性
-npm run tauri:i18n               # 只跑 Rust 引擎文案的中文覆盖门禁（CI 在构建前跑这条）
-node scripts/check.js bridge     # 或者单独跑某一道：residue / bridge / renderer / ui / i18n / dist
-```
-
-> 门禁只做静态一致性检查：残留扫描、桥接↔Rust 命令签名对账、渲染层 i18n、UI 规则、dist 一致性。
-> 行为正确性由 Rust 测试负责（`cargo test`），界面质量不进入 CI —— 桌面端的真机验证需要
-> WebView2 与交互式桌面，跑不进 Actions，因此维护者的真机核验工具不进本仓库。
-
-
+Copyright (c) 2026 AgentKeeper.

@@ -1,10 +1,11 @@
-//! `core/keeper.js` — the mutating service.
+//! The mutating service.
 //!
-//! Every CRUD action lands here, so validation, backup, audit and rollback are
-//! impossible to bypass from the UI, the MCP server or a future CLI. Each write
-//! goes through [`super::store::Store::transaction`]; **nothing in this module
-//! may touch the filesystem to change a file**. That single rule is what makes
-//! "one click rollback" a true statement.
+//! Every CRUD action lands here, so validation, audit and the write path's
+//! failure-undo are impossible to bypass from the UI, the MCP server or a
+//! future CLI. Each write goes through
+//! [`super::store::Store::transaction`]; **nothing in this module may touch the
+//! filesystem to change a file**. That single rule is what makes "a failed
+//! write leaves the tree exactly as it was" a true statement.
 //!
 //! ## Resolution order
 //!
@@ -12,9 +13,8 @@
 //! adapter table decides *where* a new one goes. Two consequences worth stating:
 //!
 //! * An id the last scan never produced is `asset not found` — never a guessed
-//!   path. On a cold cache one scan is run first, exactly as the JS
-//!   `assetIndex` getter does.
-//! * `readAll` never throws; a missing file reads as `""`. The only place that
+//!   path. On a cold cache one scan is run first.
+//! * A whole-file read never throws; a missing file reads as `""`. The only place that
 //!   treats "cannot read" as fatal is a config that exists but does not parse:
 //!   `upsert_mcp` / `delete_mcp` refuse to overwrite it, because proceeding
 //!   would silently drop every sibling server in the file.
@@ -22,8 +22,8 @@
 //! ## yaml / toml
 //!
 //! YAML and TOML MCP configs are rewritten field-by-field, not byte-spliced:
-//! `yaml` re-emits the whole document (comments are lost, in both builds —
-//! `YAML.parse` drops them too), `toml` re-emits only the one section and
+//! `yaml` re-emits the whole document (comments are lost — the parser drops
+//! them), `toml` re-emits only the one section and
 //! splices it back so comments *outside* the server survive.
 
 use serde_json::{json, Map, Value};
@@ -42,11 +42,13 @@ use super::validate;
 use super::yaml;
 
 /* ------------------------------------------------------------------ */
-/* small JS-shaped helpers                                             */
+/* small coercion helpers                                              */
 /* ------------------------------------------------------------------ */
 
 fn prop(v: &Value, key: &str) -> String {
-    v.get(key).map(js_string).unwrap_or_else(|| "undefined".to_string())
+    v.get(key)
+        .map(js_string)
+        .unwrap_or_else(|| "undefined".to_string())
 }
 
 fn truthy(v: Option<&Value>) -> bool {
@@ -67,7 +69,7 @@ fn exists_dir(p: &str) -> bool {
     Path::new(p).is_dir()
 }
 
-/// `path.join(base, ...parts)`
+/// Join `base` with `parts`.
 fn join(base: &str, parts: &[&str]) -> String {
     let mut p = std::path::PathBuf::from(base);
     for part in parts {
@@ -76,15 +78,17 @@ fn join(base: &str, parts: &[&str]) -> String {
     store::native_str(&p)
 }
 
-/// `path.resolve(base, rel)` — absolute join with `.`/`..` collapsed.
+/// Absolute join with `.`/`..` collapsed.
 fn resolve(base: &str, rel: &str) -> String {
     if Path::new(rel).is_absolute() {
         return store::normalize_path(rel);
     }
-    store::normalize_path(&store::native_str(&std::path::PathBuf::from(base).join(rel)))
+    store::normalize_path(&store::native_str(
+        &std::path::PathBuf::from(base).join(rel),
+    ))
 }
 
-/// `{ ...v }` for an object, and the JS spread of an array/string (index keys).
+/// Object spread `{ ...v }` for an object; index keys for an array or string.
 fn spread_map(v: &Value) -> Map<String, Value> {
     let mut out = Map::new();
     match v {
@@ -108,7 +112,7 @@ fn spread_map(v: &Value) -> Map<String, Value> {
     out
 }
 
-/// `{ ...(base || {}), ...patch }`
+/// Shallow merge of `patch` over `base`; absent base means an empty object.
 fn overlay(base: Option<&Value>, patch: &Value) -> Map<String, Value> {
     let mut out = base.map(spread_map).unwrap_or_default();
     for (k, v) in spread_map(patch) {
@@ -117,12 +121,12 @@ fn overlay(base: Option<&Value>, patch: &Value) -> Map<String, Value> {
     out
 }
 
-/// `base || {}` as a map — the bucket a server list lives in.
+/// The bucket a server list lives in; absent base means an empty map.
 fn map_of(base: Option<&Value>) -> Map<String, Value> {
     base.map(spread_map).unwrap_or_default()
 }
 
-/// `{ ...(base || {}), [key]: value }`
+/// Set one key in a copy of `base`; absent base means an empty object.
 fn with_entry(base: Option<&Value>, key: &str, value: Value) -> Map<String, Value> {
     let mut out = map_of(base);
     out.insert(key.to_string(), value);
@@ -139,7 +143,7 @@ fn corrupt(file: &str, issues: Option<&Value>) -> Value {
     }
 }
 
-/// `copyDirRecursive()` from the bundle exporter — deliberately *without* the
+/// Recursive copy for the bundle exporter — deliberately *without* the
 /// store's skip list: an exported skill must be complete.
 fn copy_tree(src: &str, dest: &str) {
     if std::fs::create_dir_all(dest).is_err() {
@@ -192,17 +196,17 @@ impl Keeper {
         }
     }
 
-    /// `_home(agent)` — `~` resolved against the *current* user, not baked in.
+    /// `~` resolved against the *current* user, not baked in.
     fn home_of(&self, agent: &Agent) -> String {
         resolve_home(agent.home, &self.user_home).unwrap_or_else(|| agent.home.to_string())
     }
 
-    /// `_invalidate()` — the scan cache must not outlive a write.
+    /// Drop the scan cache: it must not outlive a write.
     pub fn invalidate(&self) {
         assets::invalidate();
     }
 
-    /// `this.assetIndex.get(id)` — with the one-scan cold-cache fallback.
+    /// Cached lookup, with the one-scan cold-cache fallback.
     ///
     /// The fallback scan is deliberately the UNCACHED variant: it answers this
     /// one lookup and must not publish to the global read cache. Publishing
@@ -232,7 +236,7 @@ impl Keeper {
     /* render                                                          */
     /* -------------------------------------------------------------- */
 
-    /// `renderSkill()` — frontmatter in the author's field order, then the body.
+    /// Skill rendering: frontmatter in the author's field order, then the body.
     pub fn render_skill(&self, data: &Value, body: &str, order: Option<&[&str]>) -> String {
         const DEFAULT_ORDER: [&str; 7] = [
             "name",
@@ -280,7 +284,7 @@ impl Keeper {
             return json!({ "ok": false, "blocked": true, "issues": issues });
         }
 
-        // `slug(data.name)` with JS's `String(name || 'unnamed')` coercion: an
+        // `slug` coerces like `String(name || 'unnamed')`: an
         // absent, null, empty or 0 name all become the literal "unnamed".
         let raw_name = data
             .get("name")
@@ -336,7 +340,11 @@ impl Keeper {
         meta.insert("kind".to_string(), json!("skill"));
         meta.insert(
             "action".to_string(),
-            json!(if skill_id.is_some() { "update" } else { "create" }),
+            json!(if skill_id.is_some() {
+                "update"
+            } else {
+                "create"
+            }),
         );
         meta.insert(
             "agentId".to_string(),
@@ -361,7 +369,10 @@ impl Keeper {
                 .and_then(|p| p.get("name").cloned())
                 .unwrap_or(Value::Null),
         );
-        meta.insert("assetName".to_string(), data.get("name").cloned().unwrap_or(Value::Null));
+        meta.insert(
+            "assetName".to_string(),
+            data.get("name").cloned().unwrap_or(Value::Null),
+        );
         meta.insert(
             "assetId".to_string(),
             skill_id.clone().map(Value::String).unwrap_or(Value::Null),
@@ -383,7 +394,7 @@ impl Keeper {
         tx
     }
 
-    /// `skillDirFor(target)` — the directory a skill folder lives in.
+    /// The directory a skill folder lives in, for one target.
     pub fn skill_dir_for(&self, t: &Value) -> Option<String> {
         let agent = by_id(&prop(t, "agentId"))?;
         if t.get("scope").and_then(|v| v.as_str()) == Some("global") {
@@ -453,15 +464,23 @@ impl Keeper {
 
         let file = a.get("file").map(js_string).unwrap_or_default();
         let mut meta = Map::new();
-        meta.insert("kind".to_string(), a.get("kind").cloned().unwrap_or(Value::Null));
+        meta.insert(
+            "kind".to_string(),
+            a.get("kind").cloned().unwrap_or(Value::Null),
+        );
         meta.insert("action".to_string(), json!("update"));
         for key in ["agentId", "agentLabel", "projectId", "projectName"] {
             meta.insert(key.to_string(), a.get(key).cloned().unwrap_or(Value::Null));
         }
         meta.insert("assetId".to_string(), json!(asset_id));
-        meta.insert("assetName".to_string(), a.get("name").cloned().unwrap_or(Value::Null));
+        meta.insert(
+            "assetName".to_string(),
+            a.get("name").cloned().unwrap_or(Value::Null),
+        );
 
-        let tx = self.store.transaction(&[Op::write(&file, content)], &Value::Object(meta));
+        let tx = self
+            .store
+            .transaction(&[Op::write(&file, content)], &Value::Object(meta));
         if tx.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
             self.invalidate();
         }
@@ -477,8 +496,13 @@ impl Keeper {
     /// The global list is searched, not just indexed: `workbuddy` declares
     /// `mcp.json, mcp-approvals.json, mcp-tool-list.json`, and writing a server
     /// into an approvals file would produce a config the agent reads as a
-    /// decision record. The filter is the JS one, verbatim.
-    pub fn mcp_target_for(&self, agent_id: &str, scope: &str, project_id: Option<&str>) -> Option<String> {
+    /// decision record. The filter below is exactly that.
+    pub fn mcp_target_for(
+        &self,
+        agent_id: &str,
+        scope: &str,
+        project_id: Option<&str>,
+    ) -> Option<String> {
         let agent = by_id(agent_id)?;
         if scope == "global" {
             let rel = agent.globals.mcp.iter().copied().find(|r| {
@@ -498,7 +522,7 @@ impl Keeper {
         Some(resolve(&dir, rel))
     }
 
-    /// `mcpBucketFor()` — copilot nests its servers under `servers`.
+    /// The MCP bucket: copilot nests its servers under `servers`.
     pub fn mcp_bucket_for(&self, agent_id: &str) -> &'static str {
         match family(agent_id) {
             "copilot" => "servers",
@@ -517,10 +541,15 @@ impl Keeper {
             .unwrap_or("global")
             .to_string();
         let project_id = input.get("projectId").and_then(|v| v.as_str());
-        let asset_id = input.get("assetId").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let asset_id = input
+            .get("assetId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
-        let issues =
-            validate::validate_by_kind("mcp", &json!({ "name": name.clone(), "config": config.clone() }));
+        let issues = validate::validate_by_kind(
+            "mcp",
+            &json!({ "name": name.clone(), "config": config.clone() }),
+        );
         if validate::is_blocking(&issues) {
             return json!({ "ok": false, "blocked": true, "issues": issues });
         }
@@ -536,7 +565,11 @@ impl Keeper {
         meta.insert("kind".to_string(), json!("mcp"));
         meta.insert(
             "action".to_string(),
-            json!(if asset_id.is_some() { "update" } else { "create" }),
+            json!(if asset_id.is_some() {
+                "update"
+            } else {
+                "create"
+            }),
         );
         meta.insert("agentId".to_string(), json!(agent_id));
         meta.insert(
@@ -574,7 +607,7 @@ impl Keeper {
             if let Value::Object(m) = &mut doc {
                 m.insert(bucket, Value::Object(servers));
             }
-            // `YAML.stringify()` ends with a newline; this emitter does not.
+            // This emitter does not add a trailing newline.
             let mut body = yaml::stringify(&doc);
             if !body.ends_with('\n') {
                 body.push('\n');
@@ -626,7 +659,8 @@ impl Keeper {
             &[Op::json_mutate(&file, move |cur| {
                 let mut next = spread_map(&cur);
                 let prev = next.get(&bucket).and_then(|b| b.get(&key));
-                let servers = with_entry(next.get(&bucket), &key, Value::Object(overlay(prev, &cfg)));
+                let servers =
+                    with_entry(next.get(&bucket), &key, Value::Object(overlay(prev, &cfg)));
                 next.insert(bucket.clone(), Value::Object(servers));
                 Some(Value::Object(next))
             })],
@@ -657,8 +691,14 @@ impl Keeper {
         let mut meta = Map::new();
         meta.insert("kind".to_string(), json!("mcp"));
         meta.insert("action".to_string(), json!("delete"));
-        meta.insert("agentId".to_string(), a.get("agentId").cloned().unwrap_or(Value::Null));
-        meta.insert("projectId".to_string(), a.get("projectId").cloned().unwrap_or(Value::Null));
+        meta.insert(
+            "agentId".to_string(),
+            a.get("agentId").cloned().unwrap_or(Value::Null),
+        );
+        meta.insert(
+            "projectId".to_string(),
+            a.get("projectId").cloned().unwrap_or(Value::Null),
+        );
         meta.insert("assetName".to_string(), json!(name));
         meta.insert("assetId".to_string(), json!(asset_id));
         let meta = Value::Object(meta);
@@ -668,10 +708,7 @@ impl Keeper {
             let Ok(doc) = toml_splice::parse(&raw) else {
                 return corrupt(&file, None);
             };
-            let present = doc
-                .get("mcp_servers")
-                .and_then(|s| s.get(&name))
-                .is_some();
+            let present = doc.get("mcp_servers").and_then(|s| s.get(&name)).is_some();
             if !present {
                 return json!({ "ok": false, "error": "asset not found" });
             }
@@ -724,10 +761,7 @@ impl Keeper {
                 let mut next = spread_map(&cur);
                 for bucket in ["mcpServers", "servers"] {
                     if truthy(next.get(bucket).and_then(|b| b.get(&key))) {
-                        let mut servers = next
-                            .get(bucket)
-                            .map(spread_map)
-                            .unwrap_or_default();
+                        let mut servers = next.get(bucket).map(spread_map).unwrap_or_default();
                         servers.remove(&key);
                         next.insert(bucket.to_string(), Value::Object(servers));
                     }
@@ -776,9 +810,14 @@ impl Keeper {
             meta.insert(key.to_string(), a.get(key).cloned().unwrap_or(Value::Null));
         }
         meta.insert("assetId".to_string(), json!(asset_id));
-        meta.insert("assetName".to_string(), a.get("name").cloned().unwrap_or(Value::Null));
+        meta.insert(
+            "assetName".to_string(),
+            a.get("name").cloned().unwrap_or(Value::Null),
+        );
 
-        let tx = self.store.transaction(&[Op::delete(&target)], &Value::Object(meta));
+        let tx = self
+            .store
+            .transaction(&[Op::delete(&target)], &Value::Object(meta));
         if tx.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
             self.invalidate();
         }
@@ -804,8 +843,8 @@ impl Keeper {
         for t in targets {
             let same_agent = prop(t, "agentId") == prop(&a, "agentId");
             let same_scope = prop(t, "scope") == prop(&a, "scope");
-            let no_project = !truthy(t.get("projectId"))
-                || prop(t, "projectId") == prop(&a, "projectId");
+            let no_project =
+                !truthy(t.get("projectId")) || prop(t, "projectId") == prop(&a, "projectId");
             if same_agent && same_scope && no_project {
                 skipped.push(json!({ "target": t, "reason": "same location" }));
                 continue;
@@ -814,7 +853,8 @@ impl Keeper {
             match kind.as_str() {
                 "skill" => {
                     let Some(dir) = self.skill_dir_for(t) else {
-                        skipped.push(json!({ "target": t, "reason": "agent has no skill directory" }));
+                        skipped
+                            .push(json!({ "target": t, "reason": "agent has no skill directory" }));
                         continue;
                     };
                     let dest = join(&dir, &[&name_slug]);
@@ -822,10 +862,8 @@ impl Keeper {
                         skipped.push(json!({ "target": t, "reason": "already exists" }));
                         continue;
                     }
-                    // `from` must stay a REAL path: the store re-resolves it,
-                    // and the source lives in the real tree even when sandboxed.
                     let src = a.get("dir").map(js_string).unwrap_or_default();
-                    ops.push(Op::copy_dir(&dest, &src, true));
+                    ops.push(Op::copy_dir(&dest, &src));
                     written.push(json!(dest));
                 }
                 "rule" | "memory" => {
@@ -835,12 +873,18 @@ impl Keeper {
                         continue;
                     };
                     let project = if prop(t, "scope") == "project" {
-                        registry::get(t.get("projectId").and_then(|v| v.as_str()).unwrap_or_default())
+                        registry::get(
+                            t.get("projectId")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default(),
+                        )
                     } else {
                         None
                     };
                     let base = if prop(t, "scope") == "project" {
-                        project.and_then(|p| p.get("dir").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                        project.and_then(|p| {
+                            p.get("dir").and_then(|v| v.as_str()).map(|s| s.to_string())
+                        })
                     } else {
                         Some(self.home_of(agent))
                     };
@@ -1022,7 +1066,10 @@ impl Keeper {
             entry.insert("name".to_string(), json!(name));
             entry.insert("kind".to_string(), json!(kind));
             entry.insert("agentId".to_string(), json!(agent_id));
-            entry.insert("scope".to_string(), a.get("scope").cloned().unwrap_or(Value::Null));
+            entry.insert(
+                "scope".to_string(),
+                a.get("scope").cloned().unwrap_or(Value::Null),
+            );
             entry.insert("dir".to_string(), json!(format!("files/{}", base)));
 
             let asset_dir = a.get("dir").map(js_string).unwrap_or_default();
@@ -1125,7 +1172,10 @@ impl Keeper {
             let Some(agent) = by_id(&agent_id) else {
                 continue;
             };
-            let src = join(&bundle_root, &[e.get("dir").and_then(|v| v.as_str()).unwrap_or("")]);
+            let src = join(
+                &bundle_root,
+                &[e.get("dir").and_then(|v| v.as_str()).unwrap_or("")],
+            );
             if !exists_dir(&src) {
                 continue;
             }
@@ -1145,9 +1195,7 @@ impl Keeper {
                     if exists_dir(&dest) {
                         continue;
                     }
-                    // Bundle source is already a real path — never re-resolve it
-                    // into the shadow tree, or a sandboxed import finds nothing.
-                    ops.push(Op::copy_dir(&dest, &src, true));
+                    ops.push(Op::copy_dir(&dest, &src));
                 }
                 "rule" | "memory" => {
                     let rels = if kind == "rule" {
@@ -1235,11 +1283,8 @@ mod tests {
         dir
     }
 
-    fn keeper_at(root: &std::path::Path, home: &std::path::Path, sandbox: bool) -> Keeper {
-        Keeper::new(
-            Store::new(&root.to_string_lossy(), sandbox),
-            &home.to_string_lossy(),
-        )
+    fn keeper_at(root: &std::path::Path, home: &std::path::Path) -> Keeper {
+        Keeper::new(Store::new(&root.to_string_lossy()), &home.to_string_lossy())
     }
 
     #[test]
@@ -1247,7 +1292,7 @@ mod tests {
         let _guard = assets::lock_for_test();
         let root = temp("bucket");
         let home = temp("bucket-home");
-        let k = keeper_at(&root, &home, false);
+        let k = keeper_at(&root, &home);
         assert_eq!(k.mcp_bucket_for("copilot"), "servers");
         assert_eq!(k.mcp_bucket_for("claude-code"), "mcpServers");
         assert_eq!(k.mcp_bucket_for("continue"), "mcpServers");
@@ -1261,7 +1306,7 @@ mod tests {
         let _guard = assets::lock_for_test();
         let root = temp("target");
         let home = temp("target-home");
-        let k = keeper_at(&root, &home, false);
+        let k = keeper_at(&root, &home);
 
         // workbuddy declares mcp.json, mcp-approvals.json, mcp-tool-list.json —
         // only the first is a server list.
@@ -1283,9 +1328,9 @@ mod tests {
         let _guard = assets::lock_for_test();
         let root = temp("save-skill");
         let home = temp("save-skill-home");
-        let k = keeper_at(&root, &home, false);
+        let k = keeper_at(&root, &home);
 
-        // `validateSkill` (core/validate.js) checks the *raw* name against
+        // `validate_skill` checks the *raw* name against
         // `^[a-z0-9][a-z0-9-]{0,63}$`, so "PDF Tools" is blocked before `slug`
         // ever runs — a name only survives if it is already a slug.
         let data = json!({ "name": "pdf-tools", "description": "Extract text from PDFs" });
@@ -1297,8 +1342,12 @@ mod tests {
         assert_eq!(r["ok"], json!(true), "{}", r);
         assert_eq!(r["issues"], json!([]));
 
-        // `skillDirFor` resolves `~/.claude/skills` against the user home.
-        let file = home.join(".claude").join("skills").join("pdf-tools").join("SKILL.md");
+        // `skill_dir_for` resolves `~/.claude/skills` against the user home.
+        let file = home
+            .join(".claude")
+            .join("skills")
+            .join("pdf-tools")
+            .join("SKILL.md");
         assert_eq!(r["written"], json!([file.to_string_lossy()]));
         let written = std::fs::read_to_string(&file).unwrap();
         assert_eq!(
@@ -1319,9 +1368,9 @@ mod tests {
         let _guard = assets::lock_for_test();
         let root = temp("save-skill-bad");
         let home = temp("save-skill-bad-home");
-        let k = keeper_at(&root, &home, false);
+        let k = keeper_at(&root, &home);
 
-        // A non-empty body is required: `validateSkill` blocks an empty one
+        // A non-empty body is required: `validate_skill` blocks an empty one
         // first, and the blocked return has no `error` key.
         let r = k.save_skill(&json!({
             "data": { "name": "x", "description": "y" },
@@ -1342,7 +1391,7 @@ mod tests {
         let _guard = assets::lock_for_test();
         let root = temp("save-skill-invalid");
         let home = temp("save-skill-invalid-home");
-        let k = keeper_at(&root, &home, false);
+        let k = keeper_at(&root, &home);
 
         // No name: validate_skill treats that as a blocking error.
         let r = k.save_skill(&json!({
@@ -1352,31 +1401,6 @@ mod tests {
         }));
         assert_eq!(r["blocked"], json!(true), "{}", r);
         assert!(!home.join(".claude").join("skills").exists());
-
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::remove_dir_all(&home).ok();
-    }
-
-    #[test]
-    fn save_skill_stages_into_the_shadow_tree_when_sandboxed() {
-        let _guard = assets::lock_for_test();
-        let root = temp("save-skill-shadow");
-        let home = temp("save-skill-shadow-home");
-        let k = keeper_at(&root, &home, true);
-
-        let r = k.save_skill(&json!({
-            "data": { "name": "pdf", "description": "Extract text" },
-            "body": "body\n",
-            "targets": [{ "agentId": "claude-code", "scope": "global" }],
-        }));
-        assert_eq!(r["ok"], json!(true), "{}", r);
-        assert!(
-            !home.join(".claude").join("skills").join("pdf").exists(),
-            "sandbox must not create the real folder"
-        );
-        let pending = k.store.read_pending();
-        assert_eq!(pending.len(), 1, "{:?}", pending);
-        assert_eq!(pending[0]["op"], json!("write"));
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&home).ok();
@@ -1395,7 +1419,7 @@ mod tests {
             r#"{"mcpServers":{"keep":{"command":"a"}}}"#,
         )
         .unwrap();
-        let k = keeper_at(&root, &home, false);
+        let k = keeper_at(&root, &home);
 
         let r = k.upsert_mcp(&json!({
             "name": "added",
@@ -1410,7 +1434,10 @@ mod tests {
         .unwrap();
         assert_eq!(after["mcpServers"]["keep"]["command"], json!("a"));
         assert_eq!(after["mcpServers"]["added"]["command"], json!("b"));
-        assert_eq!(r["written"], json!([home.join(".claude").join(".mcp.json").to_string_lossy()]));
+        assert_eq!(
+            r["written"],
+            json!([home.join(".claude").join(".mcp.json").to_string_lossy()])
+        );
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&home).ok();
@@ -1423,7 +1450,7 @@ mod tests {
         let home = temp("upsert-corrupt-home");
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         std::fs::write(home.join(".claude").join(".mcp.json"), "{ not json ").unwrap();
-        let k = keeper_at(&root, &home, false);
+        let k = keeper_at(&root, &home);
 
         let r = k.upsert_mcp(&json!({
             "name": "x",
@@ -1452,7 +1479,10 @@ mod tests {
         let root = temp("import");
         let home = temp("import-home");
         let bundle = temp("import-bundle");
-        let files = bundle.join("agentkeeper-bundle").join("files").join("pdf-x");
+        let files = bundle
+            .join("agentkeeper-bundle")
+            .join("files")
+            .join("pdf-x");
         std::fs::create_dir_all(&files).unwrap();
         std::fs::write(files.join("SKILL.md"), "---\nname: pdf\n---\nbody\n").unwrap();
         std::fs::write(
@@ -1472,11 +1502,11 @@ mod tests {
         )
         .unwrap();
 
-        let k = keeper_at(&root, &home, false);
+        let k = keeper_at(&root, &home);
         let r = k.import_bundle(&bundle.to_string_lossy());
         assert_eq!(r["ok"], json!(true), "{}", r);
         assert_eq!(r["imported"], json!(["pdf"]));
-        // A skill lands in `skillDirFor({scope:'global'})` = `~/.claude/skills`.
+        // A skill lands in `skill_dir_for({scope:'global'})` = `~/.claude/skills`.
         assert!(home
             .join(".claude")
             .join("skills")
@@ -1500,7 +1530,7 @@ mod tests {
         let root = temp("import-foreign");
         let home = temp("import-foreign-home");
         let bundle = temp("import-foreign-bundle");
-        let k = keeper_at(&root, &home, false);
+        let k = keeper_at(&root, &home);
         let r = k.import_bundle(&bundle.to_string_lossy());
         assert_eq!(
             r["error"],
@@ -1518,7 +1548,7 @@ mod tests {
         let _guard = assets::lock_for_test();
         let root = temp("cached");
         let home = temp("cached-home");
-        let k = keeper_at(&root, &home, false);
+        let k = keeper_at(&root, &home);
 
         // --- delete_mcp removes exactly one server -----------------------
         let cfg = home.join(".mcp.json");
@@ -1546,8 +1576,7 @@ mod tests {
         );
         let r = k.delete_mcp("mcp:drop");
         assert_eq!(r["ok"], json!(true), "{}", r);
-        let after: Value =
-            serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
         assert!(after["mcpServers"].get("drop").is_none());
         assert_eq!(after["mcpServers"]["keep"]["command"], json!("a"));
 
@@ -1591,7 +1620,7 @@ mod tests {
         assert_eq!(r["skipped"][0]["reason"], json!("same location"));
 
         // --- save_markdown refuses a rename ------------------------------
-        // The rename guard only runs once `validateSkill` passes, and that
+        // The rename guard only runs once `validate_skill` passes, and that
         // needs a description; without one the missing-description error (and
         // the dirName warning) is what comes back instead.
         let r = k.save_markdown("skill:pdf", "---\nname: other\ndescription: d\n---\nbody\n");
@@ -1640,7 +1669,14 @@ mod tests {
         assets::remember(std::slice::from_ref(&skill), std::slice::from_ref(&skill));
         let r = k.diff("skill:pdf", "line one\nline two\n");
         assert_eq!(r["ok"], json!(true));
-        assert_eq!(r["file"], json!(home.join("skills").join("pdf").join("SKILL.md").to_string_lossy()));
+        assert_eq!(
+            r["file"],
+            json!(home
+                .join("skills")
+                .join("pdf")
+                .join("SKILL.md")
+                .to_string_lossy())
+        );
         assert!(!r["lines"].as_array().unwrap().is_empty());
 
         assets::invalidate();

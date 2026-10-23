@@ -1,13 +1,10 @@
-//! Settings + store bootstrap — a port of `Store.ensure()`, `readSettings()`,
-//! `saveSettings()` and `setSandbox()` from `core/store.js`.
+//! Settings + store bootstrap — store 初始化与设置的读写。
 //!
-//! This is the first slice of the store layer. It deliberately stops short of
-//! the transaction/backup/journal machinery: settings are a single-file JSON
-//! write with the same atomic-rename guarantee, so moving them early costs
-//! little and removes a real lie — the Stage-2 shell accepted settings changes
-//! and dropped them on exit.
+//! Settings are a single-file JSON write with the same atomic-rename
+//! guarantee as the rest of the store, so they do not go through the
+//! transaction layer.
 //!
-//! ## Semantics copied from the JS
+//! ## Semantics
 //!
 //! * Only keys that exist in `defaults` may be written, and only with the same
 //!   `typeof` as the default. A hand-edited `settings.json` cannot smuggle in a
@@ -19,19 +16,11 @@
 //!   `<pid>-<ms>` is not unique when two tasks write the same path inside one
 //!   millisecond — see [`atomic_write`].
 //! * Every save appends one `audit.jsonl` record.
-//!
-//! ## One deliberate difference
-//!
-//! `sandbox` is **not** a settings key here nor in the JS: Electron seeds it
-//! from `AGENTKEEPER_SANDBOX` (default on) and mirrors later toggles into
-//! `meta.json`, which nothing reads back at startup. So the toggle is
-//! session-scoped in both builds — `set_sandbox_meta` keeps `meta.json`
-//! truthful for external inspectors without pretending it drives startup.
 
 use serde_json::{json, Map, Value};
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::model::iso_from_millis;
 
@@ -75,7 +64,8 @@ fn audit_path(root: &str) -> std::path::PathBuf {
     Path::new(root).join("audit.jsonl")
 }
 
-/// `typeof a === typeof b`, with JS's narrower meaning of "object": arrays and
+/// `typeof a === typeof b`, with the narrower
+/// meaning of "object": arrays and
 /// objects are both `object`, null is also `object` (which is why a null in the
 /// file never overrides a typed default).
 fn same_type(a: &Value, b: &Value) -> bool {
@@ -93,10 +83,16 @@ fn same_type(a: &Value, b: &Value) -> bool {
 ///
 /// Safe to call repeatedly; this runs on every bootstrap and on every settings
 /// write, which is what makes "first launch" work without a separate step.
-pub fn ensure_store(root: &str, sandbox: bool) -> std::io::Result<()> {
+///
+/// A `backups/` left behind by an older build is **removed** here. The backup
+/// tree is not just unused, it is misleading: it is the only place a user would
+/// look for "undo", and nothing in this build can read it back. Keeping it
+/// meant a folder of stale copies that looks like a feature and is not one.
+/// The removal is scoped to `<root>/backups` — one directory this app created
+/// itself, at a path it owns — and is best-effort: a file locked by another
+/// process must not stop the app from booting.
+pub fn ensure_store(root: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(root)?;
-    std::fs::create_dir_all(Path::new(root).join("sandbox"))?;
-    std::fs::create_dir_all(Path::new(root).join("backups"))?;
     let audit = audit_path(root);
     if !audit.exists() {
         std::fs::write(&audit, "")?;
@@ -105,13 +101,33 @@ pub fn ensure_store(root: &str, sandbox: bool) -> std::io::Result<()> {
     if !meta.exists() {
         let body = serde_json::to_string_pretty(&json!({
             "version": 1,
-            "sandbox": sandbox,
             "createdAt": now_iso()
         }))
         .unwrap_or_default();
         std::fs::write(&meta, body)?;
     }
+    remove_legacy_backups(root);
     Ok(())
+}
+
+/// Drop the retired `<root>/backups` tree, ignoring every failure.
+///
+/// Kept separate from `ensure_store`'s body so the "best effort, never boot-
+/// blocking" rule is stated once. A Windows share or an antivirus scanner can
+/// hold one of these files open; refusing to start over a directory nothing
+/// reads would be a worse outcome than leaving it one more run.
+fn remove_legacy_backups(root: &str) {
+    let legacy = Path::new(root).join("backups");
+    // `symlink_metadata`, so a link planted at that path is unlinked rather
+    // than followed into whatever it points at.
+    let Ok(meta) = std::fs::symlink_metadata(&legacy) else {
+        return;
+    };
+    if meta.is_dir() {
+        let _ = std::fs::remove_dir_all(&legacy);
+    } else {
+        let _ = std::fs::remove_file(&legacy);
+    }
 }
 
 /// `readSettings()` — defaults, selectively overridden by the file.
@@ -141,7 +157,8 @@ pub fn read(root: &str) -> Value {
 
 /// `saveSettings(patch)` — filtered merge, atomic write, audit.
 ///
-/// Returns the same `{ ok, settings }` envelope as the JS so the renderer's
+/// Returns the same `{ ok, settings }` envelope as
+/// so the renderer's
 /// success path is identical. Errors surface as `{ ok: false, error }` instead
 /// of a silent success: a settings change that did not reach disk must not look
 /// like it did.
@@ -153,7 +170,7 @@ pub fn save(root: &str, patch: &Value) -> Value {
 
     if let (Value::Object(d), Value::Object(p)) = (&d, patch) {
         for (k, v) in p {
-            // Unknown keys and type mismatches are ignored, exactly as in JS.
+            // Unknown keys and type mismatches are ignored.
             let Some(dv) = d.get(k) else { continue };
             if !same_type(dv, v) {
                 continue;
@@ -253,7 +270,8 @@ pub fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
 }
 
 /// `Store.audit()` — one JSONL record, `ts` first.
-pub fn audit(root: &str, rec: &Value) {    let mut map = Map::new();
+pub fn audit(root: &str, rec: &Value) {
+    let mut map = Map::new();
     map.insert("ts".to_string(), Value::String(now_iso()));
     if let Value::Object(r) = rec {
         for (k, v) in r {
@@ -265,7 +283,11 @@ pub fn audit(root: &str, rec: &Value) {    let mut map = Map::new();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = f.write_all(line.as_bytes());
     }
 }
@@ -342,28 +364,6 @@ fn read_baseline(root: &str) -> Map<String, Value> {
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default()
-}
-
-/// `setSandbox(on)` — leave a truthful trace in `meta.json`.
-///
-/// The JS writes the same field through `_patchMeta()`; startup does not read
-/// it back, so this is bookkeeping, not persistence.
-pub fn set_sandbox_meta(root: &str, on: bool) {
-    let _ = ensure_store(root, on);
-    let mut meta = std::fs::read(meta_path(root))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .unwrap_or_else(|| json!({}));
-    if let Value::Object(m) = &mut meta {
-        m.insert("sandbox".to_string(), Value::Bool(on));
-    }
-    let body = serde_json::to_string_pretty(&meta).unwrap_or_default();
-    let _ = std::fs::write(meta_path(root), body);
-}
-
-/// `process.env.AGENTKEEPER_SANDBOX !== '0'` — default on, even when unset.
-pub fn sandbox_from_env() -> bool {
-    std::env::var("AGENTKEEPER_SANDBOX").map(|v| v != "0").unwrap_or(true)
 }
 
 /* ------------------------------------------------------------------ */
@@ -532,8 +532,7 @@ fn append_ui_error(root: &str, payload: &Value) -> std::io::Result<usize> {
 /// `Store.readAudit()` — newest first, optionally filtered.
 ///
 /// Returns a **plain array**, not an envelope: `ak:audit` hands this straight
-/// to the renderer, which does `audit.filter(...)`. (The stage-1 stub returned
-/// `{ok, entries}` and broke the Activity page on open.)
+/// to the renderer, which does `audit.filter(...)`.
 pub fn read_audit(
     root: &str,
     limit: usize,
@@ -554,46 +553,14 @@ pub fn read_audit(
             Some(w) => rec.get(key).and_then(|v| v.as_str()) == Some(w),
             None => true,
         };
-        if !matches("kind", kind) || !matches("agentId", agent_id) || !matches("projectId", project_id)
+        if !matches("kind", kind)
+            || !matches("agentId", agent_id)
+            || !matches("projectId", project_id)
         {
             continue;
         }
         out.push(rec);
     }
-    out
-}
-
-/// `Store.listTransactions()` — one `backups/<txId>/tx.json` per transaction.
-///
-/// Read-only; it stays empty until the write path lands, which is truthful:
-/// no transaction has run.
-pub fn list_transactions(root: &str, limit: usize) -> Vec<Value> {
-    let dir = Path::new(root).join("backups");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut out: Vec<Value> = Vec::new();
-    for entry in entries.flatten() {
-        let tx_file = entry.path().join("tx.json");
-        let Ok(body) = std::fs::read(&tx_file) else {
-            continue;
-        };
-        let Ok(mut tx) = serde_json::from_slice::<Value>(&body) else {
-            continue;
-        };
-        if let Value::Object(m) = &mut tx {
-            m.insert("hasBackup".to_string(), Value::Bool(true));
-        }
-        out.push(tx);
-    }
-    // Newest first: txIds are `tx-<timestamp>-<rand>`, so reverse string order
-    // is chronological order (same trick as the JS localeCompare sort).
-    out.sort_by(|a, b| {
-        let ka = a.get("txId").map(|v| v.to_string()).unwrap_or_default();
-        let kb = b.get("txId").map(|v| v.to_string()).unwrap_or_default();
-        kb.cmp(&ka)
-    });
-    out.truncate(limit);
     out
 }
 
@@ -663,17 +630,31 @@ mod tests {
         )
         .unwrap();
         let s = read(&root);
-        assert_eq!(s["lang"], json!("auto"), "number must not override a string");
-        assert_eq!(s["updateCheckMinutes"], json!(20), "string must not override a number");
+        assert_eq!(
+            s["lang"],
+            json!("auto"),
+            "number must not override a string"
+        );
+        assert_eq!(
+            s["updateCheckMinutes"],
+            json!(20),
+            "string must not override a number"
+        );
         assert_eq!(s["theme"], json!("dark"), "matching type is kept");
-        assert!(s.get("evil").is_none(), "unknown keys never enter the merged view");
+        assert!(
+            s.get("evil").is_none(),
+            "unknown keys never enter the merged view"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn save_writes_only_known_keys_with_trailing_newline() {
         let root = temp_root("save");
-        let r = save(&root, &json!({ "theme": "dark", "evil": 1, "updateCheckMinutes": "x" }));
+        let r = save(
+            &root,
+            &json!({ "theme": "dark", "evil": 1, "updateCheckMinutes": "x" }),
+        );
         assert_eq!(r["ok"], json!(true));
         assert_eq!(r["settings"]["theme"], json!("dark"));
         assert_eq!(r["settings"]["updateCheckMinutes"], json!(20));
@@ -698,7 +679,7 @@ mod tests {
     #[test]
     fn save_appends_an_audit_record() {
         let root = temp_root("audit");
-        ensure_store(&root, true).unwrap();
+        ensure_store(&root).unwrap();
         save(&root, &json!({ "lang": "zh" }));
         let log = std::fs::read_to_string(audit_path(&root)).unwrap();
         assert_eq!(log.lines().count(), 1);
@@ -713,7 +694,7 @@ mod tests {
     #[test]
     fn read_audit_is_newest_first_and_filterable() {
         let root = temp_root("read-audit");
-        ensure_store(&root, true).unwrap();
+        ensure_store(&root).unwrap();
         let lines = [
             r#"{"ts":"1","kind":"scan","action":"scan"}"#,
             r#"{"ts":"2","kind":"settings","action":"settings-save"}"#,
@@ -729,29 +710,18 @@ mod tests {
         assert_eq!(read_audit(&root, 10, Some("settings"), None, None).len(), 1);
         assert_eq!(read_audit(&root, 10, None, Some("a1"), None).len(), 1);
         assert_eq!(read_audit(&root, 10, None, Some("nope"), None).len(), 0);
-        assert_eq!(read_audit(&root, 2, None, None, None).len(), 2, "limit applies");
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn list_transactions_reads_tx_json_and_sorts_desc() {
-        let root = temp_root("txs");
-        for tx in ["tx-b", "tx-a"] {
-            let dir = Path::new(&root).join("backups").join(tx);
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("tx.json"), format!(r#"{{"txId":"{}"}}"#, tx)).unwrap();
-        }
-        let txs = list_transactions(&root, 10);
-        assert_eq!(txs.len(), 2);
-        assert_eq!(txs[0]["txId"], json!("tx-b"));
-        assert_eq!(txs[0]["hasBackup"], json!(true));
+        assert_eq!(
+            read_audit(&root, 2, None, None, None).len(),
+            2,
+            "limit applies"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn baseline_round_trip_reports_added_changed_gone() {
         let root = temp_root("baseline");
-        ensure_store(&root, true).unwrap();
+        ensure_store(&root).unwrap();
         let first = vec![
             ("a".to_string(), "fp1".to_string()),
             ("b".to_string(), "fp2".to_string()),
@@ -801,15 +771,51 @@ mod tests {
     #[test]
     fn ensure_store_creates_the_tree_once() {
         let root = temp_root("tree");
-        ensure_store(&root, true).unwrap();
-        ensure_store(&root, true).unwrap();
-        assert!(Path::new(&root).join("sandbox").is_dir());
-        assert!(Path::new(&root).join("backups").is_dir());
+        ensure_store(&root).unwrap();
+        ensure_store(&root).unwrap();
         assert!(audit_path(&root).is_file());
+        assert!(
+            !Path::new(&root).join("backups").exists(),
+            "no backup tree is created any more"
+        );
         let meta: Value =
             serde_json::from_str(&std::fs::read_to_string(meta_path(&root)).unwrap()).unwrap();
         assert_eq!(meta["version"], json!(1));
-        assert_eq!(meta["sandbox"], json!(true));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A profile written by an older build still has a `backups/` directory full
+    /// of stale copies. It is removed on the next `ensure_store`: nothing in this
+    /// build can read it back, and a folder that looks like "undo" but does
+    /// nothing is worse than no folder. The removal is scoped to `<root>/backups`
+    /// — the app's own path — never the agent directories the copies came from.
+    #[test]
+    fn ensure_store_removes_a_legacy_backups_directory() {
+        let root = temp_root("legacy-backups");
+        let legacy = Path::new(&root).join("backups").join("tx-old");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("tx.json"), r#"{"txId":"tx-old"}"#).unwrap();
+
+        ensure_store(&root).unwrap();
+        assert!(
+            !Path::new(&root).join("backups").exists(),
+            "the retired backup tree must be gone after ensure_store"
+        );
+        // Everything the app actually reads is still there.
+        assert!(audit_path(&root).is_file());
+        assert!(meta_path(&root).is_file());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A second launch must not recreate it, and must not treat its absence as
+    /// an error.
+    #[test]
+    fn ensure_store_is_idempotent_after_the_backup_tree_is_gone() {
+        let root = temp_root("legacy-backups-twice");
+        std::fs::create_dir_all(Path::new(&root).join("backups")).unwrap();
+        ensure_store(&root).unwrap();
+        ensure_store(&root).unwrap();
+        assert!(!Path::new(&root).join("backups").exists());
         std::fs::remove_dir_all(&root).ok();
     }
 }

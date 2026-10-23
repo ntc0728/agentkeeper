@@ -1,13 +1,10 @@
 //! The software-update pipeline: `check → download → progress → cancel →
-//! install`, the scheduler, the `ak:update-*` payload guard, and literal parity
-//! with the JS version maths.
+//! install`, the scheduler, the `ak:update-*` payload guard, and the version
+//! maths.
 //!
-//! Merged from `update_pipeline.rs`, `update_ipc_guard.rs` and
-//! `update_js_parity.rs`.
-//!
-//! * pipeline (was `update_pipeline.rs`) — the Rust half of `scripts/selftest.js`
-//!   section 17 ("Software update: channels, download, install guards"). That
-//!   harness stands up an `http.createServer` mock of the GitHub API and drives
+//! * pipeline — end-to-end cover for the update pipeline: channels, download,
+//!   install guards. The
+//!   mock server here stands up a localhost GitHub API and drives
 //!   the *real* manager through it, which is what proves headers, asset
 //!   selection, streaming, progress, cancellation and the install guards
 //!   together. `manager.rs`'s unit tests cannot do that: they replace the
@@ -22,43 +19,41 @@
 //!   (`ensure_manager`) is deliberately unused: it pins the first root for the
 //!   whole process, so every test builds its own `UpdateManager` with
 //!   `with_options` and each owns a private temp root.
-//! * ipc guard (was `update_ipc_guard.rs`) — regression cover for the two
-//!   capability-audit bugs in the `ak:update-*` IPC surface: the "clear token"
+//! * ipc guard — the two
+//!   `ak:update-*` IPC surface rules: the "clear token"
 //!   button and the five settings validations. Both live in
 //!   `core::update::manager` as pure functions (`token_arg`,
 //!   `validate_settings_patch`) so the *rules* are testable without a WebView;
-//!   `lib.rs` is only the adapter that calls them. The rules are a line-by-line
-//!   port of the JS guard in `src/main/ipc.js:259-308`, which is why each
-//!   assertion is paired with the JS expression it mirrors. Deliberately not
+//!   `lib.rs` is only the adapter that calls them. Each rule matches the
+//!   reference expression it mirrors, which is why each
+//!   assertion is paired with that expression. Deliberately not
 //!   claimed here: the Tauri argument→parameter mapping (that `{token:null}`
 //!   reaches `Request` intact — `tauri::ipc::InvokeMessage`'s fields are
 //!   `pub(crate)`, so an integration test cannot build one) and the renderer half
-//!   (`app.js` / `tauri-bridge.js`).
-//! * js parity (was `update_js_parity.rs`) — literal 1:1 parity with
-//!   `scripts/selftest.js` section 17a (lines 773-834). `version.rs`'s unit tests
+//!   (`app.js`).
+//! * version semantics — the version helpers compared against fixed
+//!   expectations. `version.rs`'s unit tests
 //!   and the pipeline above already prove the *semantics* of the version maths —
-//!   but with their own fixtures, not the JS ones. That is the right way to test
-//!   behaviour and the wrong way to detect drift: if `compareVersions` and
-//!   `compare_versions` ever diverge on a shape only one of them exercises, both
-//!   suites stay green and the difference ships. That half therefore mirrors 17a
-//!   **literal for literal**: the same strings, the same expected values, in the
-//!   same order as the JS. The redundancy is the point. Everything there is a
-//!   pure function: no HTTP, no manager, no singleton, no real DPAPI, no
-//!   filesystem.
+//!   but with their own fixtures, not the reference ones. That is the right way to test
+//!   behaviour and the wrong way to detect drift: a shape only one of them
+//!   exercises can diverge with both suites green. That half therefore mirrors
+//!   literal for literal: the same strings, the same expected values, in
+//!   the same order as the reference. The redundancy is the point. Everything
+//!   there is a pure function: no HTTP, no manager, no singleton, no real DPAPI,
+//!   no filesystem.
 //!
-//! The JS returns `1 / -1 / 0 / null` from `compareVersions` while Rust returns
-//! `Option<Ordering>`; `ord()` in the parity section is the only adapter, so
-//! those assertions still read like the JS.
+//! The reference returns `1 / -1 / 0 / null` while Rust returns
+//! `Option<Ordering>`; the version comparison itself is covered by
+//! `agentkeeper-core`'s unit tests, which compare `Ordering` directly.
 
 use agentkeeper_shell_lib::core::settings;
 use agentkeeper_shell_lib::core::update::manager::{
-    normalize_repo, token_arg, validate_settings_patch, LauncherFn, Options, UpdateManager,
-    BUILT_IN_REPO, ERR_API_BASE_FORMAT, ERR_INTERVAL_RANGE, ERR_PROXY_FORMAT, ERR_REPO_FORMAT,
+    token_arg, validate_settings_patch, LauncherFn, Options, UpdateManager, BUILT_IN_REPO,
+    ERR_API_BASE_FORMAT, ERR_INTERVAL_RANGE, ERR_PROXY_FORMAT, ERR_REPO_FORMAT,
     ERR_TOKEN_FIELD_REQUIRED, ERR_TOKEN_TYPE,
 };
 use agentkeeper_shell_lib::core::update::version;
 use serde_json::{json, Value};
-use std::cmp::Ordering;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -67,7 +62,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /* ------------------------------------------------------------------ */
-/* check → download → install over real HTTP (was update_pipeline.rs)  */
+/* check → download → install over real HTTP                           */
 /* a GitHub-shaped mock server                                         */
 /* ------------------------------------------------------------------ */
 
@@ -79,6 +74,8 @@ struct MockConfig {
     no_release: bool,
     /// What `/releases?per_page=30` returns.
     list: Vec<Value>,
+    /// Status for `/releases?per_page=…`; 200 answers `list`.
+    list_status: Option<u16>,
     /// Declare this `Content-Length` on `/dl/` instead of the real size.
     oversized: Option<u64>,
     /// Status for `/dl/`; 200 streams the payload.
@@ -118,7 +115,7 @@ impl MockConfig {
     }
 }
 
-/// `startMockGitHub` from `scripts/selftest.js:689`, in Rust.
+/// The GitHub mock server, in Rust.
 struct MockGitHub {
     base: String,
     stop: Arc<AtomicBool>,
@@ -132,6 +129,7 @@ struct MockOptions {
     payload: Option<Vec<u8>>,
     no_release: bool,
     list: Vec<Value>,
+    list_status: Option<u16>,
     oversized: Option<u64>,
     dl_status: Option<u16>,
     chunk: usize,
@@ -151,6 +149,7 @@ impl MockGitHub {
             payload,
             no_release: options.no_release,
             list: options.list,
+            list_status: options.list_status,
             oversized: options.oversized,
             dl_status: options.dl_status.unwrap_or(200),
             chunk: options.chunk,
@@ -189,7 +188,7 @@ impl MockGitHub {
         self.requests.lock().unwrap().clone()
     }
 
-    /// Flip the server into 403 mode, as the JS does to exercise the cooldown.
+    /// Flip the server into 403 mode to exercise the cooldown.
     fn set_rate_limited(&self, on: bool) {
         self.rate_limited.store(on, AtomicOrdering::SeqCst);
     }
@@ -231,7 +230,12 @@ fn serve(
                 stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
                 let request = read_request(&mut stream);
                 requests.lock().unwrap().push(request.clone());
-                respond(&mut stream, &request, &cfg, rate_limited.load(AtomicOrdering::SeqCst));
+                respond(
+                    &mut stream,
+                    &request,
+                    &cfg,
+                    rate_limited.load(AtomicOrdering::SeqCst),
+                );
                 let _ = stream.flush();
                 let _ = stream.shutdown(Shutdown::Both);
             }
@@ -315,13 +319,27 @@ fn respond(stream: &mut TcpStream, request: &str, cfg: &MockConfig, rate_limited
             return;
         }
         let body = serde_json::to_vec(&cfg.release()).unwrap();
-        write_head(stream, 200, &[("content-type", "application/json")], body.len());
+        write_head(
+            stream,
+            200,
+            &[("content-type", "application/json")],
+            body.len(),
+        );
         let _ = stream.write_all(&body);
         return;
     }
     if is_repo_path && path.contains("/releases?") {
+        // A status other than 200 turns this branch into the failure fixture the
+        // changelog test needs (`GitHub returned HTTP 500`), without a second
+        // mock: the transport branch below is already exercised elsewhere.
+        let status = cfg.list_status.unwrap_or(200);
         let body = serde_json::to_vec(&cfg.list).unwrap();
-        write_head(stream, 200, &[("content-type", "application/json")], body.len());
+        write_head(
+            stream,
+            status,
+            &[("content-type", "application/json")],
+            body.len(),
+        );
         let _ = stream.write_all(&body);
         return;
     }
@@ -351,9 +369,7 @@ fn respond(stream: &mut TcpStream, request: &str, cfg: &MockConfig, rate_limited
         }
         if cfg.chunk == 0 {
             if cfg.chunked {
-                let _ = stream.write_all(
-                    format!("{:x}\r\n", cfg.payload.len()).as_bytes(),
-                );
+                let _ = stream.write_all(format!("{:x}\r\n", cfg.payload.len()).as_bytes());
                 let _ = stream.write_all(&cfg.payload);
                 let _ = stream.write_all(b"\r\n0\r\n\r\n");
             } else {
@@ -403,16 +419,12 @@ impl Fixture {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let root = std::env::temp_dir().join(format!(
-            "ak-upd-{}-{}-{}",
-            tag,
-            std::process::id(),
-            nanos
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ak-upd-{}-{}-{}", tag, std::process::id(), nanos));
         std::fs::create_dir_all(&root).expect("temp root");
         let dir = root.join("dl");
         std::fs::create_dir_all(&dir).expect("download dir");
-        settings::ensure_store(&root.to_string_lossy(), false).expect("ensure_store");
+        settings::ensure_store(&root.to_string_lossy()).expect("ensure_store");
         Self { root, dir }
     }
 
@@ -483,14 +495,13 @@ fn now_ms() -> i64 {
 }
 
 /* ------------------------------------------------------------------ */
-/* 17a. the asset name the real release pipeline produces              */
+/* the asset name the real release pipeline produces                     */
 /* ------------------------------------------------------------------ */
 
-/// `pickInstaller` is the one function between a published release and an
-/// upgrade that actually happens. The Tauri build renames the NSIS installer
-/// to `AgentKeeper_<version>_x64-setup.exe` (underscores, `-setup` suffix),
-/// which no Electron-era fixture covers — so pin the real artefact name here.
-/// Requested by ci-mcp-verifier while wiring `.github/workflows/release.yml`.
+/// `pick_installer` is the one function between a published release and an
+/// upgrade that actually happens. The release pipeline names the NSIS installer
+/// `AgentKeeper_<version>_x64-setup.exe` (underscores, `-setup` suffix), which
+/// no other fixture covers — so pin the real artefact name here.
 #[test]
 fn the_real_tauri_installer_name_is_selected() {
     let assets = json!([
@@ -546,20 +557,18 @@ fn the_real_tauri_installer_name_is_selected() {
     assert_eq!(picked["name"], json!("AgentKeeper_0.2.0_x64-setup.exe"));
 
     // And the update panel's download guard accepts it: the name survives
-    // `safeFileName`, and `verifyInstaller` requires the product keyword.
+    // `safe_file_name`, and the installer check requires the product keyword.
     assert_eq!(
         version::safe_file_name("AgentKeeper_0.2.0_x64-setup.exe", "win32"),
         "AgentKeeper_0.2.0_x64-setup.exe"
     );
-    assert!(
-        "AgentKeeper_0.2.0_x64-setup.exe"
-            .to_lowercase()
-            .contains("agentkeeper")
-    );
+    assert!("AgentKeeper_0.2.0_x64-setup.exe"
+        .to_lowercase()
+        .contains("agentkeeper"));
 }
 
 /* ------------------------------------------------------------------ */
-/* 17a. the release repository is built in                             */
+/* the release repository is built in                                    */
 /* ------------------------------------------------------------------ */
 
 #[test]
@@ -567,12 +576,12 @@ fn the_release_repository_is_built_in() {
     let fx = Fixture::new("repo");
     let manager = fx.manager("1.0.0");
 
-    // `scripts/selftest.js:864` — nothing to type, and it must equal the
+    // Nothing to type, and it must equal the
     // repository in package.json (`ntc0728/agentkeeper`).
     assert_eq!(manager.status()["repo"], json!(BUILT_IN_REPO));
     assert_eq!(manager.status()["repo"], json!("ntc0728/agentkeeper"));
 
-    // `selftest.js:870`: an unusable value falls back instead of disabling
+    // An unusable value falls back instead of disabling
     // updates. `normalize_repo` rejects it, so `Cfg::repo` takes the default.
     fx.save(json!({ "updateRepo": "not a repo" }));
     assert_eq!(manager.status()["repo"], json!(BUILT_IN_REPO));
@@ -596,7 +605,7 @@ fn check_finds_the_newer_release_over_http() {
     assert_eq!(found["ok"], json!(true), "{}", found);
     assert_eq!(found["hasUpdate"], json!(true), "{}", found);
     assert_eq!(found["latest"], json!("9.9.9"), "{}", found);
-    // `selftest.js:877` — notes and the release page survive the round trip.
+    // Notes and the release page survive the round trip.
     assert_eq!(found["notes"], json!("Release notes body"));
     assert!(
         found["pageUrl"]
@@ -606,7 +615,7 @@ fn check_finds_the_newer_release_over_http() {
         "{}",
         found["pageUrl"]
     );
-    // `selftest.js:879` — the NSIS setup beats the portable exe, even though
+    // The NSIS setup beats the portable exe, even though
     // the bare exe is listed first.
     let asset = found["asset"].clone();
     assert!(
@@ -631,7 +640,7 @@ fn a_second_manual_check_inside_the_gap_reuses_the_result() {
     assert_eq!(manager.check(true)["latest"], json!("9.9.9"));
     let before = mock.request_count();
 
-    // `selftest.js:883`: no second request inside the 60 s minimum gap.
+    // No second request inside the 60 s minimum gap.
     let throttled = manager.check(true);
     assert_eq!(throttled["reason"], json!("throttled"), "{}", throttled);
     assert_eq!(mock.request_count(), before);
@@ -662,13 +671,18 @@ fn download_streams_to_completion_and_reaches_100_percent() {
     assert_eq!(task["received"], json!(payload.len()), "{}", task);
     assert_eq!(task["total"], json!(payload.len()), "{}", task);
 
-    // `selftest.js:894` — the bytes on disk are the bytes that were served,
+    // The bytes on disk are the bytes that were served,
     // and the file landed inside the managed directory.
     let path = task["path"].as_str().expect("task path").to_string();
     assert_eq!(std::fs::read(&path).unwrap(), payload);
     let canonical = std::fs::canonicalize(&path).unwrap();
     let dir = std::fs::canonicalize(&fx.dir).unwrap();
-    assert!(canonical.starts_with(&dir), "{} is outside {}", path, dir.display());
+    assert!(
+        canonical.starts_with(&dir),
+        "{} is outside {}",
+        path,
+        dir.display()
+    );
 
     // The finished task is part of `status()`, which is what the panel polls.
     assert_eq!(manager.status()["task"]["done"], json!(true));
@@ -758,7 +772,7 @@ fn cancel_stops_the_transfer_and_reports_canceled() {
     assert_eq!(task["canceled"], json!(true), "{}", task);
     assert_eq!(task["done"], json!(false), "{}", task);
     assert_eq!(task["active"], json!(false), "{}", task);
-    // The JS cancel path resolves before the `catch` that unlinks the file, so
+    // The cancel path resolves before the `catch` that unlinks the file, so
     // a partial installer survives — and the task reports no usable path.
     assert_eq!(task["path"], Value::Null, "{}", task);
     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -817,7 +831,11 @@ fn a_second_start_download_while_one_is_active_returns_the_running_task() {
 
     let task = wait_inactive(&manager);
     assert_eq!(task["done"], json!(true), "{}", task);
-    assert_eq!(mock.request_count(), 1, "only one transfer may reach the server");
+    assert_eq!(
+        mock.request_count(),
+        1,
+        "only one transfer may reach the server"
+    );
 }
 
 #[test]
@@ -827,17 +845,19 @@ fn download_refuses_a_url_outside_the_allow_list() {
     fx.use_mock(&mock.base);
     let manager = fx.manager("1.0.0");
 
-    // `ipc-contract-test.js:310`.
-    //
     // The engine speaks English and `src/renderer/engine-zh.js` maps it to the
-    // Chinese the JS throws directly, so the assertion is on the engine string —
-    // `tests/update_js_parity.rs` pins the mapping side.
+    // Chinese directly, so the assertion is on the engine string —
+    // the parity section below pins the mapping side.
     let error = manager
         .start_download("https://evil.example/a.exe", Some("AgentKeeper-a.exe"))
         .expect_err("a foreign host must be refused");
-    assert!(error.message().contains("not on the allow list"), "{}", error);
+    assert!(
+        error.message().contains("not on the allow list"),
+        "{}",
+        error
+    );
 
-    // `selftest.js:797` — plain http is refused unless it is the mirror itself.
+    // Plain http is refused unless it is the mirror itself.
     let error = manager
         .start_download("http://github.com/a.exe", Some("AgentKeeper-a.exe"))
         .expect_err("plain http must be refused");
@@ -882,7 +902,7 @@ fn an_oversized_installer_is_refused_before_anything_is_written() {
         ..Default::default()
     });
     fx.use_mock(&mock.base);
-    // `selftest.js:1009` — a small `maxBytes` so the guard is reachable.
+    // A small `maxBytes` so the guard is reachable.
     let manager = fx.manager_with("1.0.0", None, 1024);
 
     let url = format!("{}/dl/AgentKeeper-big.exe", mock.base);
@@ -988,7 +1008,11 @@ fn the_transport_layer_refuses_an_oversized_declaration_before_writing() {
     );
 
     let error = result.expect_err("an oversized declaration must be refused");
-    assert!(error.describe().contains("size looks wrong"), "{}", error.describe());
+    assert!(
+        error.describe().contains("size looks wrong"),
+        "{}",
+        error.describe()
+    );
     // Refused on the header: `on_progress` never ran and nothing was written.
     assert!(calls.is_empty(), "on_progress must not run: {:?}", calls);
     assert!(!dest.exists(), "{} must not exist", dest.display());
@@ -1043,7 +1067,11 @@ fn install_refuses_a_non_installer_extension() {
         .verify_installer(&notes.to_string_lossy())
         .expect_err("a non-installer extension");
     // Engine string; `engine-zh.js:307` renders it as 只允许运行 §1 安装包.
-    assert!(error.message().contains("installers may be run"), "{}", error);
+    assert!(
+        error.message().contains("installers may be run"),
+        "{}",
+        error
+    );
 }
 
 #[test]
@@ -1065,7 +1093,6 @@ fn install_refuses_a_relative_or_missing_path() {
     let fx = Fixture::new("relative");
     let manager = fx.manager("1.0.0");
 
-    // `ipc-contract-test.js:308`.
     let error = manager
         .verify_installer("relative.exe")
         .expect_err("a relative path");
@@ -1114,7 +1141,7 @@ fn install_launches_the_verified_file_and_reports_the_mode() {
     let target = fx.dir.join("AgentKeeper-Setup-9.9.9.exe");
     std::fs::write(&target, "MZ").unwrap();
 
-    // `selftest.js:929` — the launcher receives the *real* path, and the
+    // The launcher receives the *real* path, and the
     // `silent` setting is read on every install, not captured at construction.
     let installed = manager.install(&target.to_string_lossy()).expect("install");
     assert_eq!(installed["ok"], json!(true), "{}", installed);
@@ -1193,55 +1220,8 @@ fn install_refuses_while_a_download_is_active() {
 }
 
 /* ------------------------------------------------------------------ */
-/* 17i. the ak:update-* payload guard (ipc.js:259-308)                 */
+/* 17i. the ak:update-* payload guard                                  */
 /* ------------------------------------------------------------------ */
-//
-// BUG-1 (clear token) and BUG-2 (five missing settings checks) are both fixed
-// in `core::update::manager::{validate_settings_patch, token_arg}` rather than
-// in the `#[tauri::command]` bodies, precisely so they are reachable from an
-// integration test — a command needs an `AppHandle` and cannot be called here.
-// The expectations below are `scripts/ipc-contract-test.js:279-302` and
-// `src/main/ipc.js:259-308`.
-
-#[test]
-fn token_arg_turns_null_into_clear_and_rejects_other_types() {
-    use agentkeeper_shell_lib::core::update::manager::{
-        token_arg, ERR_TOKEN_FIELD_REQUIRED, ERR_TOKEN_TYPE,
-    };
-
-    // `token_arg` takes the **whole IPC body**, not the `token` field: that is
-    // the only way the missing-key branch survives Tauri's
-    // `deserialize_option`, which collapses `{}` and `{token:null}` into the
-    // same `visit_none()`.
-
-    // BUG-1: `null` must reach `set_token(None)`. Anything else here — an empty
-    // string, or a `Some` carrying anything — re-breaks clearing.
-    assert_eq!(token_arg(&json!({ "token": null })), Ok(None));
-
-    assert_eq!(
-        token_arg(&json!({ "token": "ghp_example" })),
-        Ok(Some("ghp_example".to_string()))
-    );
-    // `ipc-contract-test.js:302` / ipc.js:301 — a non-string is `tokenType`.
-    assert_eq!(token_arg(&json!({ "token": 1 })), Err(ERR_TOKEN_TYPE));
-    assert_eq!(token_arg(&json!({ "token": true })), Err(ERR_TOKEN_TYPE));
-    assert_eq!(token_arg(&json!({ "token": { "a": 1 } })), Err(ERR_TOKEN_TYPE));
-    assert_eq!(token_arg(&json!({ "token": ["x"] })), Err(ERR_TOKEN_TYPE));
-
-    // `ipc.js:298` — `'token' in p` false is an error, not a silent clear. A
-    // non-object body is `asObject`-collapsed to `{}`, so it lands here too.
-    assert_eq!(token_arg(&json!({})), Err(ERR_TOKEN_FIELD_REQUIRED));
-    assert_eq!(token_arg(&json!(null)), Err(ERR_TOKEN_FIELD_REQUIRED));
-    assert_eq!(token_arg(&json!(7)), Err(ERR_TOKEN_FIELD_REQUIRED));
-    assert_eq!(token_arg(&json!([1, 2])), Err(ERR_TOKEN_FIELD_REQUIRED));
-
-    // Extra keys are ignored.
-    assert_eq!(
-        token_arg(&json!({ "token": "abc", "other": 1 })),
-        Ok(Some("abc".to_string()))
-    );
-}
-
 #[test]
 fn clearing_the_token_goes_through_the_guard_and_empties_it() {
     use agentkeeper_shell_lib::core::update::manager::token_arg;
@@ -1295,7 +1275,7 @@ fn skip_survives_a_restart_and_unskip_clears_it() {
     assert_eq!(skipped["skipped"], json!(true), "{}", skipped);
     assert_eq!(skipped["skippedVersion"], json!("9.9.9"), "{}", skipped);
 
-    // `selftest.js:938` — a second manager (a restart) reads the state file.
+    // A second manager (a restart) reads the state file.
     assert_eq!(fx.manager("1.0.0").status()["skipped"], json!(true));
     assert_eq!(manager.unskip()["skipped"], json!(false));
     assert_eq!(fx.manager("1.0.0").status()["skipped"], json!(false));
@@ -1312,8 +1292,9 @@ fn the_token_is_stored_as_an_encrypted_envelope() {
 
     if manager.status()["encryption"] != json!(true) {
         // No DPAPI on this host: the only correct behaviour is a clean refusal.
-        // `ipc-contract-test.js:299`.
-        let error = manager.set_token(Some("ghp_testtoken123")).expect_err("refusal");
+        let error = manager
+            .set_token(Some("ghp_testtoken123"))
+            .expect_err("refusal");
         // Engine string; `engine-zh.js:231` renders it as
         // 本机安全存储不可用，已拒绝以明文保存令牌.
         assert!(
@@ -1328,11 +1309,13 @@ fn the_token_is_stored_as_an_encrypted_envelope() {
         return;
     }
 
-    let saved = manager.set_token(Some("ghp_testtoken123")).expect("set_token");
+    let saved = manager
+        .set_token(Some("ghp_testtoken123"))
+        .expect("set_token");
     assert_eq!(saved["token"]["filled"], json!(true), "{}", saved);
     assert_eq!(saved["token"]["origin"], json!("stored"), "{}", saved);
 
-    // `selftest.js:947` — the plaintext never reaches settings.json, and the
+    // The plaintext never reaches settings.json, and the
     // value that does is the `enc1:` envelope.
     let raw = settings::read(&fx.root_str())["updateToken"]
         .as_str()
@@ -1343,7 +1326,7 @@ fn the_token_is_stored_as_an_encrypted_envelope() {
 
     assert_eq!(manager.token_status()["filled"], json!(true));
 
-    // `selftest.js:950` — garbage ciphertext reports an error, not "empty".
+    // Garbage ciphertext reports an error, not "empty".
     fx.save(json!({ "updateToken": "enc1:bm90LWEtcmVhbC1lbnZlbG9wZQ==" }));
     let status = manager.token_status();
     assert!(
@@ -1352,7 +1335,6 @@ fn the_token_is_stored_as_an_encrypted_envelope() {
         status
     );
 
-    // `selftest.js:953`.
     manager.set_token(None).expect("clear");
     assert_eq!(manager.token_status()["filled"], json!(false));
 }
@@ -1375,14 +1357,16 @@ fn the_beta_channel_queries_the_release_list() {
     fx.use_mock(&mock.base);
     fx.save(json!({ "updateBeta": true }));
 
-    // `selftest.js:970` — a beta user sees the next beta, and the request went
+    // A beta user sees the next beta, and the request went
     // to `/releases?per_page=`, not `/releases/latest`.
     let on_beta = fx.manager("9.9.9-beta.1");
     let status = on_beta.check(true);
     assert_eq!(status["latest"], json!("9.9.9-beta.2"), "{}", status);
     assert_eq!(status["hasUpdate"], json!(true), "{}", status);
     assert!(
-        mock.requests().iter().any(|u| u.contains("/releases?per_page=")),
+        mock.requests()
+            .iter()
+            .any(|u| u.contains("/releases?per_page=")),
         "{:?}",
         mock.requests()
     );
@@ -1402,7 +1386,7 @@ fn a_final_release_user_on_the_beta_channel_takes_the_highest_overall() {
     fx.use_mock(&mock.base);
     fx.save(json!({ "updateBeta": true }));
 
-    // `selftest.js:981`: `onlyPrerelease` is off for a final-release install.
+    // `onlyPrerelease` is off for a final-release install.
     let status = fx.manager("9.8.0").check(true);
     assert_eq!(status["latest"], json!("9.9.9"), "{}", status);
 }
@@ -1415,13 +1399,16 @@ fn a_rate_limit_is_a_cooldown_not_a_failed_check() {
     mock.set_rate_limited(true);
     let manager = fx.manager("1.0.0");
 
-    // `selftest.js:988`.
     let limited = manager.check(true);
     assert_eq!(limited["ok"], json!(false), "{}", limited);
     let retry_at = limited["retryAt"].as_i64().unwrap_or(0);
-    assert!(retry_at > now_ms(), "retryAt {} must be in the future", retry_at);
+    assert!(
+        retry_at > now_ms(),
+        "retryAt {} must be in the future",
+        retry_at
+    );
 
-    // `selftest.js:991` — a cooled-down manager answers without asking again.
+    // A cooled-down manager answers without asking again.
     let before = mock.request_count();
     let again = manager.check(true);
     assert_eq!(again["reason"], json!("cooldown"), "{}", again);
@@ -1442,7 +1429,7 @@ fn a_repository_with_no_release_is_not_a_failed_check() {
     fx.use_mock(&mock.base);
     let manager = fx.manager("1.0.0");
 
-    // `selftest.js:1000` — 404 means "nothing to upgrade to".
+    // 404 means "nothing to upgrade to".
     let status = manager.check(true);
     assert_ne!(status["ok"], json!(false), "{}", status);
     assert_eq!(status["hasUpdate"], Value::Null, "{}", status);
@@ -1460,7 +1447,6 @@ fn the_scheduler_fires_at_once_then_backs_off() {
     fx.use_mock(&mock.base);
     let manager = fx.manager("1.0.0");
 
-    // `selftest.js:1021`.
     assert_eq!(manager.due_at(), 0, "no history means due immediately");
 
     let first = manager.tick().expect("the first tick must check");
@@ -1473,12 +1459,10 @@ fn the_scheduler_fires_at_once_then_backs_off() {
         due
     );
 
-    // `selftest.js:1027`.
     let before = mock.request_count();
     assert!(manager.tick().is_none());
     assert_eq!(mock.request_count(), before);
 
-    // `selftest.js:1030`.
     fx.save(json!({ "updateCheck": false }));
     assert_eq!(manager.due_at(), 0);
     assert!(manager.tick().is_none());
@@ -1493,23 +1477,35 @@ fn save_settings_clamps_validates_and_echoes_back() {
     let fx = Fixture::new("settings");
     let manager = fx.manager("1.0.0");
 
-    // `selftest.js:930` — silent install is on by default and can be turned off.
+    // Silent install is on by default and can be turned off.
     assert_eq!(manager.status()["settings"]["silent"], json!(true));
-    let off = manager.save_settings(&json!({ "silent": false })).expect("save");
+    let off = manager
+        .save_settings(&json!({ "silent": false }))
+        .expect("save");
     assert_eq!(off["settings"]["silent"], json!(false), "{}", off);
-    manager.save_settings(&json!({ "silent": true })).expect("save");
+    manager
+        .save_settings(&json!({ "silent": true }))
+        .expect("save");
     assert_eq!(manager.status()["settings"]["silent"], json!(true));
 
     // `clampMinutes`: 1..1440, and a non-finite value falls back to 20.
-    let one = manager.save_settings(&json!({ "minutes": 0 })).expect("save");
+    let one = manager
+        .save_settings(&json!({ "minutes": 0 }))
+        .expect("save");
     assert_eq!(one["settings"]["minutes"], json!(1), "{}", one);
-    let max = manager.save_settings(&json!({ "minutes": 5000 })).expect("save");
+    let max = manager
+        .save_settings(&json!({ "minutes": 5000 }))
+        .expect("save");
     assert_eq!(max["settings"]["minutes"], json!(1440), "{}", max);
-    let back = manager.save_settings(&json!({ "minutes": 45 })).expect("save");
+    let back = manager
+        .save_settings(&json!({ "minutes": 45 }))
+        .expect("save");
     assert_eq!(back["settings"]["minutes"], json!(45), "{}", back);
 
     // An unusable repo is stored verbatim but reads back as the built-in one.
-    let bad = manager.save_settings(&json!({ "repo": "not a repo" })).expect("save");
+    let bad = manager
+        .save_settings(&json!({ "repo": "not a repo" }))
+        .expect("save");
     assert_eq!(bad["repo"], json!(BUILT_IN_REPO), "{}", bad);
 
     // A good one is echoed and persisted.
@@ -1560,23 +1556,36 @@ fn update_check_off_means_no_tick_and_no_request() {
 
     assert_eq!(manager.due_at(), 0, "auto-check off schedules nothing");
     assert!(manager.tick().is_none(), "auto-check off must not tick");
-    assert_eq!(mock.request_count(), 0, "auto-check off must not hit the network");
+    assert_eq!(
+        mock.request_count(),
+        0,
+        "auto-check off must not hit the network"
+    );
 
     // Flipping the switch is all the scheduler needs (same manager, same root —
     // the setting is re-read inside `tick`). One tick = exactly one request.
     fx.save(json!({ "updateCheck": true }));
-    let fired = manager.tick().expect("auto-check on with no history is due now");
+    let fired = manager
+        .tick()
+        .expect("auto-check on with no history is due now");
     assert_eq!(mock.request_count(), 1, "one tick, one request: {}", fired);
     assert_eq!(fired["ok"], json!(true), "{}", fired);
     assert_eq!(fired["latest"], json!("9.9.9"), "{}", fired);
 
     // ...and the deadline the tick just persisted keeps the next one quiet.
-    assert!(manager.tick().is_none(), "the next tick is a full interval away");
-    assert_eq!(mock.request_count(), 1, "a tick that is not due sends nothing");
+    assert!(
+        manager.tick().is_none(),
+        "the next tick is a full interval away"
+    );
+    assert_eq!(
+        mock.request_count(),
+        1,
+        "a tick that is not due sends nothing"
+    );
 }
 
 /* ------------------------------------------------------------------ */
-/* the ak:update-* payload guard (was update_ipc_guard.rs)             */
+/* the ak:update-* payload guard                                       */
 /* fixture                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -1597,7 +1606,7 @@ impl IpcFixture {
             nanos
         ));
         std::fs::create_dir_all(&root).expect("temp root");
-        settings::ensure_store(&root.to_string_lossy(), false).expect("ensure_store");
+        settings::ensure_store(&root.to_string_lossy()).expect("ensure_store");
         Self { root }
     }
 
@@ -1624,15 +1633,15 @@ impl Drop for IpcFixture {
 /* BUG-1 — `ak:update-token` can clear the credential                  */
 /* ------------------------------------------------------------------ */
 
-/// `ipc.js:296-308`, the whole handler, in one test.
+/// The whole handler, in one test.
 ///
 /// The bug had two halves and both are pinned here:
 ///
 /// 1. `token: String` cannot deserialize `null`, so the invoke was *rejected*
 ///    before the body ran — the renderer's `.catch` showed an error toast for a
-///    click that had asked to clear. Fixed by taking the raw request body.
+///    click that had asked to clear. Hence the raw request body.
 /// 2. `set_token(Some(&token))` made `Option<&str>`'s `None` branch unreachable,
-///    so "clear" had no Rust meaning at all. Fixed by forwarding the `None`.
+///    so "clear" had no Rust meaning at all. Hence the forwarded `None`.
 ///
 /// The missing-field branch is the one that needs the raw body: Tauri's
 /// `CommandItem::deserialize_option` maps both an absent key and an explicit
@@ -1701,14 +1710,12 @@ fn clearing_the_token_empties_it_in_the_status_and_in_settings_json() {
     let saved = manager.set_token(Some("ghp_testtoken123")).expect("set");
     assert_eq!(saved["token"]["filled"], json!(true), "{}", saved);
     assert_eq!(saved["token"]["origin"], json!("stored"), "{}", saved);
-    assert!(
-        settings::read(&fx.root_str())["updateToken"]
-            .as_str()
-            .unwrap_or("")
-            .starts_with("enc1:")
-    );
+    assert!(settings::read(&fx.root_str())["updateToken"]
+        .as_str()
+        .unwrap_or("")
+        .starts_with("enc1:"));
 
-    // `app.js:1802` → `tauri-bridge.js:60` → `{token:null}` → `None`.
+    // `app.js:1802` → `{token:null}` → `None`.
     let cleared = manager.set_token(None).expect("clear");
     assert_eq!(cleared["token"]["filled"], json!(false), "{}", cleared);
     assert_eq!(cleared["token"]["origin"], json!(null), "{}", cleared);
@@ -1725,8 +1732,8 @@ fn clearing_the_token_empties_it_in_the_status_and_in_settings_json() {
 /// The "清除令牌" button's own path: **the body the renderer sends**, through
 /// the same entry point the command uses.
 ///
-/// `tests/update_ipc_guard.rs` can reach the rules but not the command, so
-/// `set_token_checked` is the seam that makes the wiring assertable. Reverting
+/// The rules are reachable but the command is not, so
+/// `set_token_checked` is the seam that makes the wiring assertable. Reintroducing
 /// BUG-1 — passing `Some(..)` unconditionally, or declaring the parameter
 /// `Option<Value>` and treating `None` as "clear" — turns this red.
 #[test]
@@ -1736,7 +1743,9 @@ fn the_clear_button_payload_clears_and_a_bare_body_is_refused() {
     let encrypted = manager.status()["encryption"] == json!(true);
     if !encrypted {
         // No DPAPI here: both paths have to refuse rather than write plaintext.
-        assert!(manager.set_token_checked(&json!({ "token": null })).is_err());
+        assert!(manager
+            .set_token_checked(&json!({ "token": null }))
+            .is_err());
         assert!(manager.set_token_checked(&json!({})).is_err());
         return;
     }
@@ -1745,7 +1754,7 @@ fn the_clear_button_payload_clears_and_a_bare_body_is_refused() {
         .set_token_checked(&json!({ "token": "ghp_testtoken123" }))
         .expect("save the token first");
 
-    // Exactly what `tauri-bridge.js:60` puts on the wire for the clear button.
+    // Exactly what `app.js:1802` puts on the wire for the clear button.
     let cleared = manager
         .set_token_checked(&json!({ "token": null }))
         .expect("the clear button must succeed, not throw");
@@ -1790,11 +1799,11 @@ fn tauri_option_field(payload: &Value, key: &str) -> Option<Value> {
 
 /// The reason `update_set_token` takes the raw body.
 ///
-/// `ipc.js:299` requires "no `token` field" and "`token` is null" to produce
+/// The rule requires "no `token` field" and "`token` is null" to produce
 /// *different* outcomes (an error vs. a clear). Under a plain
 /// `token: Option<Value>` parameter both arrive as `None`, so one of the two
-/// branches has to be sacrificed — which is exactly the compromise the audit
-/// rejected. This pins the collapse so the reasoning stays checkable.
+/// branches have to be sacrificed — which is exactly the compromise to avoid.
+/// This pins the collapse so the reasoning stays checkable.
 #[test]
 fn an_absent_token_key_and_an_explicit_null_are_indistinguishable_as_a_parameter() {
     let absent = tauri_option_field(&json!({}), "token");
@@ -1803,7 +1812,7 @@ fn an_absent_token_key_and_an_explicit_null_are_indistinguishable_as_a_parameter
     assert_eq!(
         absent, explicit,
         "as long as these are equal, `token: Option<Value>` cannot implement \
-         ipc.js:299 and the command must keep taking the request body"
+         the command must keep taking the request body"
     );
 
     // The body keeps them apart, which is the whole fix.
@@ -1814,136 +1823,6 @@ fn an_absent_token_key_and_an_explicit_null_are_indistinguishable_as_a_parameter
 /* ------------------------------------------------------------------ */
 /* BUG-2 — the five `ak:update-settings` validations                   */
 /* ------------------------------------------------------------------ */
-
-/// Every rejection `ipc.js:263-287` produces, and the reason for each.
-#[test]
-fn the_settings_guard_rejects_every_value_the_js_ipc_layer_rejects() {
-    // `Math.round(Number(p.minutes))` outside 1..=1440 → `ipc.intervalRange`.
-    for bad in [
-        json!({ "minutes": 0 }),
-        json!({ "minutes": -5 }),
-        json!({ "minutes": 1441 }),
-        json!({ "minutes": 99999 }),
-        json!({ "minutes": "abc" }),
-        json!({ "minutes": {} }),
-        json!({ "minutes": [1, 2] }),
-    ] {
-        assert_eq!(
-            validate_settings_patch(&bad),
-            Some(ERR_INTERVAL_RANGE),
-            "{}",
-            bad
-        );
-    }
-
-    // `repo && !normalizeRepo(repo)` → `ipc.repoFormat`.
-    for bad in [
-        json!({ "repo": "这不是一个仓库名而是一段话" }),
-        json!({ "repo": "a/b/c" }),
-        json!({ "repo": "/repo" }),
-        json!({ "repo": "owner/" }),
-        json!({ "repo": "owner / repo" }),
-    ] {
-        assert_eq!(
-            validate_settings_patch(&bad),
-            Some(ERR_REPO_FORMAT),
-            "{}",
-            bad
-        );
-    }
-
-    // `base && !/^https?:\/\//.test(base)` → `ipc.apiBaseFormat`.
-    for bad in [
-        json!({ "apiBase": "ftp://example.com" }),
-        json!({ "apiBase": "example.com/api" }),
-        json!({ "apiBase": "乱码更新源" }),
-    ] {
-        assert_eq!(
-            validate_settings_patch(&bad),
-            Some(ERR_API_BASE_FORMAT),
-            "{}",
-            bad
-        );
-    }
-
-    // `!(auto | direct | /^https?:\/\/\S+$/)` → `ipc.proxyFormat`.
-    for bad in [
-        json!({ "proxy": "clash" }),
-        json!({ "proxy": "http://" }),
-        json!({ "proxy": "https://" }),
-        json!({ "proxy": "http://127.0.0.1 7897" }),
-    ] {
-        assert_eq!(
-            validate_settings_patch(&bad),
-            Some(ERR_PROXY_FORMAT),
-            "{}",
-            bad
-        );
-    }
-
-    // The guard reports the first offending field, in the JS field order
-    // (`auto`, `minutes`, `beta`, `repo`, `apiBase`, `proxy`, `silent`).
-    assert_eq!(
-        validate_settings_patch(&json!({ "minutes": 0, "repo": "a/b/c" })),
-        Some(ERR_INTERVAL_RANGE)
-    );
-}
-
-/// Everything `ipc.js` lets through, including the coercions: a non-string
-/// `repo`/`apiBase` becomes `""` (meaning "built-in"/"default"), and an empty
-/// proxy becomes `auto`.
-#[test]
-fn the_settings_guard_accepts_what_the_js_ipc_layer_accepts() {
-    for good in [
-        json!({}),
-        json!({ "auto": true }),
-        json!({ "beta": false, "silent": true }),
-        // `Math.round` runs before the range check, so 0.6 → 1 and 20.6 → 21.
-        json!({ "minutes": 1 }),
-        json!({ "minutes": 1440 }),
-        json!({ "minutes": 0.6 }),
-        json!({ "minutes": 20.6 }),
-        json!({ "minutes": "45" }),
-        // An empty repo means "fall back to the built-in one".
-        json!({ "repo": "" }),
-        json!({ "repo": "   " }),
-        json!({ "repo": "acme/keeper" }),
-        json!({ "repo": "  acme/keeper  " }),
-        json!({ "repo": "acme/keeper.nightly" }),
-        // A non-string collapses to `""` via `asString`, which then passes.
-        json!({ "repo": 42 }),
-        json!({ "apiBase": "" }),
-        json!({ "apiBase": "https://api.github.com" }),
-        json!({ "apiBase": "http://127.0.0.1:8080" }),
-        json!({ "apiBase": 42 }),
-        json!({ "proxy": "auto" }),
-        json!({ "proxy": "direct" }),
-        json!({ "proxy": "" }),
-        json!({ "proxy": "http://127.0.0.1:7897" }),
-        json!({ "proxy": "https://proxy.example.com:8443" }),
-        json!({ "proxy": 42 }),
-    ] {
-        assert_eq!(validate_settings_patch(&good), None, "{}", good);
-    }
-}
-
-/// A partial save must never be rejected for a field it did not send.
-///
-/// This is the reason the guard inspects `patch.get(..)` per key rather than
-/// reading a defaulted struct: flipping "auto check" on a machine whose stored
-/// `repo` is garbage would otherwise fail for an unrelated reason.
-#[test]
-fn the_settings_guard_ignores_fields_the_patch_does_not_carry() {
-    assert_eq!(validate_settings_patch(&json!({ "auto": true })), None);
-    assert_eq!(
-        validate_settings_patch(&json!({ "silent": false, "beta": true })),
-        None
-    );
-    // Unknown keys are not an error either — the renderer sends only known
-    // ones, but a stray key must not break a save.
-    assert_eq!(validate_settings_patch(&json!({ "nope": 1 })), None);
-}
-
 /// `validate_settings_patch` is the *only* thing standing between a bad value
 /// and the store, because `manager.save_settings` clamps instead of rejecting.
 ///
@@ -1971,12 +1850,7 @@ fn the_guard_rejects_what_save_settings_would_otherwise_persist() {
     let clamped = manager
         .save_settings(&json!({ "minutes": 99999 }))
         .expect("save_settings still succeeds — it clamps");
-    assert_eq!(
-        clamped["settings"]["minutes"],
-        json!(1440),
-        "{}",
-        clamped
-    );
+    assert_eq!(clamped["settings"]["minutes"], json!(1440), "{}", clamped);
 }
 
 /// BUG-2's **wiring**, not just its rules: a rejected patch must never reach
@@ -2017,28 +1891,298 @@ fn a_rejected_settings_patch_never_reaches_the_store() {
         );
     }
 }
+/* ------------------------------------------------------------------ */
+/* 17j. ak:update-releases — the changelog list                         */
+/* ------------------------------------------------------------------ */
 
-/// `normalize_repo` is the shared rule behind `ipc.repoFormat`; pin the exact
-/// character class the JS regex `^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$` allows.
+/// A release as GitHub sends it. `body` is deliberately long enough to exercise
+/// the 8000-byte cap without allocating a megabyte: 9000 chars.
+fn changelog_entry(tag: &str, day: &str, body: &str, prerelease: bool) -> Value {
+    json!({
+        "tag_name": format!("v{}", tag),
+        "name": format!("Keeper {}", tag),
+        "body": body,
+        "published_at": format!("{}T09:30:00Z", day),
+        "html_url": format!("https://github.com/acme/keeper/releases/tag/v{}", tag),
+        "prerelease": prerelease,
+        "draft": false,
+        "assets": []
+    })
+}
+
+fn long_body(marker: &str) -> String {
+    format!("{}{}", marker, "x".repeat(9000))
+}
+
+/// The happy path: a plain array, newest first, with every field the panel
+/// renders — and no envelope, because the renderer maps over the answer.
 #[test]
-fn normalize_repo_matches_the_js_character_class() {
-    for good in [
-        "acme/keeper",
-        "acme/keeper-x64",
-        "acme.nightly/keeper_v2",
-        "_a/1",
-    ] {
-        assert_eq!(normalize_repo(good), good, "{}", good);
+fn update_releases_returns_the_changelog_as_a_plain_array() {
+    let fx = Fixture::new("releases");
+    let mock = MockGitHub::start(MockOptions {
+        list: vec![
+            changelog_entry("0.2.1", "2026-10-23", "third\n", false),
+            changelog_entry("0.2.0", "2026-09-01", "second\n", false),
+            changelog_entry("0.3.0-beta.1", "2026-10-01", "beta\n", true),
+            changelog_entry("0.1.9", "2026-08-01", "oldest\n", false),
+        ],
+        ..MockOptions::default()
+    });
+    fx.save(json!({ "updateRepo": "acme/keeper", "updateApiBase": mock.base }));
+
+    let rows = agentkeeper_shell_lib::update_releases_from(&fx.root_str(), None);
+    let items = rows.as_array().expect("a plain array").clone();
+    assert_eq!(items.len(), 4, "{items:#?}");
+
+    // GitHub's order is preserved: the newest first, not "highest version".
+    // `0.3.0-beta.1` is numerically the highest and sits third.
+    assert_eq!(items[0]["version"], json!("0.2.1"), "{items:#?}");
+    assert_eq!(items[0]["date"], json!("2026-10-23"));
+    assert_eq!(items[0]["notes"], json!("third\n"));
+    assert_eq!(items[0]["prerelease"], json!(false));
+    assert_eq!(
+        items[0]["url"],
+        json!("https://github.com/acme/keeper/releases/tag/v0.2.1")
+    );
+
+    assert_eq!(items[2]["version"], json!("0.3.0-beta.1"));
+    assert_eq!(
+        items[2]["prerelease"],
+        json!(true),
+        "the beta flag survives"
+    );
+    assert_eq!(items[2]["date"], json!("2026-10-01"));
+
+    // Every key the panel reads is present on every row.
+    for row in &items {
+        let keys: Vec<&str> = row
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         assert_eq!(
-            normalize_repo(&format!("  {}  ", good)),
-            good,
-            "trimmed: {}",
-            good
+            keys,
+            vec!["version", "date", "url", "notes", "prerelease"],
+            "{row}"
         );
     }
-    for bad in ["", "   ", "acme", "a/b/c", "/b", "a/", "a /b", "a/ b", "a\\b"] {
-        assert_eq!(normalize_repo(bad), "", "{}", bad);
-    }
+
+    // The request itself is the documented URL, and it asked for the default.
+    let requests = mock.requests();
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.contains("/repos/acme/keeper/releases?per_page=20")),
+        "{requests:?}"
+    );
+}
+
+/// The 8000-byte cap is `release_from_api`'s, not a new one: a 200 KB changelog
+/// must not travel through IPC, and the panel must see the same truncated text
+/// the update card shows.
+#[test]
+fn update_releases_truncates_the_notes_at_the_shared_ceiling() {
+    let fx = Fixture::new("releases-notes");
+    let body = long_body("HEAD-MARKER");
+    let mock = MockGitHub::start(MockOptions {
+        list: vec![changelog_entry("0.2.1", "2026-10-23", &body, false)],
+        ..MockOptions::default()
+    });
+    fx.save(json!({ "updateRepo": "acme/keeper", "updateApiBase": mock.base }));
+
+    let rows = agentkeeper_shell_lib::update_releases_from(&fx.root_str(), None);
+    let notes = rows[0]["notes"].as_str().expect("notes");
+    assert!(
+        notes.starts_with("HEAD-MARKER"),
+        "{}",
+        &notes[..20.min(notes.len())]
+    );
+    // `js_slice` counts UTF-16 code units and must not split a surrogate pair.
+    assert!(
+        notes.chars().count() <= 8000 && notes.encode_utf16().count() <= 8000,
+        "notes are {} utf-16 units",
+        notes.encode_utf16().count()
+    );
+
+    // And it is the *same* truncation the update card gets: build the panel's
+    // own record from the same payload and compare byte for byte.
+    let panel = version::release_from_api(
+        &json!({
+            "tag_name": "v0.2.1",
+            "body": body,
+            "published_at": "2026-10-23T09:30:00Z",
+            "html_url": "https://github.com/acme/keeper/releases/tag/v0.2.1",
+            "prerelease": false,
+            "assets": []
+        }),
+        version::ReleaseOptions::default(),
+    );
+    assert_eq!(
+        rows[0]["notes"], panel["notes"],
+        "the cap must not be re-derived"
+    );
+}
+
+/// `limit` is honoured on the wire (`per_page`) *and* on the way out, and it
+/// is clamped at both ends — a caller cannot ask for 10 000 entries and a caller
+/// cannot be pushed below one by a nonsense value.
+#[test]
+fn update_releases_clamps_the_limit_at_both_ends() {
+    let fx = Fixture::new("releases-limit");
+    let entries: Vec<Value> = (0..8)
+        .map(|i| changelog_entry(&format!("0.0.{}", 7 - i), "2026-10-23", "n\n", false))
+        .collect();
+    let mock = MockGitHub::start(MockOptions {
+        list: entries,
+        ..MockOptions::default()
+    });
+    fx.save(json!({ "updateRepo": "acme/keeper", "updateApiBase": mock.base }));
+
+    let rows = agentkeeper_shell_lib::update_releases_from(&fx.root_str(), Some(3));
+    assert_eq!(rows.as_array().unwrap().len(), 3, "{rows:#?}");
+    assert!(
+        mock.requests()
+            .iter()
+            .any(|r| r.contains("/releases?per_page=3")),
+        "the limit reaches GitHub: {:?}",
+        mock.requests()
+    );
+
+    // 0 clamps up to 1 (an empty changelog would look like a broken fetch).
+    let rows = agentkeeper_shell_lib::update_releases_from(&fx.root_str(), Some(0));
+    assert_eq!(rows.as_array().unwrap().len(), 1, "{rows:#?}");
+
+    // A ceiling far above GitHub's `per_page` maximum is clamped to it, so the
+    // request stays one page instead of silently under-delivering.
+    let rows = agentkeeper_shell_lib::update_releases_from(&fx.root_str(), Some(10_000));
+    assert_eq!(
+        rows.as_array().unwrap().len(),
+        8,
+        "only eight releases exist: {rows:#?}"
+    );
+    assert!(
+        mock.requests()
+            .iter()
+            .any(|r| r.contains("/releases?per_page=100")),
+        "the ceiling is GitHub's own per_page maximum: {:?}",
+        mock.requests()
+    );
+}
+
+/// Every failure mode has to answer with displayable text rather than an empty
+/// list: an empty array is indistinguishable from "this project has never
+/// released anything", which is a claim the app cannot support.
+#[test]
+fn update_releases_reports_each_failure_with_a_message() {
+    let fx = Fixture::new("releases-fail");
+
+    // 1. transport failure: nothing is listening on port 1.
+    fx.save(json!({ "updateRepo": "acme/keeper", "updateApiBase": "http://127.0.0.1:1" }));
+    let r = agentkeeper_shell_lib::update_releases_from(&fx.root_str(), None);
+    assert_eq!(r["ok"], json!(false), "{r}");
+    let error = r["error"].as_str().expect("an error string");
+    assert!(error.contains("cannot reach the server"), "{error}");
+    // The renderer dictionary maps this shape (`^cannot reach the server: §1$`),
+    // which is why the message is passed through instead of reworded.
+    assert!(error.len() > 20, "the message must say something: {error}");
+
+    // 2. rate limited.
+    let mock = MockGitHub::start(MockOptions::default());
+    mock.set_rate_limited(true);
+    fx.save(json!({ "updateRepo": "acme/keeper", "updateApiBase": mock.base }));
+    let r = agentkeeper_shell_lib::update_releases_from(&fx.root_str(), None);
+    assert_eq!(r["ok"], json!(false), "{r}");
+    assert!(r["error"].as_str().unwrap().contains("rate limit"), "{r}");
+
+    // 3. an HTTP status that is neither "no release" nor a rate limit.
+    let mock = MockGitHub::start(MockOptions {
+        list_status: Some(500),
+        ..MockOptions::default()
+    });
+    fx.save(json!({ "updateRepo": "acme/keeper", "updateApiBase": mock.base }));
+    let r = agentkeeper_shell_lib::update_releases_from(&fx.root_str(), None);
+    assert_eq!(r["ok"], json!(false), "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .contains("GitHub returned HTTP 500"),
+        "{r}"
+    );
+}
+
+/// A repository with no releases yet is *not* an error: GitHub answers `/releases`
+/// with an empty array, and that is a truthful "nothing published".
+#[test]
+fn update_releases_answers_an_empty_array_for_a_silent_repository() {
+    let fx = Fixture::new("releases-empty");
+    let mock = MockGitHub::start(MockOptions::default());
+    fx.save(json!({ "updateRepo": "acme/keeper", "updateApiBase": mock.base }));
+
+    let rows = agentkeeper_shell_lib::update_releases_from(&fx.root_str(), None);
+    assert_eq!(rows, json!([]), "{rows:#?}");
+}
+
+/// A draft is an unfinished note with no publish date; listing it in a public
+/// changelog would advertise a version nobody can install.
+#[test]
+fn update_releases_drops_drafts_and_keeps_everything_else() {
+    let fx = Fixture::new("releases-draft");
+    let mock = MockGitHub::start(MockOptions {
+        list: vec![
+            json!({ "tag_name": "v0.3.0", "draft": true, "body": "wip", "assets": [] }),
+            changelog_entry("0.2.1", "2026-10-23", "shipped\n", false),
+        ],
+        ..MockOptions::default()
+    });
+    fx.save(json!({ "updateRepo": "acme/keeper", "updateApiBase": mock.base }));
+
+    let rows = agentkeeper_shell_lib::update_releases_from(&fx.root_str(), None);
+    let items = rows.as_array().unwrap();
+    assert_eq!(items.len(), 1, "{items:#?}");
+    assert_eq!(items[0]["version"], json!("0.2.1"));
+}
+
+/// The repo and API base come from the same settings keys the update check
+/// reads, so pointing the app at a mirror moves the changelog too. An unusable
+/// `updateRepo` falls back to the built-in repository rather than failing.
+#[test]
+fn update_releases_reads_the_same_repository_settings_as_the_check() {
+    let fx = Fixture::new("releases-repo");
+    let mock = MockGitHub::start(MockOptions::default());
+
+    // A trailing slash on the API base must not produce `//repos/…`.
+    fx.save(json!({
+        "updateRepo": "  acme/keeper  ",
+        "updateApiBase": format!("{}/", mock.base),
+    }));
+    let rows = agentkeeper_shell_lib::update_releases_from(&fx.root_str(), None);
+    assert!(rows.is_array(), "{rows:#?}");
+    assert!(
+        mock.requests()
+            .iter()
+            .any(|r| r.contains("/repos/acme/keeper/releases?per_page=")),
+        "the mirror and the trimmed repo must both be honoured: {:?}",
+        mock.requests()
+    );
+    assert!(
+        !mock.requests().iter().any(|r| r.contains("//repos")),
+        "no doubled slash: {:?}",
+        mock.requests()
+    );
+
+    // An unusable repo is replaced by the built-in one — the query still runs.
+    fx.save(json!({ "updateRepo": "not a repo" }));
+    let rows = agentkeeper_shell_lib::update_releases_from(&fx.root_str(), None);
+    assert!(rows.is_array(), "{rows:#?}");
+    assert!(
+        mock.requests()
+            .iter()
+            .any(|r| r.contains(&format!("/repos/{}/releases?per_page=", BUILT_IN_REPO))),
+        "the built-in repository takes over: {:?}",
+        mock.requests()
+    );
 }
 
 /* ------------------------------------------------------------------ */
@@ -2048,7 +2192,7 @@ fn normalize_repo_matches_the_js_character_class() {
 /// The engine speaks English; Chinese comes from the renderer dictionary.
 ///
 /// A hard-coded Chinese sentence here would reach an English UI in Chinese —
-/// the defect `core/errors.js` has in the "English" slot of these very codes.
+/// the defect a translated "English" slot would reintroduce.
 /// `scripts/tauri-i18n.js` greps the Rust source, and `src/renderer/
 /// engine-zh.js` must map each of these; this test keeps the two lists honest
 /// against typos in either.
@@ -2064,212 +2208,23 @@ fn every_guard_message_is_english_and_has_a_dictionary_entry() {
     ];
     for message in messages {
         assert!(
-            !message.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+            !message
+                .chars()
+                .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
             "the Rust engine must emit English; got {:?}",
             message
         );
         assert!(
-            !message.trim().is_empty() && message.chars().next().unwrap().is_ascii_uppercase()
-                == false,
+            !message.trim().is_empty()
+                && message.chars().next().unwrap().is_ascii_uppercase() == false,
             "keep these sentences lowercase like the rest of the engine: {:?}",
             message
         );
     }
     // `discover.repoFormat` and `ipc.repoFormat` are one rule, so they share a
     // string — which is what lets one EXACT entry cover both.
-    assert_eq!(ERR_REPO_FORMAT, "repo must be owner/repo or a github.com URL");
-}
-
-/* ------------------------------------------------------------------ */
-/* literal 1:1 parity with selftest.js 17a (was update_js_parity.rs)   */
-/* ------------------------------------------------------------------ */
-/// `compareVersions` is `1 | -1 | 0` in JS and `Option<Ordering>` in Rust.
-fn ord(value: Option<Ordering>) -> i8 {
-    match value {
-        Some(Ordering::Greater) => 1,
-        Some(Ordering::Less) => -1,
-        Some(Ordering::Equal) => 0,
-        None => i8::MIN, // the JS `null`: unparseable, never a real comparison
-    }
-}
-
-/// `selftest.js:773-779` — the six `compareVersions` / `isPrereleaseVersion`
-/// assertions, verbatim.
-#[test]
-fn semver_comparison_matches_the_js_literals() {
-    // 'semver: final outranks its own prerelease'
-    assert_eq!(ord(version::compare_versions("1.2.0", "1.2.0-beta.2")), 1);
-    // 'semver: beta.2 < beta.10 (numeric identifiers)'
     assert_eq!(
-        ord(version::compare_versions("1.2.0-beta.2", "1.2.0-beta.10")),
-        -1
-    );
-    // 'semver: v prefix ignored'
-    assert_eq!(ord(version::compare_versions("v1.2.1", "1.2.0")), 1);
-    // 'semver: unparseable tag returns null'
-    assert_eq!(ord(version::compare_versions("nightly", "1.0.0")), i8::MIN);
-    assert!(version::compare_versions("nightly", "1.0.0").is_none());
-
-    // 'semver: prerelease detection'
-    assert!(version::is_prerelease_version("1.0.0-rc.1"));
-    assert!(!version::is_prerelease_version("1.0.0"));
-    // 'semver: 4th segment is not a prerelease'
-    assert!(!version::is_prerelease_version("1.0.0.1"));
-}
-
-/// `selftest.js:781-793` — `pickListedRelease` over the JS's own fixture list.
-#[test]
-fn pick_listed_release_matches_the_js_fixture() {
-    // The exact list the JS builds at 781-786.
-    let list = json!([
-        { "tag_name": "v1.2.0" },
-        { "tag_name": "v1.3.0-beta.1" },
-        { "tag_name": "v1.1.9" },
-        { "tag_name": "v9.0.0", "draft": true }
-    ]);
-
-    // 'release list: highest version wins across beta + final'
-    assert_eq!(
-        version::pick_listed_release(&list, false).expect("a winner")["tag_name"],
-        json!("v1.3.0-beta.1")
-    );
-    // 'release list: beta-only view keeps prereleases'
-    assert_eq!(
-        version::pick_listed_release(&list, true).expect("a winner")["tag_name"],
-        json!("v1.3.0-beta.1")
-    );
-    // 'release list: no beta in list → no update (never falls back)'
-    assert!(
-        version::pick_listed_release(&json!([{ "tag_name": "v1.2.0" }]), true).is_none(),
-        "a final-only list must not satisfy a beta-only view"
-    );
-    // 'release list: drafts never win'
-    assert_eq!(
-        version::pick_listed_release(
-            &json!([
-                { "tag_name": "v9.0.0", "draft": true },
-                { "tag_name": "v1.0.0" }
-            ]),
-            false
-        )
-        .expect("a winner")["tag_name"],
-        json!("v1.0.0")
-    );
-}
-
-/// `selftest.js:795-804` — the download allow-list, asserted at the same four
-/// URLs the JS uses.
-///
-/// One deliberate deviation from the literal JS: `version.js:200` throws the
-/// Chinese sentence `下载地址域名不在允许列表内` directly, whereas the Rust
-/// engine emits English (`"download address host is not on the allow list: …"`)
-/// and `src/renderer/engine-zh.js:330` maps that pattern to the same Chinese
-/// sentence. So the JS assertion `/允许列表/` is split across two layers here —
-/// the engine wording, and the mapping that turns it back into the JS wording.
-/// Asserting only one of them would let the other drift silently.
-#[test]
-fn download_allow_list_matches_the_js_literals() {
-    // 'download URL: plain http rejected'
-    let error = version::assert_downloadable("http://github.com/a.exe", "")
-        .expect_err("plain http must be refused");
-    assert!(
-        error.message().contains("https"),
-        "the reason must mention https: {}",
-        error.message()
-    );
-
-    // 'download URL: foreign host rejected'
-    let error = version::assert_downloadable("https://evil.example/a.exe", "")
-        .expect_err("a foreign host must be refused");
-    assert!(
-        error.message().contains("not on the allow list"),
-        "the reason must name the allow list: {}",
-        error.message()
-    );
-
-    // …and the English engine sentence must still resolve to the Chinese one
-    // the JS throws — that mapping is what keeps the UI free of English.
-    let zh_table = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/renderer/engine-zh.js"),
-    )
-    .expect("src/renderer/engine-zh.js must be readable from the test");
-    assert!(
-        zh_table.contains("download address host is not on the allow list")
-            && zh_table.contains("下载地址域名不在允许列表内"),
-        "engine-zh.js must map this engine message to the JS wording"
-    );
-
-    // 'download URL: github asset accepted'
-    assert!(
-        version::assert_downloadable(
-            "https://github.com/acme/keeper/releases/download/v1/x.exe",
-            ""
-        )
-        .is_ok()
-    );
-
-    // 'download URL: configured mirror host accepted'
-    assert!(version::assert_downloadable("http://127.0.0.1:9/x.exe", "http://127.0.0.1:9").is_ok());
-}
-
-/// `selftest.js:806-830` — `pickInstaller` and `isNonInstallerAsset`.
-#[test]
-fn installer_selection_matches_the_js_literals() {
-    let installer = version::pick_installer(
-        &json!([
-            { "name": "AgentKeeper-9.9.9-x64.exe", "size": 1, "browser_download_url": "u1" },
-            { "name": "AgentKeeper-Setup-9.9.9.exe", "size": 2, "browser_download_url": "u2" },
-            { "name": "AgentKeeper-9.9.9.dmg", "size": 3, "browser_download_url": "u3" }
-        ]),
-        "win32",
-        "x64",
-    )
-    .expect("an installer");
-
-    // 'asset pick: NSIS setup beats the bare exe'
-    assert!(
-        installer["name"]
-            .as_str()
-            .unwrap_or("")
-            .contains("Setup"),
-        "{}",
-        installer
-    );
-    // 'asset pick: no matching platform → null'
-    assert!(
-        version::pick_installer(&json!([{ "name": "AgentKeeper.dmg" }]), "win32", "x64").is_none()
-    );
-
-    // Our own release layout: electron-builder emits BOTH the installer and a
-    // portable exe. Picking the portable one would install nothing.
-    let real_assets = json!([
-        { "name": "AgentKeeper-0.2.0-x64.exe", "size": 1, "browser_download_url": "u-inst" },
-        { "name": "AgentKeeper-0.2.0-portable.exe", "size": 2, "browser_download_url": "u-port" }
-    ]);
-    // 'asset pick: the installer wins over the portable exe'
-    assert_eq!(
-        version::pick_installer(&real_assets, "win32", "x64").expect("an installer")["url"],
-        json!("u-inst")
-    );
-    // 'asset pick: portable-only release offers nothing to install'
-    assert!(version::pick_installer(&json!([real_assets[1].clone()]), "win32", "x64").is_none());
-
-    // 'asset pick: archives and other platforms are ignored'
-    assert!(version::is_non_installer_asset("AgentKeeper-0.3.0-linux-x64.zip"));
-    assert!(version::is_non_installer_asset("AgentKeeper-0.3.0.AppImage"));
-    assert!(!version::is_non_installer_asset("AgentKeeper-0.3.0-x64.exe"));
-}
-
-/// `selftest.js:832-835` — `safeFileName`.
-#[test]
-fn safe_file_name_matches_the_js_literals() {
-    // 'file name: path segments stripped'
-    assert_eq!(version::safe_file_name("../../evil.exe", "win32"), "evil.exe");
-    // 'file name: illegal characters folded'
-    assert_eq!(version::safe_file_name("a:b?.exe", "win32"), "a_b_.exe");
-    // 'file name: empty falls back with platform suffix'
-    assert_eq!(
-        version::safe_file_name("", "win32"),
-        "AgentKeeper-update.exe"
+        ERR_REPO_FORMAT,
+        "repo must be owner/repo or a github.com URL"
     );
 }

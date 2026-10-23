@@ -1,42 +1,36 @@
 //! IPC / data contract, asset lifecycle, project registry and the format layer.
 //!
-//! Merged from `contract.rs`, `assets.rs`, `registry.rs` and `formats.rs`; each
-//! section keeps a banner so a failing test can still be traced to the file it
-//! came from. All four had a doc header of their own; what they said is
-//! condensed here, because it is the reason the tests are shaped the way they
-//! are.
-//!
 //! * contract — renderer-facing response shapes, i.e. the part of the suite that
-//!   exists purely to stop an envelope from changing under the UI. Port of
-//!   `scripts/ipc-contract-test.js` sections 1-7, 9-11 and the settings / store
-//!   sections of `scripts/selftest.js`. The `#[tauri::command]` fns in `lib.rs`
+//!   exists purely to stop an envelope from changing under the UI. The suite
+//!   covers the IPC contract sections 1-7, 9-11 and the settings / store
+//!   sections. The `#[tauri::command]` fns in `lib.rs`
 //!   are private and take a `tauri::AppHandle`, so an integration test cannot
 //!   call them: each test calls *the same core functions the command calls* and,
 //!   where the command adds envelope logic of its own (a clamp, a filter, a fixed
-//!   key list), reproduces those few lines with a comment naming the source line.
+//!   key list), reproduces those few lines with a comment naming the command.
 //!   The invariant under test is the shape, which is what the renderer reads.
 //! * assets — scan → read asset → save → rescan, and the write gates that sit
-//!   between them. Port of `scripts/selftest.js` sections 4-8c, 11, 14 and
-//!   `scripts/ipc-contract-test.js` sections 1-7. Everything runs in a temp "user
+//!   between them. Covers the asset lifecycle and the format layer:
+//!   sections 1-7. Everything runs in a temp "user
 //!   home" plus a temp store root; nothing touches the real profile.
 //! * registry — add / remove / list / seed / resolve and the `projects.json`
-//!   byte shape. Port of `ipc-contract-test.js` section 9 and the
-//!   `ProjectRegistry` behaviours `selftest.js` section 5 relies on throughout.
+//! byte shape. Covers the
+//! `ProjectRegistry` behaviours the rest of the suite relies on throughout.
 //! * formats — YAML, frontmatter and JSONC: the format layer the write path is
-//!   built on. Port of `selftest.js` sections 1 and 2. These are pure functions —
+//! built on. These are pure functions —
 //!   no store, no singleton, no filesystem — so they need no temp root. TOML
 //!   section surgery is *not* repeated here: `core::toml_splice`'s unit tests
 //!   assert the same fixtures (and more) as exact strings, so the integration
 //!   copies were pure duplication.
 //!
 //! `core::registry` and `core::assets` are process-global singletons (they stand
-//! in for the JS `ProjectRegistry` instance and `Keeper.lastScan`), so any test
+//! in for the registry instance and the last scan), so any test
 //! that binds or seeds them holds `common::serial()` first.
 
 mod common;
 
 use agentkeeper_shell_lib::core::keeper::Keeper;
-use agentkeeper_shell_lib::core::store::{Op, Store};
+use agentkeeper_shell_lib::core::store::Store;
 use agentkeeper_shell_lib::core::update::{manager, version};
 use agentkeeper_shell_lib::core::{
     assets, discover, frontmatter, jsonc, registry, scan, settings, store, yaml,
@@ -47,7 +41,7 @@ use std::path::PathBuf;
 use common::{cleanup, exists, join, read, temp_root, write};
 
 /* ------------------------------------------------------------------ */
-/* renderer-facing contract (was tests/contract.rs)                    */
+/* renderer-facing contract                                            */
 /* ------------------------------------------------------------------ */
 /// A store root plus the temp dir that owns it.
 struct Fixture {
@@ -59,7 +53,7 @@ impl Fixture {
     fn new(tag: &str) -> Fixture {
         let dir = temp_root(tag);
         let root = store::native_str(&dir);
-        settings::ensure_store(&root, false).expect("ensure_store");
+        settings::ensure_store(&root).expect("ensure_store");
         Fixture { dir, root }
     }
     fn path(&self, parts: &[&str]) -> String {
@@ -77,10 +71,10 @@ impl Drop for Fixture {
 /* settings                                                            */
 /* ------------------------------------------------------------------ */
 
-// ipc-contract-test.js §9 "get-settings returns the defaults" /
-// selftest.js "settings defaults are complete".
+// The defaults come back as a flat object:
+// "settings defaults are complete".
 //
-// `ak:get-settings` is `store.readSettings()` verbatim — a flat object, never
+// `ak:get-settings` reads settings verbatim — a flat object, never
 // an `{ok, settings}` envelope.
 #[test]
 fn get_settings_is_a_flat_defaults_object() {
@@ -112,14 +106,24 @@ fn get_settings_is_a_flat_defaults_object() {
         keys
     );
 
-    // `sandbox` is not a settings key in either build: Electron seeds it from
-    // the env and mirrors toggles into meta.json (core/settings.rs docs).
+    // `sandbox` was a session-scoped flag, never a settings key; the whole
+    // feature is retired, so the key must not reappear here.
     assert!(s.get("sandbox").is_none(), "sandbox is not a settings key");
 
-    // Keys the JS build grew and then removed. They must not come back, or a
+    // Keys that are gone. They must not come back, or a
     // stale settings.json starts controlling the write path again.
-    for gone in ["keepBackups", "autoPrune", "gitBackup", "updateManifestUrl", "marketplaces"] {
-        assert!(s.get(gone).is_none(), "{} was removed and must stay removed", gone);
+    for gone in [
+        "keepBackups",
+        "autoPrune",
+        "gitBackup",
+        "updateManifestUrl",
+        "marketplaces",
+    ] {
+        assert!(
+            s.get(gone).is_none(),
+            "{} was removed and must stay removed",
+            gone
+        );
     }
 
     assert_eq!(s["showLocalStats"], json!(true));
@@ -127,7 +131,7 @@ fn get_settings_is_a_flat_defaults_object() {
     assert_eq!(s["updateCheckMinutes"], json!(20));
 }
 
-// selftest.js "readSettings ignores a value whose type does not match the
+// A value whose type does not match the
 // default" — a hand-edited file must not be able to schedule a check every
 // "abc" minutes.
 #[test]
@@ -149,15 +153,30 @@ fn a_hand_edited_settings_file_cannot_change_a_value_type() {
     );
 
     let s = settings::read(&fx.root);
-    assert_eq!(s["lang"], json!("auto"), "type mismatch falls back to the default");
+    assert_eq!(
+        s["lang"],
+        json!("auto"),
+        "type mismatch falls back to the default"
+    );
     assert_eq!(s["updateCheckMinutes"], json!(20));
-    assert_eq!(s["theme"], json!("dark"), "same-type overrides are honoured");
-    assert_eq!(s["updateCheck"], json!(true), "null never overrides a boolean");
-    assert!(s.get("unknownKey").is_none(), "unknown keys never reach the renderer");
+    assert_eq!(
+        s["theme"],
+        json!("dark"),
+        "same-type overrides are honoured"
+    );
+    assert_eq!(
+        s["updateCheck"],
+        json!(true),
+        "null never overrides a boolean"
+    );
+    assert!(
+        s.get("unknownKey").is_none(),
+        "unknown keys never reach the renderer"
+    );
 }
 
-// ipc-contract-test.js §9 "save-settings returns the ok envelope" +
-// selftest.js "saveSettings ignores unknown keys".
+// A save returns the ok envelope, and
+// "saveSettings ignores unknown keys".
 #[test]
 fn save_settings_returns_ok_plus_settings_and_filters_the_patch() {
     let fx = Fixture::new("settings-save");
@@ -176,27 +195,44 @@ fn save_settings_returns_ok_plus_settings_and_filters_the_patch() {
     assert_eq!(r["ok"], json!(true), "{}", r);
     let saved = &r["settings"];
     assert!(saved.is_object(), "the envelope carries the new settings");
-    assert!(r.get("error").is_none(), "a successful save has no error field");
+    assert!(
+        r.get("error").is_none(),
+        "a successful save has no error field"
+    );
 
     assert_eq!(saved["lang"], json!("zh"));
     assert_eq!(saved["updateCheckMinutes"], json!(45));
-    assert_eq!(saved["updateCheck"], json!(true), "the type mismatch was ignored");
-    assert!(saved.get("notAKey").is_none(), "unknown keys are dropped, not stored");
+    assert_eq!(
+        saved["updateCheck"],
+        json!(true),
+        "the type mismatch was ignored"
+    );
+    assert!(
+        saved.get("notAKey").is_none(),
+        "unknown keys are dropped, not stored"
+    );
 
-    // The write reached disk with the JS byte shape: 2-space pretty + "\n".
+    // The write reached disk with the fixed byte shape: 2-space pretty + "\n".
     let on_disk = common::read(&fx.path(&["settings.json"]));
     assert!(on_disk.ends_with("\n"), "settings.json ends with a newline");
-    assert!(on_disk.contains("\n  \"lang\": \"zh\""), "two-space indent: {}", on_disk);
-    assert_eq!(settings::read(&fx.root)["lang"], json!("zh"), "and reads back");
+    assert!(
+        on_disk.contains("\n  \"lang\": \"zh\""),
+        "two-space indent: {}",
+        on_disk
+    );
+    assert_eq!(
+        settings::read(&fx.root)["lang"],
+        json!("zh"),
+        "and reads back"
+    );
 }
 
-// selftest.js "every settings save appends one audit record".
+// Every settings save appends one audit record.
 //
-// Divergence worth knowing: JS `core/store.js:157` logs
-// `Object.keys(patch).join(',')` — *every* submitted key, including ones it
-// just ignored. Rust logs only the keys it actually applied. The record's
-// `action`/`status`/`kind` are identical, so the Activity page renders the
-// same; only `assetName` can differ. Reported, not "fixed" here.
+// Worth knowing: a settings save logs only the keys it actually applied, so
+// `assetName` is narrower than the submitted patch. The record's
+// `action`/`status`/`kind` are what the Activity page reads, so the page
+// renders the same; only `assetName` can differ.
 #[test]
 fn save_settings_appends_one_audit_record() {
     let fx = Fixture::new("settings-audit");
@@ -213,100 +249,65 @@ fn save_settings_appends_one_audit_record() {
 }
 
 /* ------------------------------------------------------------------ */
-/* sandbox toggle                                                      */
+/* store bootstrap                                                     */
 /* ------------------------------------------------------------------ */
 
-// ipc-contract-test.js §10 "set-sandbox returns ok/sandbox/note".
-#[test]
-fn set_sandbox_returns_the_flag_and_a_note_and_mirrors_it_into_meta_json() {
-    let fx = Fixture::new("sandbox-toggle");
-
-    // `ak:sandbox` (lib.rs:357-370) — the only logic in the command beyond the
-    // core call is the two fixed note strings.
-    let shape = |on: bool| {
-        settings::set_sandbox_meta(&fx.root, on);
-        json!({
-            "ok": true,
-            "sandbox": on,
-            "note": if on {
-                "all writes are routed to the sandbox tree"
-            } else {
-                "writes now hit real agent directories"
-            }
-        })
-    };
-
-    let on = shape(true);
-    assert_eq!(on["ok"], json!(true));
-    assert_eq!(on["sandbox"], json!(true));
-    assert_eq!(on["note"], json!("all writes are routed to the sandbox tree"));
-
-    let off = shape(false);
-    assert_eq!(off["sandbox"], json!(false));
-    assert_eq!(off["note"], json!("writes now hit real agent directories"));
-
-    // meta.json is the mirror external inspectors read (core/settings.rs:319).
-    let meta: Value = serde_json::from_str(&common::read(&fx.path(&["meta.json"]))).expect("meta.json");
-    assert_eq!(meta["version"], json!(1));
-    assert_eq!(meta["sandbox"], json!(false), "the last toggle wins");
-    assert!(meta.get("createdAt").is_some(), "meta.json keeps its createdAt");
-}
-
-// selftest.js "ensure creates the store tree" — sandbox/, backups/, an empty
-// audit.jsonl and a meta.json, all of which later code assumes exist.
+// "ensure creates the store tree" — an empty audit.jsonl and a meta.json,
+// all of which later code assumes exist.
 #[test]
 fn ensure_store_creates_the_tree_the_rest_of_the_app_assumes() {
     let fx = Fixture::new("ensure-store");
 
-    for part in ["sandbox", "backups"] {
-        assert!(
-            std::path::Path::new(&fx.path(&[part])).is_dir(),
-            "{} must exist",
-            part
-        );
-    }
-    assert_eq!(common::read(&fx.path(&["audit.jsonl"])), "", "audit.jsonl starts empty");
+    // No backup tree: the write path keeps its undo state in memory and nothing
+    // on disk, so a first launch must not manufacture a `backups/`.
+    assert!(
+        !std::path::Path::new(&fx.path(&["backups"])).exists(),
+        "no backups/ may be created"
+    );
+    assert_eq!(
+        common::read(&fx.path(&["audit.jsonl"])),
+        "",
+        "audit.jsonl starts empty"
+    );
 
     // Idempotent: bootstrap runs on every startup and on every settings write.
-    settings::ensure_store(&fx.root, true).expect("second ensure_store");
-    assert_eq!(common::read(&fx.path(&["audit.jsonl"])), "", "and does not truncate it");
-    write(&fx.path(&["audit.jsonl"]), "{}\n");
-    settings::ensure_store(&fx.root, true).expect("third ensure_store");
-    assert_eq!(common::read(&fx.path(&["audit.jsonl"])), "{}\n");
-}
+    settings::ensure_store(&fx.root).expect("second ensure_store");
+    assert_eq!(
+        common::read(&fx.path(&["audit.jsonl"])),
+        "",
+        "and does not truncate it"
+    );
+    write(
+        &fx.path(&["audit.jsonl"]),
+        "{}
+",
+    );
+    settings::ensure_store(&fx.root).expect("third ensure_store");
+    assert_eq!(
+        common::read(&fx.path(&["audit.jsonl"])),
+        "{}
+"
+    );
 
-// `AGENTKEEPER_SANDBOX` seeds the flag: default on, `"0"` off.
-//
-// Env vars are process-global, so this holds the suite's serial lock and
-// restores the previous value.
-#[test]
-fn sandbox_defaults_to_on_and_only_zero_disables_it() {
-    let _lock = common::serial();
-    let previous = std::env::var("AGENTKEEPER_SANDBOX").ok();
-
-    std::env::set_var("AGENTKEEPER_SANDBOX", "0");
-    assert_eq!(settings::sandbox_from_env(), false, "'0' disables the sandbox");
-
-    std::env::set_var("AGENTKEEPER_SANDBOX", "1");
-    assert_eq!(settings::sandbox_from_env(), true);
-
-    std::env::set_var("AGENTKEEPER_SANDBOX", "");
-    assert_eq!(settings::sandbox_from_env(), true, "an empty value is not '0'");
-
-    std::env::remove_var("AGENTKEEPER_SANDBOX");
-    assert_eq!(settings::sandbox_from_env(), true, "unset means on");
-
-    match previous {
-        Some(v) => std::env::set_var("AGENTKEEPER_SANDBOX", v),
-        None => std::env::remove_var("AGENTKEEPER_SANDBOX"),
-    }
+    let meta: Value =
+        serde_json::from_str(&common::read(&fx.path(&["meta.json"]))).expect("meta.json");
+    assert_eq!(meta["version"], json!(1));
+    assert!(
+        meta.get("createdAt").is_some(),
+        "meta.json keeps its createdAt"
+    );
+    // No staging layer is created any more: writes land in the real tree.
+    assert!(
+        !std::path::Path::new(&fx.path(&["sandbox"])).exists(),
+        "the retired staging tree must not be recreated"
+    );
 }
 
 /* ------------------------------------------------------------------ */
 /* collections the renderer iterates directly                          */
 /* ------------------------------------------------------------------ */
 
-// ipc-contract-test.js §3 "list-projects returns a bare array". Wrapping it in
+// Listing projects returns a bare array. Wrapping it in
 // `{ok, projects}` made app.js treat the object as the list.
 #[test]
 fn list_projects_is_a_bare_array_of_project_objects() {
@@ -319,11 +320,9 @@ fn list_projects_is_a_bare_array_of_project_objects() {
     let added = registry::add(&project, Some("Contract Project"));
     assert_eq!(added["ok"], json!(true), "{}", added);
 
-    // `ak:list-projects` (lib.rs) used to wrap `registry.list()` in
-    // `Value::Array` and nothing else — no `{ok, projects}` envelope. The
-    // command itself was deleted on 2026-10-20 (the renderer never called it;
-    // projects are added through `pick_project` and read through `scan`), so
-    // what this asserts now is the shape of the only remaining producer.
+    // `registry.list()` returns a bare array — no `{ok, projects}` envelope.
+    // Projects are added through `pick_project` and read through `scan`, so
+    // this asserts the shape of the only producer.
     let list = registry::list();
     assert_eq!(list.len(), 1, "{:?}", list);
     for key in ["id", "name", "dir"] {
@@ -332,7 +331,7 @@ fn list_projects_is_a_bare_array_of_project_objects() {
     assert_eq!(list[0]["name"], json!("Contract Project"));
 }
 
-// ipc-contract-test.js §4 "audit returns an array" — `audit.filter(...)` runs
+// The audit returns an array — `audit.filter(...)` runs
 // straight on it, newest first, with the IPC-side limit clamp.
 #[test]
 fn audit_is_a_bare_array_newest_first_with_filters() {
@@ -353,100 +352,87 @@ fn audit_is_a_bare_array_newest_first_with_filters() {
     assert_eq!(rows[0]["at"], json!("c"), "newest first");
     assert_eq!(rows[2]["at"], json!("a"));
 
-    assert_eq!(settings::read_audit(&fx.root, 300, Some("mcp"), None, None).len(), 1);
-    assert_eq!(settings::read_audit(&fx.root, 300, None, Some("claude"), None).len(), 1);
-    assert_eq!(settings::read_audit(&fx.root, 300, None, None, Some("p1")).len(), 2);
+    assert_eq!(
+        settings::read_audit(&fx.root, 300, Some("mcp"), None, None).len(),
+        1
+    );
+    assert_eq!(
+        settings::read_audit(&fx.root, 300, None, Some("claude"), None).len(),
+        1
+    );
+    assert_eq!(
+        settings::read_audit(&fx.root, 300, None, None, Some("p1")).len(),
+        2
+    );
     assert_eq!(
         settings::read_audit(&fx.root, 300, Some("skill"), None, Some("p2")).len(),
         0,
         "filters intersect"
     );
-    assert_eq!(settings::read_audit(&fx.root, 2, None, None, None).len(), 2, "limit applies");
+    assert_eq!(
+        settings::read_audit(&fx.root, 2, None, None, None).len(),
+        2,
+        "limit applies"
+    );
 }
 
-// ipc-contract-test.js §5 "transactions returns an array". One tx.json per
-// transaction, `hasBackup` stamped on, newest first.
+// A profile written by an older build already has a `backups/` directory full
+// of old transaction copies. That tree is retired, not merely unused: nothing in
+// this build can read it, so leaving a folder that looks like "undo" would be a
+// lie about what the app can do. `ensure_store` removes it, and must keep doing
+// so across repeated launches.
 #[test]
-fn transactions_are_a_bare_array_carrying_has_backup() {
+fn ensure_store_removes_a_legacy_backups_directory() {
+    let fx = Fixture::new("ensure-legacy");
+    let legacy = fx.path(&["backups", "tx-0000000001-aa", "tx.json"]);
+    write(&legacy, r#"{"txId":"tx-0000000001-aa"}"#);
+    assert!(std::path::Path::new(&legacy).is_file());
+
+    settings::ensure_store(&fx.root).expect("ensure_store over a legacy tree");
+    assert!(
+        !std::path::Path::new(&fx.path(&["backups"])).exists(),
+        "the retired backup tree must be removed"
+    );
+
+    settings::ensure_store(&fx.root).expect("and again");
+    assert!(
+        !std::path::Path::new(&fx.path(&["backups"])).exists(),
+        "and must not come back"
+    );
+    // The files the app actually reads survive the cleanup.
+    assert!(std::path::Path::new(&fx.path(&["audit.jsonl"])).is_file());
+}
+
+// A write mints no directory of any kind; the journal line is the only trace.
+#[test]
+fn a_write_leaves_only_an_audit_line_and_no_transaction_directory() {
     let fx = Fixture::new("contract-tx");
-    for (tx, at) in [("tx-0000000001-aa", "1"), ("tx-0000000003-cc", "3"), ("tx-0000000002-bb", "2")] {
-        write(
-            &fx.path(&["backups", tx, "tx.json"]),
-            &format!(r#"{{"txId":"{}","at":"{}","kind":"skill"}}"#, tx, at),
-        );
-    }
-    // A directory with no tx.json is not a transaction.
-    write(&fx.path(&["backups", "tx-0000000004-dd", "stray.txt"]), "x");
+    let file = fx.path(&["project", "a.md"]);
 
-    let rows = settings::list_transactions(&fx.root, 120);
-    assert_eq!(rows.len(), 3, "{:?}", rows);
-    assert_eq!(rows[0]["txId"], json!("tx-0000000003-cc"), "newest first");
-    assert_eq!(rows[2]["txId"], json!("tx-0000000001-aa"));
-    for r in &rows {
-        assert_eq!(r["hasBackup"], json!(true), "every listed tx has a backup dir");
-    }
-    assert_eq!(settings::list_transactions(&fx.root, 2).len(), 2, "limit applies");
-}
-
-/* ------------------------------------------------------------------ */
-/* pending                                                             */
-/* ------------------------------------------------------------------ */
-
-// ipc-contract-test.js §6 "pending returns sandbox + changes" and
-// selftest.js §8b "pending change keeps both paths".
-//
-// Note on the shape: the JS handler (`src/main/ipc.js:402-407`) returns
-// `{sandbox, changes:[{op, real, shadow, bytes, at}]}` — there is no `ok`
-// field, and `app.js:408` reads `p.changes || []`. `lib.rs:319-340` matches
-// that. (The migration brief described `{ok, count, changes}`; that is not what
-// either build emits.)
-#[test]
-fn pending_is_sandbox_plus_changes_with_five_keys_each() {
-    let fx = Fixture::new("contract-pending");
-    let store = Store::new(&fx.root, true);
-    let real = fx.path(&["project", ".workbuddy", "skills", "demo", "SKILL.md"]);
-
-    let tx = store.transaction(
-        &[Op::write(&real, "---\nname: demo\n---\nbody\n")],
-        &json!({ "kind": "skill", "action": "create", "assetName": "demo" }),
+    let tx = store::Store::new(&fx.root).transaction(
+        &[store::Op::write(&file, "x\n")],
+        &json!({ "kind": "skill", "action": "create", "assetName": "a" }),
     );
     assert_eq!(tx["ok"], json!(true), "{}", tx);
 
-    // `ak:pending` (lib.rs:324-340): the envelope, mirroring ipc.js:402.
-    let changes: Vec<Value> = store
-        .read_pending()
-        .iter()
-        .map(|c| {
-            json!({
-                "op": c.get("op").cloned().unwrap_or(Value::Null),
-                "real": c.get("real").cloned().unwrap_or(Value::Null),
-                "shadow": c.get("shadow").cloned().unwrap_or(Value::Null),
-                "bytes": c.get("bytes").cloned().unwrap_or(json!(0)),
-                "at": c.get("at").cloned().unwrap_or(Value::Null),
-            })
-        })
-        .collect();
-    let payload = json!({ "sandbox": store.sandbox(), "changes": changes });
-
-    assert!(payload.get("ok").is_none(), "there is no ok field in the JS shape");
-    assert_eq!(payload["sandbox"], json!(true));
-    assert_eq!(payload["changes"].as_array().unwrap().len(), 1);
-
-    let mut keys: Vec<&str> = payload["changes"][0]
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(|s| s.as_str())
-        .collect();
-    keys.sort();
-    assert_eq!(keys, vec!["at", "bytes", "op", "real", "shadow"], "{:?}", keys);
+    assert!(
+        !std::path::Path::new(&fx.path(&["backups"])).exists(),
+        "no backups/ may be created by a write"
+    );
+    let rows = settings::read_audit(&fx.root, 300, None, None, None);
+    assert_eq!(rows.len(), 1, "{:?}", rows);
+    assert_eq!(rows[0]["status"], json!("ok"));
+    assert_eq!(rows[0]["targets"], json!([file]));
+    // `hasBackup` was the flag the Activity page keyed its undo button off; it
+    // must not come back in any other form either.
+    assert!(rows[0].get("hasBackup").is_none(), "{}", rows[0]);
 }
 
 /* ------------------------------------------------------------------ */
 /* single-asset + stats envelopes                                      */
 /* ------------------------------------------------------------------ */
 
-// ipc-contract-test.js §2 "read-asset returns {ok, asset, content}" — exactly
+// Reading an asset returns {ok, asset, content} — exactly
 // three keys; the drawer destructures all three.
 #[test]
 fn read_asset_returns_exactly_ok_asset_and_content() {
@@ -480,8 +466,9 @@ fn read_asset_returns_exactly_ok_asset_and_content() {
     assert_eq!(r["asset"]["id"], json!(id));
 }
 
-// ipc-contract-test.js §11 "local-stats returns ok + counts". Counted from
-// audit.jsonl on every call (lib.rs:615-636); nothing is cached.
+// The local stats return ok + counts. Counted from
+// audit.jsonl on every call; nothing is cached. `rollbacks` is gone — there is
+// no rollback left to count.
 #[test]
 fn local_stats_counts_the_journal() {
     let fx = Fixture::new("contract-stats");
@@ -498,14 +485,15 @@ fn local_stats_counts_the_journal() {
         .join("\n"),
     );
 
-    // `ak:local-stats` (lib.rs:615-636) — the counting lives in the command.
+    // `ak:local-stats` — the counting lives in the command.
     let raw = common::read(&fx.path(&["audit.jsonl"]));
-    let (mut scans, mut writes, mut rollbacks, mut failed) = (0u64, 0u64, 0u64, 0u64);
+    let (mut scans, mut writes, mut failed) = (0u64, 0u64, 0u64);
     for line in raw.split('\n').filter(|l| !l.is_empty()) {
-        let Ok(rec) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(rec) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         match rec.get("action").and_then(|v| v.as_str()) {
             Some("scan") => scans += 1,
-            Some("rollback") => rollbacks += 1,
             Some("apply") => writes += 1,
             _ => {}
         }
@@ -515,14 +503,22 @@ fn local_stats_counts_the_journal() {
     }
     let payload = json!({
         "ok": true,
-        "counts": { "scans": scans, "writes": writes, "rollbacks": rollbacks, "failed": failed }
+        "counts": { "scans": scans, "writes": writes, "failed": failed }
     });
 
     assert_eq!(payload["ok"], json!(true));
     assert_eq!(payload["counts"]["scans"], json!(2));
-    assert_eq!(payload["counts"]["writes"], json!(1), "only 'apply' counts as a write");
-    assert_eq!(payload["counts"]["rollbacks"], json!(1));
+    assert_eq!(
+        payload["counts"]["writes"],
+        json!(1),
+        "only 'apply' counts as a write"
+    );
     assert_eq!(payload["counts"]["failed"], json!(1));
+    assert_eq!(
+        payload["counts"].as_object().unwrap().len(),
+        3,
+        "exactly three counters: a rollback counter would be a lie about the feature"
+    );
 }
 
 /* ------------------------------------------------------------------ */
@@ -533,19 +529,26 @@ fn local_stats_counts_the_journal() {
 // pin here. `UpdateManager` itself is a process-global singleton bound to one
 // root, so its status payload is deliberately not asserted in this suite.
 
-// selftest.js "update repo is normalised" — `owner/repo` only.
+// The update repo is normalised — `owner/repo` only.
 #[test]
 fn update_repo_is_normalised_to_owner_slash_repo() {
-    assert_eq!(manager::normalize_repo("ntc0728/agentkeeper"), "ntc0728/agentkeeper");
+    assert_eq!(
+        manager::normalize_repo("ntc0728/agentkeeper"),
+        "ntc0728/agentkeeper"
+    );
     assert_eq!(manager::normalize_repo("  a/b  "), "a/b", "trimmed");
     assert_eq!(manager::normalize_repo("a/b/c"), "");
     assert_eq!(manager::normalize_repo("a"), "");
     assert_eq!(manager::normalize_repo("a/"), "");
-    assert_eq!(manager::normalize_repo("a b/c"), "", "whitespace inside is rejected");
+    assert_eq!(
+        manager::normalize_repo("a b/c"),
+        "",
+        "whitespace inside is rejected"
+    );
     assert_eq!(manager::normalize_repo("https://github.com/a/b"), "");
 }
 
-// selftest.js "update interval is clamped" — 1..1440 minutes, default 20.
+// The update interval is clamped — 1..1440 minutes, default 20.
 #[test]
 fn update_interval_is_clamped_to_a_day() {
     assert_eq!(manager::clamp_minutes(&json!(20)), 20);
@@ -558,13 +561,20 @@ fn update_interval_is_clamped_to_a_day() {
     // default of 20.
     assert_eq!(manager::clamp_minutes(&json!(null)), manager::MIN_MINUTES);
     assert_eq!(manager::clamp_minutes(&json!("")), manager::MIN_MINUTES);
-    assert_eq!(manager::clamp_minutes(&json!("abc")), manager::DEFAULT_MINUTES);
+    assert_eq!(
+        manager::clamp_minutes(&json!("abc")),
+        manager::DEFAULT_MINUTES
+    );
     assert_eq!(manager::clamp_minutes(&json!({})), manager::DEFAULT_MINUTES);
-    assert_eq!(manager::clamp_minutes(&json!("45")), 45, "a numeric string parses");
+    assert_eq!(
+        manager::clamp_minutes(&json!("45")),
+        45,
+        "a numeric string parses"
+    );
 }
 
-// selftest.js "installer is chosen for this platform" — suffix/keyword rules
-// and the filename sanitiser that install() relies on.
+// The installer is chosen for this platform — suffix/keyword rules
+// and the filename sanitiser the install step relies on.
 #[test]
 fn update_installer_selection_and_file_name_rules() {
     let assets = json!([
@@ -579,13 +589,13 @@ fn update_installer_selection_and_file_name_rules() {
     assert_eq!(win["size"], json!(10), "the asset size is carried through");
     assert!(
         win.get("url").is_some(),
-        "the JS shape always has a url key, even when empty"
+        "the response always has a url key, even when empty"
     );
 
-    // JS quirk, deliberately preserved (`core/update/version.rs` module docs):
-    // `allowedInstallerSuffixes` admits .dmg/.appimage/.deb, but
-    // `isNonInstallerAsset` rejects every name ending in one, so macOS and
-    // Linux never get an installer from `pickInstaller`. The updater hides the
+    // Quirk deliberately preserved (`core/update/version.rs` module docs):
+    // `allowed_installer_suffixes` admits .dmg/.appimage/.deb, but
+    // `is_non_installer_asset` rejects every name ending in one, so macOS and
+    // Linux never get an installer from `pick_installer`. The updater hides the
     // button there instead of downloading something it cannot run.
     assert!(
         version::pick_installer(&assets, "darwin", "arm64").is_none(),
@@ -596,24 +606,41 @@ fn update_installer_selection_and_file_name_rules() {
         "Linux never resolves an installer"
     );
 
-    assert!(version::is_non_installer_asset("AgentKeeper-portable.exe"), "portable installs nothing");
-    assert!(version::is_non_installer_asset("AgentKeeper-win.exe"), "another platform's exe");
+    assert!(
+        version::is_non_installer_asset("AgentKeeper-portable.exe"),
+        "portable installs nothing"
+    );
+    assert!(
+        version::is_non_installer_asset("AgentKeeper-win.exe"),
+        "another platform's exe"
+    );
     assert!(version::is_non_installer_asset("AgentKeeper-1.2.3.zip"));
     assert!(!version::is_non_installer_asset("AgentKeeper-1.2.3.exe"));
 
-    // `safeFileName` — a hostile release name must not escape the download dir.
-    assert_eq!(version::safe_file_name("AgentKeeper-1.2.3.exe", "win32"), "AgentKeeper-1.2.3.exe");
+    // `safe_file_name` — a hostile release name must not escape the download dir.
+    assert_eq!(
+        version::safe_file_name("AgentKeeper-1.2.3.exe", "win32"),
+        "AgentKeeper-1.2.3.exe"
+    );
     let evil = version::safe_file_name("..\\..\\evil.exe", "win32");
     assert!(!evil.contains(".."), "path traversal is stripped: {}", evil);
-    assert!(evil.ends_with("evil.exe"), "the basename survives: {}", evil);
+    assert!(
+        evil.ends_with("evil.exe"),
+        "the basename survives: {}",
+        evil
+    );
 }
 
-// selftest.js "download host allowlist" — only GitHub may serve an installer.
+// The download host allowlist — only GitHub may serve an installer.
 #[test]
 fn update_download_hosts_are_restricted() {
     let api = version::GITHUB_API;
     assert!(
-        version::assert_downloadable("https://github.com/ntc0728/agentkeeper/releases/download/v1/AgentKeeper-1.2.3.exe", api).is_ok(),
+        version::assert_downloadable(
+            "https://github.com/ntc0728/agentkeeper/releases/download/v1/AgentKeeper-1.2.3.exe",
+            api
+        )
+        .is_ok(),
         "a GitHub release asset is allowed"
     );
     assert!(
@@ -630,13 +657,26 @@ fn update_download_hosts_are_restricted() {
     );
 }
 
-// selftest.js "version compare" — semver with prerelease ordering.
+// The version compare — semver with prerelease ordering.
 #[test]
 fn update_versions_compare_semver_with_prereleases() {
-    assert_eq!(version::compare_versions("1.2.3", "1.2.3"), Some(std::cmp::Ordering::Equal));
-    assert_eq!(version::compare_versions("1.2.4", "1.2.3"), Some(std::cmp::Ordering::Greater));
-    assert_eq!(version::compare_versions("1.2.3", "1.10.0"), Some(std::cmp::Ordering::Less));
-    assert_eq!(version::compare_versions("v1.2.3", "1.2.3"), Some(std::cmp::Ordering::Equal), "v-prefix");
+    assert_eq!(
+        version::compare_versions("1.2.3", "1.2.3"),
+        Some(std::cmp::Ordering::Equal)
+    );
+    assert_eq!(
+        version::compare_versions("1.2.4", "1.2.3"),
+        Some(std::cmp::Ordering::Greater)
+    );
+    assert_eq!(
+        version::compare_versions("1.2.3", "1.10.0"),
+        Some(std::cmp::Ordering::Less)
+    );
+    assert_eq!(
+        version::compare_versions("v1.2.3", "1.2.3"),
+        Some(std::cmp::Ordering::Equal),
+        "v-prefix"
+    );
     assert_eq!(
         version::compare_versions("1.2.3-beta.1", "1.2.3"),
         Some(std::cmp::Ordering::Less),
@@ -651,7 +691,7 @@ fn update_versions_compare_semver_with_prereleases() {
 /* discover input handling                                             */
 /* ------------------------------------------------------------------ */
 
-// selftest.js §16 "normalizeRepo" — this is the *discover* normaliser, which
+// `normalizeRepo` — this is the *discover* normaliser, which
 // answers `null` on rejection (the update manager's returns ""). It is the
 // only thing standing between a registry `sourceUrl` and a `git clone`
 // target, so tricky input must not reach the shell.
@@ -673,9 +713,21 @@ fn discover_repo_normalisation_accepts_only_owner_slash_repo() {
         "host case is normalised away, path case is not"
     );
     assert_eq!(discover::normalize_repo("../../etc/passwd"), None);
-    assert_eq!(discover::normalize_repo("https://evil.com/a/b"), None, "not a GitHub host");
-    assert_eq!(discover::normalize_repo("a/b/c"), None, "a third segment is rejected");
-    assert_eq!(discover::normalize_repo(""), None, "empty input is null, not ''");
+    assert_eq!(
+        discover::normalize_repo("https://evil.com/a/b"),
+        None,
+        "not a GitHub host"
+    );
+    assert_eq!(
+        discover::normalize_repo("a/b/c"),
+        None,
+        "a third segment is rejected"
+    );
+    assert_eq!(
+        discover::normalize_repo(""),
+        None,
+        "empty input is null, not ''"
+    );
     assert_eq!(
         discover::normalize_repo("a/b.git.git"),
         Some("a/b.git".to_string()),
@@ -683,7 +735,7 @@ fn discover_repo_normalisation_accepts_only_owner_slash_repo() {
     );
 }
 
-// selftest.js §16 "registry rows normalised" — `shape_registry_response` caps
+// The registry rows are normalised — `shape_registry_response` caps
 // and coerces every field, so a hostile registry answer cannot overflow the
 // Discover page or smuggle a non-repo into `installFromRepo`.
 #[test]
@@ -705,26 +757,55 @@ fn discover_shapes_registry_rows_into_the_renderer_contract() {
     });
     let out = discover::shape_registry_response(&body);
     assert_eq!(out["ok"], json!(true));
-    assert_eq!(out["total"], json!(1), "total comes from the body, not the row count");
+    assert_eq!(
+        out["total"],
+        json!(1),
+        "total comes from the body, not the row count"
+    );
     let rows = out["skills"].as_array().unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["slug"], json!("a-skill"));
-    assert_eq!(rows[0]["name"].as_str().unwrap().len(), 120, "name is capped");
-    assert_eq!(rows[0]["description"].as_str().unwrap().len(), 500, "description is capped");
-    assert_eq!(rows[0]["installs"], json!(12), "a numeric string is coerced");
+    assert_eq!(
+        rows[0]["name"].as_str().unwrap().len(),
+        120,
+        "name is capped"
+    );
+    assert_eq!(
+        rows[0]["description"].as_str().unwrap().len(),
+        500,
+        "description is capped"
+    );
+    assert_eq!(
+        rows[0]["installs"],
+        json!(12),
+        "a numeric string is coerced"
+    );
     assert_eq!(rows[0]["repo"], json!("o/r"), "sourceUrl is normalised");
-    assert_eq!(rows[1]["repo"], Value::Null, "a non-GitHub source yields null");
+    assert_eq!(
+        rows[1]["repo"],
+        Value::Null,
+        "a non-GitHub source yields null"
+    );
     assert_eq!(rows[1]["installs"], json!(0), "a missing count is 0");
 
     // `search_url` — the query is length-capped and form-encoded.
-    let url = discover::search_url(&json!({ "q": "a b&c", "cat": "x", "limit": 1000, "offset": -5 }));
+    let url =
+        discover::search_url(&json!({ "q": "a b&c", "cat": "x", "limit": 1000, "offset": -5 }));
     assert!(url.contains("q=a+b%26c"), "{}", url);
-    assert!(url.contains("limit=100"), "limit is clamped to 100: {}", url);
-    assert!(url.contains("offset=0"), "a negative offset clamps to 0: {}", url);
+    assert!(
+        url.contains("limit=100"),
+        "limit is clamped to 100: {}",
+        url
+    );
+    assert!(
+        url.contains("offset=0"),
+        "a negative offset clamps to 0: {}",
+        url
+    );
 }
 
 /* ------------------------------------------------------------------ */
-/* scan → read → save → rescan (was tests/assets.rs)                   */
+/* scan → read → save → rescan                                         */
 /* ------------------------------------------------------------------ */
 const PROJECT_ID: &str = "proj-demo-aaaaaa";
 
@@ -747,7 +828,10 @@ impl AssetsFixture {
             &join(&home, &[".workbuddy", "skills", "home-skill", "SKILL.md"]),
             "---\nname: home-skill\ndescription: Global fixture skill.\nversion: 1.0.0\n---\n\n# Home\n",
         );
-        write(&join(&home, &[".workbuddy", "MEMORY.md"]), "# Memory\n\nseed line\n");
+        write(
+            &join(&home, &[".workbuddy", "MEMORY.md"]),
+            "# Memory\n\nseed line\n",
+        );
         write(
             &join(&home, &[".workbuddy", "mcp.json"]),
             "{\n  \"mcpServers\": {\n    \"home-db\": {\n      \"command\": \"node\"\n    }\n  }\n}\n",
@@ -755,7 +839,10 @@ impl AssetsFixture {
 
         // A project registered in projects.json, with its own skill and config.
         write(
-            &join(&project_dir, &[".workbuddy", "skills", "proj-skill", "SKILL.md"]),
+            &join(
+                &project_dir,
+                &[".workbuddy", "skills", "proj-skill", "SKILL.md"],
+            ),
             "---\nname: proj-skill\ndescription: Project fixture skill.\n---\n\n# Project\n",
         );
         write(
@@ -773,7 +860,12 @@ impl AssetsFixture {
             ),
         );
 
-        AssetsFixture { dir, home, root, project_dir }
+        AssetsFixture {
+            dir,
+            home,
+            root,
+            project_dir,
+        }
     }
 
     /// Bind the registry singleton to this fixture's store root.
@@ -781,12 +873,12 @@ impl AssetsFixture {
         registry::reload(&self.root);
     }
 
-    fn store(&self, sandbox: bool) -> Store {
-        Store::new(&self.root, sandbox)
+    fn store(&self) -> Store {
+        Store::new(&self.root)
     }
 
-    fn keeper(&self, sandbox: bool) -> Keeper {
-        Keeper::new(self.store(sandbox), &self.home)
+    fn keeper(&self) -> Keeper {
+        Keeper::new(self.store(), &self.home)
     }
 
     fn scan(&self) -> Value {
@@ -812,7 +904,7 @@ impl Drop for AssetsFixture {
 /* scan                                                                */
 /* ------------------------------------------------------------------ */
 
-// selftest.js §4 "found workbuddy skills" / "found memory files" and §5
+// The workbuddy skills and memory files are found, and
 // "project skill found" / "project MCP found (both servers, one file)".
 #[test]
 fn scan_finds_global_and_project_assets() {
@@ -824,11 +916,15 @@ fn scan_finds_global_and_project_assets() {
     let list = payload["assets"].as_array().expect("assets");
     assert!(!list.is_empty(), "the scanner produced assets");
 
-    let global_skill = fx.find(&payload, |a| a["kind"] == "skill" && a["name"] == "home-skill");
+    let global_skill = fx.find(&payload, |a| {
+        a["kind"] == "skill" && a["name"] == "home-skill"
+    });
     assert!(global_skill.is_some(), "global skill found");
     assert_eq!(global_skill.unwrap()["scope"], json!("global"));
 
-    let proj_skill = fx.find(&payload, |a| a["kind"] == "skill" && a["name"] == "proj-skill");
+    let proj_skill = fx.find(&payload, |a| {
+        a["kind"] == "skill" && a["name"] == "proj-skill"
+    });
     assert!(proj_skill.is_some(), "project skill found");
     assert_eq!(proj_skill.unwrap()["scope"], json!("project"));
 
@@ -848,7 +944,7 @@ fn scan_finds_global_and_project_assets() {
     assert!(project_mcps.iter().any(|n| n == "saas-db"));
     assert!(project_mcps.iter().any(|n| n == "saas-logs"));
 
-    // selftest.js §4 "detected >= 1 installed agent"
+    // At least one installed agent is detected
     let installed: Vec<&Value> = payload["agents"]
         .as_array()
         .unwrap()
@@ -862,7 +958,7 @@ fn scan_finds_global_and_project_assets() {
     );
 }
 
-// ipc-contract-test.js §1 "scan payload is cloneable" / "scan agents are
+// The scan payload is cloneable, and the scan agents are
 // cloneable" — the payload must be plain JSON with the keys app.js reads.
 #[test]
 fn scan_payload_carries_exactly_the_keys_the_renderer_reads() {
@@ -871,30 +967,56 @@ fn scan_payload_carries_exactly_the_keys_the_renderer_reads() {
     fx.bind();
 
     let payload = fx.scan();
-    for key in ["assets", "effective", "agents", "projects", "summary", "scannedAt"] {
+    for key in [
+        "assets",
+        "effective",
+        "agents",
+        "projects",
+        "summary",
+        "scannedAt",
+    ] {
         assert!(payload.get(key).is_some(), "payload is missing {}", key);
     }
     for key in ["assets", "effective", "agents", "projects"] {
         assert!(payload[key].is_array(), "{} must be an array", key);
     }
     assert!(payload["scannedAt"].is_string());
-    assert_eq!(payload["summary"]["total"], json!(payload["assets"].as_array().unwrap().len()));
+    assert_eq!(
+        payload["summary"]["total"],
+        json!(payload["assets"].as_array().unwrap().len())
+    );
 
-    // `stripHeavy`: no `raw` on any asset.
+    // The strip step: no `raw` on any asset.
     for a in payload["assets"].as_array().unwrap() {
-        assert!(a.get("raw").is_none(), "raw must be dropped, not nulled: {}", a["id"]);
-        assert!(a["security"].is_array(), "security is always present: {}", a["id"]);
-        // `computeEffective()` clones the assets instead of mutating them, so
-        // `res.assets[i].effective` is undefined in JS and `stripHeavy` maps it
-        // to `null` (`ipc.js:485-489`) — `jsonSafe` keeps nulls, it only drops
+        assert!(
+            a.get("raw").is_none(),
+            "raw must be dropped, not nulled: {}",
+            a["id"]
+        );
+        assert!(
+            a["security"].is_array(),
+            "security is always present: {}",
+            a["id"]
+        );
+        // The effective pass clones the assets instead of mutating them, so
+        // an asset with no `effective` is `undefined` and the strip step maps it
+        // to `null` — the JSON sanitiser keeps nulls, it only drops
         // `undefined`. So `null` here is correct, not a missing key.
-        assert!(a["effective"].is_null(), "assets carry no effective view: {}", a["id"]);
+        assert!(
+            a["effective"].is_null(),
+            "assets carry no effective view: {}",
+            a["id"]
+        );
     }
 
     // The reduced `effective` lives on the parallel `effective` array
-    // (`ipc.js:485-489`): exactly three keys, nothing else survives.
+    // payload side: exactly three keys, nothing else survives.
     for a in payload["effective"].as_array().unwrap() {
-        assert!(a.get("raw").is_none(), "effective drops raw too: {}", a["id"]);
+        assert!(
+            a.get("raw").is_none(),
+            "effective drops raw too: {}",
+            a["id"]
+        );
         let eff = a["effective"].as_object().expect("effective object");
         let mut keys: Vec<&str> = eff.keys().map(|s| s.as_str()).collect();
         keys.sort();
@@ -903,23 +1025,34 @@ fn scan_payload_carries_exactly_the_keys_the_renderer_reads() {
         assert!(a.get("security").is_none(), "effective carries no security");
     }
 
-    // ipc_payload: `homeExists` was never set by `scanAll`, so the key is
-    // absent rather than null (jsonSafe drops undefined).
+    // ipc_payload: `homeExists` is never set, so the key is
+    // absent rather than null (the sanitiser drops undefined).
     for a in payload["agents"].as_array().unwrap() {
-        for key in ["id", "label", "vendor", "accent", "home", "installed", "pseudo"] {
+        for key in [
+            "id",
+            "label",
+            "vendor",
+            "accent",
+            "home",
+            "installed",
+            "pseudo",
+        ] {
             assert!(a.get(key).is_some(), "agent is missing {}", key);
         }
-        assert!(a.get("homeExists").is_none(), "homeExists must not be emitted");
+        assert!(
+            a.get("homeExists").is_none(),
+            "homeExists must not be emitted"
+        );
     }
 
-    // selftest.js §12 "effective map covers every asset"
+    // The effective map covers every asset
     assert_eq!(
         payload["effective"].as_array().unwrap().len(),
         payload["assets"].as_array().unwrap().len()
     );
 }
 
-// ipc_payload: "jsonSafe caps every array at 500 entries". A skill with 511
+// The payload caps every array at 500 entries. A skill with 511
 // files reaches the renderer with the first 500 — sending more is a different
 // payload, not better data.
 #[test]
@@ -929,7 +1062,10 @@ fn asset_file_lists_are_capped_at_500() {
     fx.bind();
 
     let skill = join(&fx.project_dir, &[".workbuddy", "skills", "bulk"]);
-    write(&join(&skill, &["SKILL.md"]), "---\nname: bulk\ndescription: Bulk fixture.\n---\n\n# Bulk\n");
+    write(
+        &join(&skill, &["SKILL.md"]),
+        "---\nname: bulk\ndescription: Bulk fixture.\n---\n\n# Bulk\n",
+    );
     for i in 0..510 {
         write(&join(&skill, &[&format!("f{}.txt", i)]), "x");
     }
@@ -947,7 +1083,11 @@ fn asset_file_lists_are_capped_at_500() {
         .find(&payload, |a| a["kind"] == "skill" && a["name"] == "bulk")
         .expect("bulk skill");
     let files = bulk["files"].as_array().expect("files");
-    assert_eq!(files.len(), 500, "the renderer receives exactly the first 500");
+    assert_eq!(
+        files.len(),
+        500,
+        "the renderer receives exactly the first 500"
+    );
     assert!(
         files.iter().all(|f| f.is_string()),
         "the capped list is still relative path strings"
@@ -958,7 +1098,7 @@ fn asset_file_lists_are_capped_at_500() {
 /* read asset                                                          */
 /* ------------------------------------------------------------------ */
 
-// ipc-contract-test.js §2 "read-asset(memory) succeeds" /
+// Reading a memory asset succeeds, and
 // "read-asset returns the file content" / "read-asset returns the asset".
 #[test]
 fn read_asset_returns_ok_asset_and_content() {
@@ -977,9 +1117,11 @@ fn read_asset_returns_ok_asset_and_content() {
     assert_eq!(r["content"], json!("# Memory\n\nseed line\n"));
     assert_eq!(r["asset"]["raw"], r["content"], "raw is re-attached");
 
-    // ipc-contract-test.js §2 "skill content includes frontmatter"
+    // The skill content includes the frontmatter
     let skill = fx
-        .find(&payload, |a| a["kind"] == "skill" && a["name"] == "home-skill")
+        .find(&payload, |a| {
+            a["kind"] == "skill" && a["name"] == "home-skill"
+        })
         .unwrap();
     let rs = assets::read_asset(&fx.home, &fx.root, skill["id"].as_str().unwrap());
     assert_eq!(rs["ok"], json!(true), "{}", rs);
@@ -990,7 +1132,7 @@ fn read_asset_returns_ok_asset_and_content() {
     );
 }
 
-// ipc-contract-test.js §2 "read-asset(bogus) fails cleanly" and selftest.js §14
+// Reading a bogus asset fails cleanly
 // "deleteAsset(bogus) fails cleanly".
 #[test]
 fn read_asset_of_an_unknown_id_fails_cleanly() {
@@ -999,11 +1141,16 @@ fn read_asset_of_an_unknown_id_fails_cleanly() {
     fx.bind();
     let r = assets::read_asset(&fx.home, &fx.root, "nope:nope:nope");
     assert_eq!(r["ok"], json!(false), "{}", r);
-    assert_eq!(r["error"], json!("asset not found: nope:nope:nope"), "{}", r);
+    assert_eq!(
+        r["error"],
+        json!("asset not found: nope:nope:nope"),
+        "{}",
+        r
+    );
 }
 
-// assets.rs: "Plugins never carried `raw` … so the key must be *removed*, not
-// nulled, or the drawer receives a shape the JS never produces."
+// `assets.rs`: "Plugins carry no `raw` … so the key must be *removed*, not
+// nulled, or the drawer receives a shape nothing else produces."
 #[test]
 fn read_asset_drops_raw_for_a_plugin_asset() {
     let _lock = common::serial();
@@ -1018,7 +1165,11 @@ fn read_asset_drops_raw_for_a_plugin_asset() {
     assets::remember(std::slice::from_ref(&plugin), std::slice::from_ref(&plugin));
     let r = assets::read_asset("C:/nohome", "C:/nostore", "plugin:demo");
     assert_eq!(r["ok"], json!(true), "{}", r);
-    assert!(r["asset"].get("raw").is_none(), "no raw key at all: {}", r["asset"]);
+    assert!(
+        r["asset"].get("raw").is_none(),
+        "no raw key at all: {}",
+        r["asset"]
+    );
     assert_eq!(r["content"], json!("(directory asset)"));
     assets::invalidate();
 }
@@ -1027,7 +1178,7 @@ fn read_asset_drops_raw_for_a_plugin_asset() {
 /* save → rescan                                                       */
 /* ------------------------------------------------------------------ */
 
-// selftest.js §6 "file exists on disk" + §8b "applied asset is now recognised
+// The file exists on disk and the applied asset is now recognised
 // by the scanner". Sandbox off: the write hits the real tree, so the very next
 // scan must see it.
 #[test]
@@ -1036,10 +1187,12 @@ fn save_markdown_then_rescan_sees_the_change() {
     let fx = AssetsFixture::new("save-md");
     fx.bind();
     let payload = fx.scan();
-    let mem = fx.find(&payload, |a| a["kind"] == "memory").expect("memory");
+    let mem = fx
+        .find(&payload, |a| a["kind"] == "memory")
+        .expect("memory");
     let id = mem["id"].as_str().unwrap().to_string();
 
-    let keeper = fx.keeper(false);
+    let keeper = fx.keeper();
     let saved = keeper.save_markdown(&id, "# Memory\n\nseed line\nappended by the test\n");
     assert_eq!(saved["ok"], json!(true), "{}", saved);
 
@@ -1052,15 +1205,27 @@ fn save_markdown_then_rescan_sees_the_change() {
     let after = assets::read_asset(&fx.home, &fx.root, &id);
     assert_eq!(after["ok"], json!(true), "{}", after);
     assert!(
-        after["content"].as_str().unwrap().contains("appended by the test"),
+        after["content"]
+            .as_str()
+            .unwrap()
+            .contains("appended by the test"),
         "the rescan sees the change: {}",
         after["content"]
     );
 
-    // And it is reversible.
-    let rb = fx.store(false).rollback(saved["txId"].as_str().unwrap());
-    assert_eq!(rb["ok"], json!(true), "{}", rb);
-    assert_eq!(read(&join(&fx.home, &[".workbuddy", "MEMORY.md"])), "# Memory\n\nseed line\n");
+    // The write survives, and the audit line records it.
+    assert_eq!(
+        read(&join(&fx.home, &[".workbuddy", "MEMORY.md"])),
+        "# Memory\n\nseed line\nappended by the test\n"
+    );
+    let audit = settings::read_audit(&fx.root, 100, None, None, None);
+    assert!(
+        audit
+            .iter()
+            .any(|a| a["txId"] == saved["txId"] && a["status"] == json!("ok")),
+        "the write is journalled: {:?}",
+        audit
+    );
 }
 
 // keeper.rs: "Renaming means moving the directory; refuse rather than write a
@@ -1072,11 +1237,13 @@ fn save_markdown_refuses_to_rename_a_skill_in_place() {
     fx.bind();
     let payload = fx.scan();
     let skill = fx
-        .find(&payload, |a| a["kind"] == "skill" && a["name"] == "home-skill")
+        .find(&payload, |a| {
+            a["kind"] == "skill" && a["name"] == "home-skill"
+        })
         .unwrap();
     let id = skill["id"].as_str().unwrap().to_string();
 
-    let keeper = fx.keeper(false);
+    let keeper = fx.keeper();
     let r = keeper.save_markdown(
         &id,
         "---\nname: renamed-skill\ndescription: still fine.\n---\n\n# body\n",
@@ -1084,25 +1251,32 @@ fn save_markdown_refuses_to_rename_a_skill_in_place() {
     assert_eq!(r["ok"], json!(false), "{}", r);
     assert_eq!(r["blocked"], json!(true), "{}", r);
     assert!(
-        r["issues"].as_array().unwrap().iter().any(|i| i["field"] == json!("name")),
+        r["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["field"] == json!("name")),
         "{}",
         r
     );
     assert!(
-        read(&join(&fx.home, &[".workbuddy", "skills", "home-skill", "SKILL.md"]))
-            .contains("name: home-skill"),
+        read(&join(
+            &fx.home,
+            &[".workbuddy", "skills", "home-skill", "SKILL.md"]
+        ))
+        .contains("name: home-skill"),
         "nothing was written"
     );
 }
 
-// selftest.js §6 "write transaction ok" / "written file parses as a skill" /
+// The write transaction succeeds, the written file parses as a skill, and
 // "allowed-tools round-tripped" + §8b "skill now exists in the real project".
 #[test]
 fn save_skill_writes_a_parseable_skill_and_rescan_sees_it() {
     let _lock = common::serial();
     let fx = AssetsFixture::new("save-skill");
     fx.bind();
-    let keeper = fx.keeper(false);
+    let keeper = fx.keeper();
 
     let r = keeper.save_skill(&json!({
         "data": {
@@ -1116,31 +1290,42 @@ fn save_skill_writes_a_parseable_skill_and_rescan_sees_it() {
     }));
     assert_eq!(r["ok"], json!(true), "{}", r);
 
-    let file = join(&fx.project_dir, &[".workbuddy", "skills", "selftest-skill", "SKILL.md"]);
+    let file = join(
+        &fx.project_dir,
+        &[".workbuddy", "skills", "selftest-skill", "SKILL.md"],
+    );
     assert!(exists(&file), "the skill landed in the real project");
     let text = read(&file);
     assert!(text.starts_with("---"), "{}", text);
     assert!(text.contains("name: selftest-skill"), "{}", text);
-    assert!(text.contains("allowed-tools: Read, Grep"), "allowed-tools round-tripped: {}", text);
+    assert!(
+        text.contains("allowed-tools: Read, Grep"),
+        "allowed-tools round-tripped: {}",
+        text
+    );
 
     let payload = fx.scan();
     let found = fx.find(&payload, |a| a["name"] == "selftest-skill");
     assert!(found.is_some(), "the scanner recognises the new skill");
     assert_eq!(found.unwrap()["scope"], json!("project"));
-    assert!(r["written"].as_array().unwrap().iter().any(|w| w == &json!(file)));
+    assert!(r["written"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w == &json!(file)));
 }
 
-// selftest.js §7 "blocked before touching disk" / "asset count unchanged" and
-// ipc-contract-test.js §4 "save-skill blocks invalid input" /
-// "blocked write produced no transaction".
+// The write is blocked before touching disk, the asset count is unchanged, and
+// Saving a skill with invalid input is blocked, and
+// "blocked write produced no audit record".
 #[test]
-fn validation_blocks_a_bad_skill_write_and_mints_no_transaction() {
+fn validation_blocks_a_bad_skill_write_and_journals_nothing() {
     let _lock = common::serial();
     let fx = AssetsFixture::new("save-blocked");
     fx.bind();
-    let keeper = fx.keeper(false);
+    let keeper = fx.keeper();
     let before = fx.scan()["assets"].as_array().unwrap().len();
-    let txs_before = settings::list_transactions(&fx.root, 999).len();
+    let audit_before = settings::read_audit(&fx.root, 999, None, None, None).len();
 
     let r = keeper.save_skill(&json!({
         "data": { "name": "Bad Name!", "description": "" },
@@ -1149,10 +1334,17 @@ fn validation_blocks_a_bad_skill_write_and_mints_no_transaction() {
     }));
     assert_eq!(r["ok"], json!(false), "{}", r);
     assert_eq!(r["blocked"], json!(true), "{}", r);
-    assert!(r["issues"].as_array().unwrap().iter().any(|i| i["level"] == json!("error")));
+    assert!(r["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i["level"] == json!("error")));
 
     assert!(
-        !exists(&join(&fx.project_dir, &[".workbuddy", "skills", "bad-name"])),
+        !exists(&join(
+            &fx.project_dir,
+            &[".workbuddy", "skills", "bad-name"]
+        )),
         "nothing was created on disk"
     );
     assert_eq!(
@@ -1161,9 +1353,9 @@ fn validation_blocks_a_bad_skill_write_and_mints_no_transaction() {
         "asset count unchanged"
     );
     assert_eq!(
-        settings::list_transactions(&fx.root, 999).len(),
-        txs_before,
-        "no transaction was minted"
+        settings::read_audit(&fx.root, 999, None, None, None).len(),
+        audit_before,
+        "no transaction was journalled"
     );
 }
 
@@ -1174,7 +1366,7 @@ fn a_blocking_write_returns_the_issues() {
     let _lock = common::serial();
     let fx = AssetsFixture::new("save-issues");
     fx.bind();
-    let keeper = fx.keeper(false);
+    let keeper = fx.keeper();
 
     let r = keeper.save_skill(&json!({
         "data": { "name": "Bad Name", "description": "x" },
@@ -1184,22 +1376,24 @@ fn a_blocking_write_returns_the_issues() {
     assert_eq!(r["ok"], json!(false), "{}", r);
     let issues = r["issues"].as_array().expect("issues");
     assert!(!issues.is_empty(), "{}", r);
-    assert!(issues.iter().any(|i| i["level"] == json!("error") && i["field"] == json!("name")));
+    assert!(issues
+        .iter()
+        .any(|i| i["level"] == json!("error") && i["field"] == json!("name")));
 }
 
 /* ------------------------------------------------------------------ */
 /* MCP                                                                 */
 /* ------------------------------------------------------------------ */
 
-// selftest.js §8 "new server present in shadow tree" /
-// "pre-existing servers preserved" + ipc-contract-test.js §5 "upsert-mcp
+// The new server is present in the shadow tree, and
+// The pre-existing servers are preserved, and upserting an MCP
 // succeeds" / "upsert-mcp blocks a transport-less server".
 #[test]
 fn upsert_mcp_preserves_sibling_servers() {
     let _lock = common::serial();
     let fx = AssetsFixture::new("mcp-upsert");
     fx.bind();
-    let keeper = fx.keeper(false);
+    let keeper = fx.keeper();
     let cfg = join(&fx.project_dir, &[".workbuddy", "mcp.json"]);
     let before = read(&cfg);
 
@@ -1213,9 +1407,21 @@ fn upsert_mcp_preserves_sibling_servers() {
     assert_eq!(r["ok"], json!(true), "{}", r);
 
     let after: Value = serde_json::from_str(&read(&cfg)).unwrap();
-    assert!(after["mcpServers"].get("selftest-server").is_some(), "{}", after);
-    assert!(after["mcpServers"].get("saas-db").is_some(), "siblings survived: {}", after);
-    assert!(after["mcpServers"].get("saas-logs").is_some(), "siblings survived: {}", after);
+    assert!(
+        after["mcpServers"].get("selftest-server").is_some(),
+        "{}",
+        after
+    );
+    assert!(
+        after["mcpServers"].get("saas-db").is_some(),
+        "siblings survived: {}",
+        after
+    );
+    assert!(
+        after["mcpServers"].get("saas-logs").is_some(),
+        "siblings survived: {}",
+        after
+    );
     assert!(read(&cfg).len() > before.len());
 
     // A transport-less server is blocked before the file is touched.
@@ -1228,10 +1434,14 @@ fn upsert_mcp_preserves_sibling_servers() {
     }));
     assert_eq!(bad["ok"], json!(false), "{}", bad);
     assert_eq!(bad["blocked"], json!(true), "{}", bad);
-    assert_eq!(read(&cfg).contains("no-transport"), false, "nothing was written");
+    assert_eq!(
+        read(&cfg).contains("no-transport"),
+        false,
+        "nothing was written"
+    );
 }
 
-// selftest.js §8c "corrupt config refuses the write" — at the keeper level,
+// A corrupt config refuses the write — at the keeper level,
 // where the refusal has to name the corruption and leave the file alone.
 #[test]
 fn upsert_mcp_refuses_a_corrupt_config() {
@@ -1242,7 +1452,7 @@ fn upsert_mcp_refuses_a_corrupt_config() {
     const CORRUPT: &str = "{ \"mcpServers\": { \"saas-db\": TRUNCATED";
     write(&cfg, CORRUPT);
 
-    let keeper = fx.keeper(false);
+    let keeper = fx.keeper();
     let r = keeper.upsert_mcp(&json!({
         "name": "should-not-land",
         "config": { "command": "npx", "args": ["-y", "@example/pkg"] },
@@ -1252,16 +1462,18 @@ fn upsert_mcp_refuses_a_corrupt_config() {
     }));
     assert_eq!(r["ok"], json!(false), "{}", r);
     assert!(
-        r["error"].as_str().map(|e| e.contains("corrupt")).unwrap_or(false),
+        r["error"]
+            .as_str()
+            .map(|e| e.contains("corrupt"))
+            .unwrap_or(false),
         "the refusal names the corruption: {}",
         r
     );
     assert_eq!(read(&cfg), CORRUPT, "the corrupt file was not overwritten");
-    assert!(fx.store(false).read_pending().is_empty(), "no pending change queued");
 }
 
-// ipc-contract-test.js §6 "delete-mcp succeeds" / "sibling servers survived the
-// delete" and selftest.js §14 "mcp.json survived (entry removed, not the file)".
+// Deleting an MCP entry succeeds, the sibling servers survived the
+// delete" and §14 "mcp.json survived (entry removed, not the file)".
 #[test]
 fn delete_mcp_removes_only_the_entry_and_the_file_survives() {
     let _lock = common::serial();
@@ -1276,22 +1488,33 @@ fn delete_mcp_removes_only_the_entry_and_the_file_survives() {
         .expect("saas-db asset");
     let id = target["id"].as_str().unwrap().to_string();
 
-    let keeper = fx.keeper(false);
+    let keeper = fx.keeper();
     let r = keeper.delete_mcp(&id);
     assert_eq!(r["ok"], json!(true), "{}", r);
 
     assert!(exists(&cfg), "mcp.json was deleted — catastrophic");
     let after: Value = serde_json::from_str(&read(&cfg)).unwrap();
     assert!(after["mcpServers"].get("saas-db").is_none(), "{}", after);
-    assert!(after["mcpServers"].get("saas-logs").is_some(), "sibling survived: {}", after);
+    assert!(
+        after["mcpServers"].get("saas-logs").is_some(),
+        "sibling survived: {}",
+        after
+    );
     assert!(read(&cfg).len() < before.len(), "the entry was removed");
 
-    let rb = fx.store(false).rollback(r["txId"].as_str().unwrap());
-    assert_eq!(rb["ok"], json!(true), "{}", rb);
-    assert_eq!(read(&cfg), before, "rollback restored the config");
+    // A later transaction that fails restores what *it* touched; this one
+    // succeeded, so it stays removed and the journal says so.
+    let audit = settings::read_audit(&fx.root, 50, None, None, None);
+    assert!(
+        audit
+            .iter()
+            .any(|a| a["txId"] == r["txId"] && a["status"] == json!("ok")),
+        "the delete is journalled: {:?}",
+        audit
+    );
 }
 
-// selftest.js §14 "deleteAsset(mcp/json) dispatches and succeeds": an MCP
+// Deleting an MCP or JSON asset dispatches and succeeds: an MCP
 // asset's `file` is the *shared* config, so a plain delete would wipe every
 // server the agent has.
 #[test]
@@ -1307,24 +1530,28 @@ fn delete_asset_of_an_mcp_asset_dispatches_to_delete_mcp() {
         .find(&payload, |a| a["kind"] == "mcp" && a["name"] == "saas-logs")
         .expect("saas-logs asset");
 
-    let keeper = fx.keeper(false);
+    let keeper = fx.keeper();
     let r = keeper.delete_asset(target["id"].as_str().unwrap());
     assert_eq!(r["ok"], json!(true), "{}", r);
     assert!(exists(&cfg), "the shared config must survive");
 
     let after: Value = serde_json::from_str(&read(&cfg)).unwrap();
     assert!(after["mcpServers"].get("saas-logs").is_none(), "{}", after);
-    assert!(after["mcpServers"].get("saas-db").is_some(), "sibling survived: {}", after);
+    assert!(
+        after["mcpServers"].get("saas-db").is_some(),
+        "sibling survived: {}",
+        after
+    );
     assert!(read(&cfg).len() < before.len());
 }
 
-// selftest.js §14 "deleteAsset(bogus) fails cleanly".
+// Deleting a bogus asset fails cleanly.
 #[test]
 fn delete_asset_of_an_unknown_id_fails_cleanly() {
     let _lock = common::serial();
     let fx = AssetsFixture::new("mcp-bogus");
     fx.bind();
-    let r = fx.keeper(false).delete_asset("nope:does:not:exist");
+    let r = fx.keeper().delete_asset("nope:does:not:exist");
     assert_eq!(r["ok"], json!(false), "{}", r);
     assert_eq!(r["error"], json!("asset not found"), "{}", r);
 }
@@ -1333,7 +1560,7 @@ fn delete_asset_of_an_unknown_id_fails_cleanly() {
 /* diff / distribute / summarize                                       */
 /* ------------------------------------------------------------------ */
 
-// ipc-contract-test.js §3 "diff succeeds" / "diff reports the appended line" /
+// The diff succeeds, it reports the appended line, and
 // "diff is a no-op for identical content".
 #[test]
 fn diff_reports_appended_lines_and_is_a_noop_for_identical_content() {
@@ -1343,7 +1570,7 @@ fn diff_reports_appended_lines_and_is_a_noop_for_identical_content() {
     let payload = fx.scan();
     let mem = fx.find(&payload, |a| a["kind"] == "memory").unwrap();
     let id = mem["id"].as_str().unwrap().to_string();
-    let keeper = fx.keeper(false);
+    let keeper = fx.keeper();
 
     let before = assets::read_asset(&fx.home, &fx.root, &id)["content"]
         .as_str()
@@ -1362,7 +1589,7 @@ fn diff_reports_appended_lines_and_is_a_noop_for_identical_content() {
     assert_eq!(missing["ok"], json!(false), "{}", missing);
 }
 
-// ipc-contract-test.js §7 "distribute returns a verdict" — a copy to the same
+// Distributing returns a verdict — a copy to the same
 // location is skipped, never duplicated.
 #[test]
 fn distribute_skips_the_same_location() {
@@ -1371,11 +1598,13 @@ fn distribute_skips_the_same_location() {
     fx.bind();
     let payload = fx.scan();
     let skill = fx
-        .find(&payload, |a| a["kind"] == "skill" && a["name"] == "proj-skill")
+        .find(&payload, |a| {
+            a["kind"] == "skill" && a["name"] == "proj-skill"
+        })
         .unwrap();
     let id = skill["id"].as_str().unwrap().to_string();
 
-    let keeper = fx.keeper(false);
+    let keeper = fx.keeper();
     let r = keeper.distribute(
         &id,
         &[json!({ "agentId": "workbuddy", "scope": "project", "projectId": PROJECT_ID })],
@@ -1384,13 +1613,15 @@ fn distribute_skips_the_same_location() {
     assert_eq!(r["error"], json!("nothing to write"), "{}", r);
     let skipped = r["skipped"].as_array().expect("skipped");
     assert!(
-        skipped.iter().any(|s| s["reason"] == json!("same location")),
+        skipped
+            .iter()
+            .any(|s| s["reason"] == json!("same location")),
         "no 'same location' skip in {}",
         serde_json::to_string(&skipped).unwrap_or_default()
     );
 }
 
-// selftest.js §14 "core summarize returns full shape".
+// The core summary returns the full shape.
 #[test]
 fn summarize_returns_the_full_shape() {
     let _lock = common::serial();
@@ -1407,13 +1638,17 @@ fn summarize_returns_the_full_shape() {
         assert!(s["by"].get(kind).is_some(), "by.{} is present", kind);
     }
     for origin in ["user", "managed", "cached", "marketplace"] {
-        assert!(s["byOrigin"].get(origin).is_some(), "byOrigin.{} is present", origin);
+        assert!(
+            s["byOrigin"].get(origin).is_some(),
+            "byOrigin.{} is present",
+            origin
+        );
     }
     assert!(s["bytes"].is_number() && s["issues"].is_number() && s["shadowed"].is_number());
 }
 
 /* ------------------------------------------------------------------ */
-/* project registry (was tests/registry.rs)                            */
+/* project registry                                                    */
 /* ------------------------------------------------------------------ */
 struct RegistryFixture {
     dir: PathBuf,
@@ -1447,7 +1682,7 @@ fn make_dir(path: &str) {
 
 /* ------------------------------------------------------------------ */
 
-// scanner.js:107 — `'proj-' + slug(name || basename(abs)).slice(0,32) + '-' + hash(abs).slice(0,6)`.
+// The id: `proj-` + slug(name || basename(abs)) capped at 32 + `-` + 6 hash chars.
 #[test]
 fn the_id_is_the_slug_plus_a_six_char_hash() {
     let _lock = common::serial();
@@ -1458,11 +1693,15 @@ fn the_id_is_the_slug_plus_a_six_char_hash() {
     make_dir(&dir);
     let added = registry::add(&dir, None);
     let id = added["project"]["id"].as_str().expect("id").to_string();
-    assert!(id.starts_with("proj-my-project-"), "name falls back to the basename: {}", id);
+    assert!(
+        id.starts_with("proj-my-project-"),
+        "name falls back to the basename: {}",
+        id
+    );
     let tail = id.rsplit('-').next().unwrap_or_default();
     assert_eq!(tail.len(), 6, "hash is six chars: {}", id);
 
-    // An explicit empty name is falsy, so the basename wins (scanner.js:108).
+    // An explicit empty name is falsy, so the basename wins.
     let dir2 = fx.path(&["work", "epsilon"]);
     make_dir(&dir2);
     let added2 = registry::add(&dir2, Some(""));
@@ -1491,18 +1730,21 @@ fn get_resolves_by_id_and_returns_none_for_an_unknown_id() {
     let added = registry::add(&dir, Some("eta"));
     let id = added["project"]["id"].as_str().unwrap();
 
-    assert_eq!(registry::get(id).and_then(|p| p["name"].as_str().map(String::from)), Some("eta".to_string()));
+    assert_eq!(
+        registry::get(id).and_then(|p| p["name"].as_str().map(String::from)),
+        Some("eta".to_string())
+    );
     assert!(registry::get("proj-nope").is_none());
     assert!(registry::get("").is_none());
     assert!(exists(&dir));
 }
 
 /* ------------------------------------------------------------------ */
-/* format layer (was tests/formats.rs)                                 */
+/* format layer                                                        */
 /* YAML                                                                */
 /* ------------------------------------------------------------------ */
 
-// selftest.js §1 "YAML subset round-trip" — the same fixture the JS suite
+// The YAML subset round-trips — the same fixture the unit
 // uses, so a parse regression shows up against known values.
 #[test]
 fn yaml_parses_the_subset_the_writers_emit() {
@@ -1529,10 +1771,22 @@ fn yaml_parses_the_subset_the_writers_emit() {
     assert_eq!(o["version"], json!("1.0.0"));
     // A comma list is a plain string, not an array — the agents' own readers
     // split it, and turning it into an array would rewrite the user's file.
-    assert_eq!(o["allowed-tools"], json!("Read, Grep, Glob"), "parses comma list as string");
-    assert_eq!(o["tags"].as_array().unwrap().len(), 3, "parses inline array");
+    assert_eq!(
+        o["allowed-tools"],
+        json!("Read, Grep, Glob"),
+        "parses comma list as string"
+    );
+    assert_eq!(
+        o["tags"].as_array().unwrap().len(),
+        3,
+        "parses inline array"
+    );
     assert_eq!(o["nested"]["key"], json!("value"), "parses nested map");
-    assert_eq!(o["nested"]["num"], json!(42), "a bare number parses as a number");
+    assert_eq!(
+        o["nested"]["num"],
+        json!(42),
+        "a bare number parses as a number"
+    );
     assert_eq!(o["list"][1], json!("two"), "parses block array");
     assert_eq!(o["quoted"], json!("has: colon"), "preserves quoted colon");
     assert_eq!(o["empty"], Value::Null, "an empty value is null");
@@ -1542,17 +1796,27 @@ fn yaml_parses_the_subset_the_writers_emit() {
 // turns that into "config file is corrupt, refusing to overwrite".
 #[test]
 fn yaml_reports_a_syntax_error_instead_of_an_empty_document() {
-    assert!(yaml::parse("a:\n- b\n  c: [\n").is_err(), "unbalanced flow seq");
-    assert!(yaml::parse("\ta: 1\n").is_err(), "a tab indent is invalid YAML");
+    assert!(
+        yaml::parse("a:\n- b\n  c: [\n").is_err(),
+        "unbalanced flow seq"
+    );
+    assert!(
+        yaml::parse("\ta: 1\n").is_err(),
+        "a tab indent is invalid YAML"
+    );
     let empty = yaml::parse("").expect("an empty document is not an error");
-    assert_eq!(empty, Value::Null, "and arrives as null, which callers spell as an empty object");
+    assert_eq!(
+        empty,
+        Value::Null,
+        "and arrives as null, which callers spell as an empty object"
+    );
 }
 
 /* ------------------------------------------------------------------ */
 /* frontmatter                                                         */
 /* ------------------------------------------------------------------ */
 
-// selftest.js §2 "Frontmatter round-trip preserves unknown fields" — the
+// The frontmatter round-trip preserves unknown fields — the
 // reason `parse` keeps a tolerant fallback: Cursor `.mdc` files contain
 // `globs: **/*.ts`, and `*` is reserved in YAML.
 #[test]
@@ -1562,7 +1826,11 @@ fn frontmatter_round_trip_preserves_unknown_fields_and_the_body() {
     let fm = frontmatter::parse(raw);
     assert!(fm.has_frontmatter);
     assert_eq!(fm.data["name"], json!("release-checklist"));
-    assert_eq!(fm.data["allowed-tools"], json!("Read, Grep, Glob, Bash"), "keeps allowed-tools");
+    assert_eq!(
+        fm.data["allowed-tools"],
+        json!("Read, Grep, Glob, Bash"),
+        "keeps allowed-tools"
+    );
 
     let order: Vec<&str> = fm.order.iter().map(|s| s.as_str()).collect();
     let again = frontmatter::serialize(&fm.data, &fm.body, &order);
@@ -1572,9 +1840,13 @@ fn frontmatter_round_trip_preserves_unknown_fields_and_the_body() {
     assert_eq!(p2.data["version"], fm.data["version"]);
     assert_eq!(p2.data["description"], fm.data["description"]);
     // The blank line after the closing fence is supplied by the fence itself.
-    assert!(again.starts_with("---\nname: release-checklist\n"), "{}", again);
-    // `serializeFrontmatter` strips one leading newline from the body because
-    // the closing fence already supplies the break (`core/model.js:122`) — the
+    assert!(
+        again.starts_with("---\nname: release-checklist\n"),
+        "{}",
+        again
+    );
+    // The frontmatter writer strips one leading newline from the body because
+    // the closing fence already supplies the break — the
     // blank line between `---` and `# Checklist` is not part of a round-trip.
     assert!(again.contains("\n---\n# Checklist\n"), "{}", again);
 }
@@ -1586,7 +1858,11 @@ fn frontmatter_serialize_appends_keys_missing_from_the_order_hint() {
     let data = json!({ "name": "x", "extra": 1 });
     let out = frontmatter::serialize(&data, "body\n", &["name"]);
     assert!(out.contains("name: x"), "{}", out);
-    assert!(out.contains("extra: 1"), "the new key is appended, not dropped: {}", out);
+    assert!(
+        out.contains("extra: 1"),
+        "the new key is appended, not dropped: {}",
+        out
+    );
 
     // A stale hint cannot resurrect a deleted field.
     let out = frontmatter::serialize(&json!({ "name": "x" }), "body\n", &["name", "gone"]);
@@ -1596,7 +1872,10 @@ fn frontmatter_serialize_appends_keys_missing_from_the_order_hint() {
 #[test]
 fn frontmatter_treats_an_unclosed_fence_as_no_frontmatter() {
     let fm = frontmatter::parse("---\nname: x\n\n# heading only, never closed\n");
-    assert!(!fm.has_frontmatter, "the JS regex requires a closing fence");
+    assert!(
+        !fm.has_frontmatter,
+        "the frontmatter regex requires a closing fence"
+    );
     assert_eq!(fm.data, json!({}));
     assert!(fm.body.starts_with("---"), "and the text is the body");
 
@@ -1609,12 +1888,16 @@ fn frontmatter_treats_an_unclosed_fence_as_no_frontmatter() {
     assert!(bom.has_frontmatter, "a BOM is stripped first");
 }
 
-// `findKeySeparator` — the first `:` that ends a key, ignoring quoted colons
+// `find_key_separator` — the first `:` that ends a key, ignoring quoted colons
 // and `http://x`.
 #[test]
 fn frontmatter_finds_the_real_key_separator() {
     assert_eq!(frontmatter::find_key_separator("name: x"), Some(4));
-    assert_eq!(frontmatter::find_key_separator("url: http://x"), Some(3), "the colon in http:// is not it");
+    assert_eq!(
+        frontmatter::find_key_separator("url: http://x"),
+        Some(3),
+        "the colon in http:// is not it"
+    );
     assert_eq!(
         frontmatter::find_key_separator("q: \"has: colon\""),
         Some(1),
@@ -1629,9 +1912,17 @@ fn frontmatter_falls_back_to_a_tolerant_scan_for_invalid_yaml() {
     // An undefined alias is a hard YAML error — exactly the case a Cursor
     // `.mdc` file can hit, and the reason the fallback exists at all.
     let src = "---\nname: mdc-rule\nglobs: [*undefined]\n---\nbody\n";
-    assert!(yaml::parse("name: mdc-rule\nglobs: [*undefined]\n").is_err(), "strict parse fails");
+    assert!(
+        yaml::parse("name: mdc-rule\nglobs: [*undefined]\n").is_err(),
+        "strict parse fails"
+    );
     let v = frontmatter::parse_tolerant(src);
-    assert_eq!(v["name"], json!("mdc-rule"), "the scalar scan still reads plain keys: {}", v);
+    assert_eq!(
+        v["name"],
+        json!("mdc-rule"),
+        "the scalar scan still reads plain keys: {}",
+        v
+    );
 }
 
 /* ------------------------------------------------------------------ */
@@ -1647,7 +1938,11 @@ fn jsonc_strips_comments_but_not_string_contents() {
     );
     assert!(!out.contains("// a comment"), "{}", out);
     assert!(!out.contains("/* block"), "{}", out);
-    assert!(out.contains("\"keep // this\""), "a '//' inside a string survives: {}", out);
+    assert!(
+        out.contains("\"keep // this\""),
+        "a '//' inside a string survives: {}",
+        out
+    );
 
     let v: Value = serde_json::from_str(&out).expect("the stripped text is valid JSON");
     assert_eq!(v["a"], json!("keep // this"));
@@ -1667,7 +1962,7 @@ fn jsonc_strips_comments_but_not_string_contents() {
 #[test]
 fn ui_error_appends_one_parseable_line_with_the_documented_shape() {
     let fx = Fixture::new("ui-error-shape");
-    settings::ensure_store(&fx.root, false).expect("ensure_store");
+    settings::ensure_store(&fx.root).expect("ensure_store");
 
     let r = settings::ui_error(
         &fx.root,
@@ -1683,7 +1978,11 @@ fn ui_error_appends_one_parseable_line_with_the_documented_shape() {
     assert_eq!(r["ok"], json!(true), "{}", r);
     assert_eq!(r["count"], json!(1), "{}", r);
 
-    let text = read(&format!("{}{}ui-errors.jsonl", fx.root, std::path::MAIN_SEPARATOR));
+    let text = read(&format!(
+        "{}{}ui-errors.jsonl",
+        fx.root,
+        std::path::MAIN_SEPARATOR
+    ));
     let lines: Vec<&str> = text.split('\n').filter(|l| !l.is_empty()).collect();
     assert_eq!(lines.len(), 1, "one call, one line: {}", text);
     let rec: Value = serde_json::from_str(lines[0]).expect("the line is JSON");
@@ -1701,7 +2000,11 @@ fn ui_error_appends_one_parseable_line_with_the_documented_shape() {
     // Absent optional fields become empty strings, never `null`/missing — the
     // renderer reads them without a guard.
     settings::ui_error(&fx.root, &json!({ "kind": "error" }));
-    let text = read(&format!("{}{}ui-errors.jsonl", fx.root, std::path::MAIN_SEPARATOR));
+    let text = read(&format!(
+        "{}{}ui-errors.jsonl",
+        fx.root,
+        std::path::MAIN_SEPARATOR
+    ));
     let second: Value = serde_json::from_str(text.split('\n').nth(1).expect("second line"))
         .expect("the line is JSON");
     assert_eq!(second["message"], json!(""));
@@ -1714,12 +2017,15 @@ fn ui_error_appends_one_parseable_line_with_the_documented_shape() {
 #[test]
 fn ui_error_keeps_only_the_newest_two_hundred_lines() {
     let fx = Fixture::new("ui-error-cap");
-    settings::ensure_store(&fx.root, false).expect("ensure_store");
+    settings::ensure_store(&fx.root).expect("ensure_store");
     let path = format!("{}{}ui-errors.jsonl", fx.root, std::path::MAIN_SEPARATOR);
 
     let mut last = Value::Null;
     for i in 0..250 {
-        last = settings::ui_error(&fx.root, &json!({ "kind": "error", "message": format!("msg-{}", i) }));
+        last = settings::ui_error(
+            &fx.root,
+            &json!({ "kind": "error", "message": format!("msg-{}", i) }),
+        );
         assert_eq!(last["ok"], json!(true), "{}", last);
         assert_eq!(last["count"], json!(std::cmp::min(i + 1, 200)), "{}", last);
     }
@@ -1739,7 +2045,11 @@ fn ui_error_keeps_only_the_newest_two_hundred_lines() {
         json!("msg-50"),
         "the oldest kept line must be report #51, i.e. the 50th index"
     );
-    assert_eq!(last_kept["message"], json!("msg-249"), "and the newest one is kept");
+    assert_eq!(
+        last_kept["message"],
+        json!("msg-249"),
+        "and the newest one is kept"
+    );
 }
 
 /// Over-long fields are cut to 4096 bytes **without splitting a character**.
@@ -1750,17 +2060,25 @@ fn ui_error_keeps_only_the_newest_two_hundred_lines() {
 #[test]
 fn ui_error_truncates_long_fields_on_a_character_boundary() {
     let fx = Fixture::new("ui-error-truncate");
-    settings::ensure_store(&fx.root, false).expect("ensure_store");
+    settings::ensure_store(&fx.root).expect("ensure_store");
     let path = format!("{}{}ui-errors.jsonl", fx.root, std::path::MAIN_SEPARATOR);
 
     let message = "错".repeat(2000); // 6000 bytes
     let stack = "at frame ".repeat(1000); // 9000 bytes
-    let r = settings::ui_error(&fx.root, &json!({ "kind": "error", "message": message, "stack": stack }));
+    let r = settings::ui_error(
+        &fx.root,
+        &json!({ "kind": "error", "message": message, "stack": stack }),
+    );
     assert_eq!(r["ok"], json!(true), "{}", r);
 
     let text = read(&path);
     let lines: Vec<&str> = text.split('\n').filter(|l| !l.is_empty()).collect();
-    assert_eq!(lines.len(), 1, "a truncated payload still fits one line: {}", text);
+    assert_eq!(
+        lines.len(),
+        1,
+        "a truncated payload still fits one line: {}",
+        text
+    );
     let rec: Value = serde_json::from_str(lines[0]).expect("the line is still JSON");
 
     let kept = rec["message"].as_str().expect("message is a string");
@@ -1770,7 +2088,11 @@ fn ui_error_truncates_long_fields_on_a_character_boundary() {
         kept.len(),
         settings::UI_ERROR_FIELD_MAX
     );
-    assert_eq!(kept.len(), 4095, "3-byte characters stop one byte short of 4096");
+    assert_eq!(
+        kept.len(),
+        4095,
+        "3-byte characters stop one byte short of 4096"
+    );
     assert_eq!(kept.chars().count(), 1365);
     assert!(
         kept.chars().all(|c| c == '错'),
@@ -1789,12 +2111,18 @@ fn ui_error_truncates_long_fields_on_a_character_boundary() {
 #[test]
 fn ui_error_never_panics_on_a_malformed_payload() {
     let fx = Fixture::new("ui-error-malformed");
-    settings::ensure_store(&fx.root, false).expect("ensure_store");
+    settings::ensure_store(&fx.root).expect("ensure_store");
     let path = format!("{}{}ui-errors.jsonl", fx.root, std::path::MAIN_SEPARATOR);
 
     for payload in [json!([1, 2, 3]), json!({}), Value::Null, json!("a string")] {
         let r = settings::ui_error(&fx.root, &payload);
-        assert_eq!(r["ok"], json!(true), "payload {} was rejected: {}", payload, r);
+        assert_eq!(
+            r["ok"],
+            json!(true),
+            "payload {} was rejected: {}",
+            payload,
+            r
+        );
     }
     // Wrong field types degrade to empty strings rather than failing the write.
     let r = settings::ui_error(&fx.root, &json!({ "kind": 7, "message": { "oops": true } }));
@@ -1802,13 +2130,22 @@ fn ui_error_never_panics_on_a_malformed_payload() {
 
     let text = read(&path);
     let lines: Vec<&str> = text.split('\n').filter(|l| !l.is_empty()).collect();
-    assert_eq!(lines.len(), 5, "one line per report, whatever the payload was: {}", text);
+    assert_eq!(
+        lines.len(),
+        5,
+        "one line per report, whatever the payload was: {}",
+        text
+    );
     for line in &lines {
         let rec: Value = serde_json::from_str(line).expect("every line is JSON");
         assert!(rec["message"].is_string(), "{}", rec);
     }
     let last: Value = serde_json::from_str(lines[4]).expect("last line");
-    assert_eq!(last["kind"], json!(""), "a non-string kind becomes an empty string");
+    assert_eq!(
+        last["kind"],
+        json!(""),
+        "a non-string kind becomes an empty string"
+    );
     assert_eq!(last["message"], json!(""));
 }
 
@@ -1823,9 +2160,20 @@ fn ui_error_reports_an_unwritable_store_root_instead_of_panicking() {
     write(&blocker, "not a directory\n");
     let blocked_root = join(&fx.root, &["blocker", "child"]);
 
-    let r = settings::ui_error(&blocked_root, &json!({ "kind": "error", "message": "boom" }));
-    assert_eq!(r["ok"], json!(false), "an unwritable root must not report success: {}", r);
+    let r = settings::ui_error(
+        &blocked_root,
+        &json!({ "kind": "error", "message": "boom" }),
+    );
+    assert_eq!(
+        r["ok"],
+        json!(false),
+        "an unwritable root must not report success: {}",
+        r
+    );
     let error = r["error"].as_str().expect("error text");
     assert!(!error.is_empty(), "the failure must carry a reason: {}", r);
-    assert!(!exists(&blocked_root), "nothing may be created under a file");
+    assert!(
+        !exists(&blocked_root),
+        "nothing may be created under a file"
+    );
 }

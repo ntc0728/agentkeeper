@@ -1,17 +1,17 @@
 'use strict';
 /**
- * Engine-layer (core/ + src/main/ipc.js) English → Chinese translation.
+ * Engine-layer English → Chinese translation.
  *
- * Policy (user mandate, 2026-10-18): when the UI language is Chinese there is
- * NO English degradation — every engine-produced sentence that reaches the
- * screen must render in Chinese, except proper nouns / protocol words.
+ * Policy: when the UI language is Chinese there is NO English degradation —
+ * every engine-produced sentence that reaches the screen must render in
+ * Chinese, except proper nouns / protocol words.
  *
  * How it works:
  *   - EXACT     full-string replacements for engine messages.
  *   - PATTERNS  [pattern, zh] pairs; §1..§n are placeholders replaced by
- *               (.+) capture groups at runtime. The SAME pattern list is
- *               used by selftest §18 to audit engine source files: every
- *               sentence-like literal must hit EXACT, PATTERNS or INTERNAL.
+ *               (.+) capture groups at runtime. The same pattern list is used
+ *               by `scripts/tauri-i18n.js`: every sentence-like literal in the
+ *               engine must hit EXACT, PATTERNS or INTERNAL.
  *               A miss fails the build — that is the no-degradation guarantee.
  *   - INTERNAL  audit allowlist for engine strings that never reach the UI
  *               (audit-log action names, protocol metadata, external tool
@@ -24,32 +24,12 @@
 
 (function () {
 const EXACT = {
-  /* Electron native-menu labels (`src/main/main.js` buildMenu → `zhText`).
-     These were briefly removed on 2026-10-20 as "dead entries" because
-     `Menu|MenuItem|Submenu` has zero hits under `src-tauri/src` — but the
-     Electron shell is still the shipped entry point (`package.json` `main`),
-     and `buildMenu()` translates every label through `zhText`. Removing them
-     meant the menu bar rendered in English under a Chinese UI. */
-  'File': '文件',
-  'Reload': '重新加载',
-  'Open Store Folder': '打开存储目录',
-  'Exit': '退出',
-  'View': '视图',
-  'Reload UI': '重新加载界面',
-  'Toggle Developer Tools': '开发者工具',
-  'Actual Size': '实际大小',
-  'Zoom In': '放大',
-  'Zoom Out': '缩小',
-  'Toggle Full Screen': '切换全屏',
-
-  /* store.js */
-  'no pending changes': '没有待应用的变更',
+  /* store: pending changes, transactions */
   'corrupt transaction record': '事务记录已损坏',
   'at least one valid target is required': '至少需要一个有效目标',
-  'invalid transaction id': '无效的事务 ID',
   'Import project': '导入项目',
 
-  /* keeper.js */
+  /* keeper: read/write, distribute */
   'no valid target': '没有有效目标',
   'asset not found': '未找到该资产',
   'this asset is host-owned (plugin cache / shared dir) and cannot be edited here':
@@ -69,7 +49,7 @@ const EXACT = {
   'manifest unreadable': '清单文件无法读取',
   'nothing importable found': '没有发现可导入的内容',
 
-  /* scanner.js */
+  /* scanner: registration, frontmatter */
   'project already registered': '项目已注册',
   'missing YAML frontmatter — the agent cannot load this skill':
     '缺少 YAML frontmatter——agent 无法加载此技能',
@@ -77,31 +57,27 @@ const EXACT = {
     'frontmatter 缺少 description——技能将永远不会被自动触发',
   'unparsable config': '配置无法解析',
 
-  /* discover.js */
+  /* discover: registry search, install */
   'registry timeout': '注册表请求超时',
   'repo must be owner/repo or a github.com URL': '仓库地址必须是 owner/repo 或 GitHub 链接',
   'nothing installable': '仓库中没有可安装的技能',
 
-  /* src/main/ipc.js — software update */
+  /* update: IPC surface */
   'invalid url': '无效的链接',
-  'staged in the shadow layer — apply in the AgentKeeper UI': '已暂存到影子层——请在 AgentKeeper 界面中应用',
-  'written directly (sandbox off)': '已直接写入（沙盒已关闭）',
+  'written directly': '已直接写入',
 
-  /* ipc.js (also shown in native dialogs from the main process) */
+  /* IPC input validation (also used by native dialogs) */
   'config must be an object': '配置必须是对象',
   'Select one or more project folders to import': '请选择一个或多个要导入的项目文件夹',
   'not a directory': '所选路径不是文件夹',
   'directory not found': '文件夹不存在',
-  'all writes are routed to the sandbox tree': '所有写入均已路由至沙盒目录树',
-  'writes now hit real agent directories': '写入现已直接作用于真实 agent 目录',
   'Export bundle': '导出 Bundle',
   'Import bundle': '导入 Bundle',
   'unknown agent': '未知的 agent',
-  'path not found (in sandbox the real path may not exist yet)':
-    '路径不存在（沙盒模式下真实路径可能尚未生成）',
+  'path not found': '路径不存在',
   'path required': '缺少路径参数',
 
-  /* validate.js — skill */
+  /* validation: skill */
   'name is required': '名称必填',
   'name must be lowercase letters/digits/hyphen, max 64 chars':
     '名称只能包含小写字母、数字和连字符，最长 64 个字符',
@@ -114,7 +90,7 @@ const EXACT = {
   'allowed-tools must be a string or array': 'allowed-tools 必须是字符串或数组',
   'compatibility string is very long': 'compatibility 字段过长',
 
-  /* validate.js — mcp */
+  /* validation: mcp */
   'MCP server name must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/':
     'MCP 服务器名称必须匹配 /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/',
   'server config must be an object': '服务器配置必须是一个对象',
@@ -125,7 +101,7 @@ const EXACT = {
   'npx without -y can block on an interactive install prompt':
     'npx 未加 -y 参数时可能卡在交互式安装确认上',
 
-  /* validate.js — plugin / rule / memory */
+  /* validation: plugin / rule / memory */
   'plugin name is required': '插件名称必填',
   'plugin description longer than 200 chars': '插件描述超过 200 字符',
   'rule file is empty — an empty rule file adds context cost with no behaviour':
@@ -155,17 +131,17 @@ const EXACT = {
   /* security.js — command liveness */
   'no command configured': '未配置启动命令',
 
-  /* scanner.js — pseudo-agent labels that reach the screen */
+  /* scanner: pseudo-agent labels that reach the screen */
   'Shared Agent Skills': '共享 Agent 技能（agents.md）',
   'Shared (~/.agents)': '共享技能目录（~/.agents）',
   'agents.md standard': 'agents.md 开放标准',
 
-  /* validate.js / scanner.js extras */
+  /* validation / scanner extras */
   'frontmatter.name missing': 'frontmatter 缺少 name 字段',
   'empty skill body': '技能正文为空',
   'empty rule file': '规则文件为空',
 
-  /* ipc.js extras */
+  /* IPC extras */
   'dir required': '缺少目录参数',
 
   /* Rust engine (tauri-shell/src-tauri/src) — audited by scripts/tauri-i18n.js */
@@ -186,10 +162,9 @@ const EXACT = {
   'no installed agent found; pass agentId explicitly':
     '本机没有检测到已安装的 agent；请显式指定 agentId',
   /*
-   * core/update/manager.rs ERR_* consts. The author deliberately wrote these
-   * in English (the JS `core/errors.js` templates held Chinese, so an English
-   * UI used to print Chinese). Translations are taken verbatim from the
-   * matching CODE_ZH entries so one rule keeps one rendering.
+   * core/update/manager.rs ERR_* consts. They are English by design: a Chinese
+   * UI translates them here. Translations match the CODE_ZH entries verbatim,
+   * so one rule keeps one rendering.
    */
   'check interval must be between 1 and 1440 minutes': '检查间隔必须是 1 ~ 1440 分钟',
   'update source must be an http(s) URL': '更新源必须是 http(s) 地址',
@@ -204,10 +179,9 @@ const EXACT = {
     '本机安全存储不可用（当前平台没有 DPAPI）',
 
   /*
-   * core/update/*.rs + core/http.rs — messages the JS engine emitted in
-   * Chinese (core/update/{http,manager,token,version}.js). The Rust port now
-   * emits English; every Chinese below is copied verbatim from the JS source
-   * so the Chinese UI reads exactly as it did before the migration.
+   * core/update/*.rs + core/http.rs — the engine emits English; the Chinese
+   * below is the exact wording this dictionary has always used, so one message
+   * keeps one rendering in the Chinese UI.
    */
   /* core/http.rs — `describeError` / `describe_io_error` */
   'DNS lookup failed': '域名解析失败',
@@ -252,11 +226,9 @@ const EXACT = {
   'the download address is not a valid URL': '下载地址不是合法 URL',
   'the download address must be https': '下载地址必须是 https'
 
-  /* The `[update]` diagnostics used to be mapped here. They are `self.log(...)`
-     lines from core/update/manager.rs, whose logger is the no-op `|_| {}` —
-     they reach neither the WebView nor a terminal, so the audit classifies
-     them as logSurface and never required a translation. Removed rather than
-     carried as unreachable entries; re-add them together with a real logger. */
+  /* The `[update]` diagnostics are `self.log(...)` lines from
+     core/update/manager.rs; their logger is the no-op `|_| {}`, so they reach
+     neither the WebView nor a terminal and need no dictionary entry. */
 };
 
 /*
@@ -293,7 +265,6 @@ const PATTERNS = [
   ['^op[§1] (§2) is missing a "path"$', '第 §1 个操作（§2）缺少 "path" 字段'],
   ['^copy source missing: §1$', '复制的来源文件不存在：§1'],
   ['^json mutate aborted for §1$', 'JSON 变更已中止：§1'],
-  ['^transaction §1 not found$', '未找到事务：§1'],
   ['^config file is corrupt, refusing to overwrite: §1$', '配置文件已损坏，拒绝覆盖写入：§1'],
   /*
    * Rust engine — audited by scripts/tauri-i18n.js. The Rust side
@@ -311,25 +282,46 @@ const PATTERNS = [
   ['^import task failed: §1$', '导入任务失败：§1'],
   ['^update task failed: §1$', '更新任务失败：§1'],
   ['^download task failed: §1$', '下载任务失败：§1'],
-  // lib.rs 2026-10-20: the remaining spawn_blocking wrappers were brought in line
-  // with the scan/install ones. One entry per command name, matching the prefix
+  // One entry per command name, matching the prefix
   // the Rust side formats, so the gate can prove each has a translation.
   ['^distribute task failed: §1$', '分发任务失败：§1'],
   ['^baseline task failed: §1$', '基线任务失败：§1'],
-  ['^rollback task failed: §1$', '回滚任务失败：§1'],
   ['^apply task failed: §1$', '应用任务失败：§1'],
   ['^discard task failed: §1$', '放弃暂存失败：§1'],
   ['^audit task failed: §1$', '操作记录读取失败：§1'],
-  ['^transactions task failed: §1$', '事务记录读取失败：§1'],
   ['^stats task failed: §1$', '本地统计读取失败：§1'],
   ['^op[§1] (§2) is missing a "from"$', '第 §1 个操作（§2）缺少 "from" 字段'],
   ['^cannot read write source §1: §2$', '无法读取写入源 §1：§2'],
   ['^write failed for §1: §2$', '写入 §1 失败：§2'],
+  // The four undo-capture sentences from core/src/store.rs.
+  //
+  // They are deliberately NOT nested under `^write failed for §1: §2$`: that
+  // pattern translates only the prefix and passes §2 through verbatim, so a
+  // sentence carrying an action the user must take ("needs Administrator",
+  // "was refused rather than performed") would reach a Chinese reader as
+  // "写入 X 失败：<the whole advice in English>" — exactly the half-translated
+  // defect this branch exists to remove. Each gets its own stem instead.
+  ['^the file could not be read into the undo snapshot \(§1\)$', '文件无法读入撤销快照（§1）'],
+  ['^the directory could not be recreated \(§1\)$', '目录无法重建（§1）'],
+  ['^the directory is not writable, so the captured tree was left in place \(§1\)$', '目录不可写，已保留原有目录树（§1）'],
+  ['^the file could not be read into the undo snapshot, so the write was refused rather than performed with no way back \(§1\)$', '文件无法读入撤销快照，因此已拒绝写入（而不是在没有退路的情况下继续写入）（§1）'],
+  // The undo size limit, reported in human units by store.rs. The advice
+  // (split the write / drop files that are not part of the asset) is part of
+  // the sentence, so it needs its own stem for the same reason as above.
+  ['^undo snapshot limit reached: .*$', '撤销快照已达上限：所需数据超过单次写入可持有的额度（8 MB），因此未写入任何内容。请将该资产拆分为多次写入，或移除其中不必要的文件（依赖目录与构建产物会自动跳过）'],
+  // The two symbolic-link restore sentences (store.rs:480 for an entry inside a
+  // directory, store.rs:1337 for a path that is itself a link). Both state a
+  // privilege requirement the user has to act on, so both are translated whole
+  // rather than left as an English §2 behind a Chinese prefix.
+  ['^the link was not recreated \(§1\); the other files in this directory are back, but this one is missing, because creating a symbolic link on Windows needs administrator rights or developer mode — run the app as administrator, or recreate the link by hand$',
+    '未能重建链接（§1）；该目录内其余文件均已还原，仅缺这一个，因为在 Windows 上创建符号链接需要管理员权限或开发者模式——请以管理员身份运行，或手工重建该链接'],
+  ['^the link was not recreated \(§1\); a symbolic link on Windows needs administrator rights or developer mode — run the app as administrator, or recreate the link by hand$',
+    '未能重建链接（§1）；在 Windows 上创建符号链接需要管理员权限或开发者模式——请以管理员身份运行，或手工重建该链接'],
 
   /*
    * core/http.rs + core/update/*.rs — see the EXACT block above: each Chinese
-   * is copied verbatim from the JS engine (core/update/{http,manager,token,
-   * version}.js) so the Chinese UI does not change.
+   * is copied verbatim from the Rust source (core/update/{http,manager,token,
+   * version}.rs) so the Chinese UI does not change.
    */
   ['^TLS failed (§1)$', 'TLS 失败（§1）'],
   ['^cannot resolve the redirect target: §1$', '无法解析重定向地址: §1'],
@@ -362,8 +354,8 @@ const PATTERNS = [
 
 /* validation-issue field chips: rendered next to messages */
 /**
- * Error code → Chinese. Keys are exactly `core/errors.js` CODES (selftest
- * §18 fails if the two tables ever drift), so the renderer never has to
+ * Error code → Chinese. Keys mirror the engine code table in
+ * `scripts/tauri-i18n.js`, which fails if the two ever drift, so the renderer never has to
  * match an English sentence to decide what to display.
  */
 const CODE_ZH = {
@@ -376,6 +368,15 @@ const CODE_ZH = {
   'write.nothingToWrite': '没有需要写入的内容',
   'write.targetDirMissing': '目标目录不存在',
   'write.failed': '写入失败：§1',
+  // Codes emitted by Store::transaction (store.rs). Three distinct situations
+  // that used to collapse into one "write failed" sentence:
+  //   snapshotTooLarge     — refused BEFORE any write; nothing on disk changed
+  //   restoreIncomplete   — the write ran and the undo could not put it all back
+  //   symlinkRestoreFailed — a specific restore failure inside the above
+  'store.snapshotTooLarge': '该资产超过单次写入的撤销上限（约 8 MB），未写入任何内容。请拆分后重试，或移除其中不必要的文件（依赖目录与构建产物已自动跳过）',
+  'store.restoreIncomplete': '写入中断，已自动还原大部分内容，但部分路径未能还原，请检查下方列出的路径',
+  'store.symlinkRestoreFailed': '文件已还原，但符号链接未能重建。请以管理员身份运行，或开启开发者模式后手工重建该链接',
+  'store.restorePathFailed': '该路径未能还原',
   'store.corruptTransaction': '事务记录已损坏',
   'store.opFieldMissing': '第 §1 项操作缺少 op 字段',
   'store.opPathMissing': '第 §1 项操作（§2）缺少 path 字段',
@@ -389,13 +390,12 @@ const CODE_ZH = {
   'mcp.jsonOnly': '只有 JSON 格式的 MCP 配置文件才能安全地就地编辑',
   'mcp.configNotObject': '配置必须是对象',
   'mcp.noConfigFile': '§1（§2）没有声明 MCP 配置文件',
-  'mcp.sandboxGate': '沙盒已开启——暂存的变更需在 AgentKeeper 桌面端由人工审批。要让 agent 直接写入，请先关闭沙盒。',
   'project.duplicate': '项目已注册',
   'project.notDirectory': '所选路径不是文件夹',
   'project.directoryNotFound': '文件夹不存在',
   'project.dirRequired': '缺少目录参数',
   'ipc.pathRequired': '缺少路径参数',
-  'ipc.pathNotFound': '路径不存在（沙盒模式下真实路径可能尚未生成）',
+  'ipc.pathNotFound': '路径不存在',
   'scan.dirNotFound': '目录不存在：§1',
   'skill.dirUnresolved': '无法解析 §1/§2 的技能目录',
   'ipc.unknownAgent': '未知的 agent',
@@ -470,7 +470,7 @@ function zhCode(code, params) {
 
 /**
  * Best-effort Chinese for anything the engine produced: a coded error first,
- * then the legacy sentence dictionary, then the original text.
+ * then the sentence dictionary, then the original text.
  */
 function zhError(payload) {
   if (payload && typeof payload === 'object') {
@@ -521,11 +521,11 @@ const compiled = PATTERNS.map(([p, zh]) => ({ re: patternToRegExp(p), zh }));
  *
  * The engine emits English sentences (its `zh` dictionary is what makes them
  * Chinese), so these translators must only run when the UI language is zh.
- * They used to run unconditionally, which is how an English UI ended up with
- * "Shared (~/.agents)" rendered as 共享技能目录（~/.agents） in the "By agent"
- * table — 18 call sites, one cause. Outside a browser (the i18n gate and the
- * Node tests require this file) there is no UI language, and zh is the safe
- * answer: the gate is auditing the dictionary itself.
+ * They must run only under the zh UI language: running them unconditionally
+ * renders "Shared (~/.agents)" as 共享技能目录（~/.agents） in an English
+ * "By agent" table. Outside a browser (the i18n gate and the Node tests
+ * require this file) there is no UI language; zh is the safe default there
+ * because the gate audits the dictionary itself.
  */
 function isZh() {
   try {
