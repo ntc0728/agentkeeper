@@ -1,17 +1,4 @@
 {
-  "summary": "更新日志无障碍与长文本缺口修复",
-  "entries": [
-    {
-      "kind": "fix",
-      "text": "设置页更新日志不再把可聚焦链接嵌在 details 的 summary 里（axe nested-interactive），说明块可键盘滚动（scrollable-region-focusable）"
-    },
-    {
-      "kind": "fix",
-      "text": "资产名、项目名、抽屉标题、发现页结果名在截断时都带悬浮全文：1024px 宽下有 16 个资产名会被截断"
-    },
-    {
-      "kind": "fix",
-      "text": "提示条加上宽度上限并允许换行，长错误不再横贯整屏"
-    }
-  ]
+  "summary": "",
+  "entries": []
 }
