@@ -71,12 +71,22 @@ const VOLATILE_PATTERNS = [
   '\\d{4}-\\d{1,2}-\\d{1,2}',                   // 2026-10-26
   '\\d+\\s*(?:秒|分钟|小时|天)前'                // 3 分钟前
 ];
+/**
+ * 按视图追加的遮罩：整块都是活数据的地方。
+ *
+ * 首页那两张表（按 Agent 统计、最近改动）每一行都跟着扫描结果变，遮零散数字挡不住
+ * —— 换一批资产，行数、名称、时间全变。所以整个表体都藏，只留下卡片边框与标题，
+ * 那部分才是布局回归要看的地方。
+ */
+const VOLATILE_BY_VIEW = {
+  overview: ['table.tbl'],
+};
 
-async function hideVolatile(evaluate) {
+async function hideVolatile(evaluate, view) {
   // `AK_BASELINE_NO_MASK=1` 只用于自检：把「遮罩后」与「遮罩前」各截一次做对比，
   // 用像素差证明遮罩真的盖住了这些区域。正常跑 capture/compare 时不要开。
   if (process.env.AK_BASELINE_NO_MASK) return 'masking disabled by AK_BASELINE_NO_MASK';
-  const selectors = JSON.stringify(VOLATILE_SELECTORS);
+  const selectors = JSON.stringify([...VOLATILE_SELECTORS, ...(VOLATILE_BY_VIEW[view] || [])]);
   const patterns = JSON.stringify(VOLATILE_PATTERNS);
   return evaluate(`(() => {
     const patterns = ${patterns}.map((p) => new RegExp(p, 'u'));
@@ -87,7 +97,8 @@ async function hideVolatile(evaluate) {
     let hidden = 0;
     for (const selector of ${selectors}) {
       for (const node of document.querySelectorAll(selector)) {
-        if (node.children.length) continue;
+        // 整块藏（表体）与零散藏（叶子）都保住占位，所以用 visibility 而不是
+        // display：元素一消失布局就重排，那就不是「布局没变」的证据了。
         node.style.setProperty('visibility', 'hidden');
         hidden++;
       }
@@ -240,7 +251,7 @@ async function captureViews(dir) {
     await evaluate(`document.querySelector('[data-view="${view}"]').click()`);
     await wait(1400);
     // 每次渲染后重新隐藏：换个页面 DOM 就是新的，之前设的 visibility 早就没了。
-    await hideVolatile(evaluate);
+    await hideVolatile(evaluate, view);
     const shot = await send('Page.captureScreenshot', { format: 'png' });
     const file = path.join(dir, `${name}-${VIEWPORT.width}x${VIEWPORT.height}.png`);
     fs.writeFileSync(file, Buffer.from(shot.result.data, 'base64'));

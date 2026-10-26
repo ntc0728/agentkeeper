@@ -213,8 +213,8 @@ function clock(iso) {
  * 为什么要有：以前这个窗口里抛的异常只在 WebView2 的 devtools 里留痕，一旦打包
  * 就没人看得见。外壳每条上报追加一行 JSON（只保留最新 200 条，永不 panic）。
  *
- * 上报的字段结构是 Rust 命令定死的：
- *   { kind, message, stack, view, at }
+ * 上报的字段结构是 Rust 命令定死的，字段名不能改：
+  *   字段：{ kind, message, stack, view, at }
  *
  * 三条规则，都是为了让故障不要比 bug 本身更糟：
  *   1. 绝不假设命令存在 —— 旧版本的 bridge 没有 `uiError`，所以调用要加守卫，
@@ -352,7 +352,7 @@ async function runRetry(btn, retry) {
     await retry();
   } catch (_e) {
     // 被重试的那一步自己会上报并画出失败；在这里吞掉，是为了不让它变成
-    // unhandled rejection。
+    // unhandled rejection（未处理的 promise 拒绝）。
   } finally {
     // 成功的重试通常会换掉 #view-root，此时按钮可能已经脱离文档了 —— 再去恢复
     // 它无害但也没意义。
@@ -365,7 +365,7 @@ async function runRetry(btn, retry) {
 }
 
 /* ------------------------------------------------------------------ */
-/* toast / modal                                                       */
+/* 轻提示（toast）/ 模态框（modal）                                     */
 /* ------------------------------------------------------------------ */
 
 function toast(msg, kind = '') {
@@ -1192,11 +1192,10 @@ function focusKeyNow() {
 }
 
 /**
- * Put focus back on the equivalent control after a re-render.
+ * 重渲染之后把焦点放回对应的控件上。
  *
- * Checkbox / filter changes re-render the whole view; without this the focus
- * fell to <body> on every click, so a keyboard user restarted from the top of
- * the page after each selection and a screen reader lost its place.
+ * 勾选框 / 筛选条件的变化会重渲染整个视图；没有这套，每次点击焦点都会掉到
+ * <body> 上，于是键盘用户每选一次都要从页面顶部重新开始，屏幕阅读器也丢了位置。
  */
 function restoreFocusKey(root, key) {
   if (!key) return;
@@ -1214,13 +1213,12 @@ function render() {
   root.innerHTML = '';
   try {
     const out = v.render();
-    // Async views (activity) resolve after the fact; show a placeholder and
-    // swap in the real node when the data lands.
+    // 异步视图（活动）是事后才 resolve 的；先放个占位，数据到了再换成真正的节点。
     if (out && typeof out.then === 'function') {
       root.appendChild(el('div', { class: 'empty' }, t('common.loading')));
       const viewAtCall = S.view;
       out.then((node) => {
-        if (S.view !== viewAtCall) return;   // user navigated away
+        if (S.view !== viewAtCall) return;   // 用户已经切走了
         root.innerHTML = '';
         root.appendChild(node);
         restoreFocusKey(root, keepFocus);
@@ -1242,11 +1240,11 @@ function render() {
 }
 
 /**
- * Sidebar collapse state → the toggle button.
+ * 侧栏的折叠状态 → 那个切换按钮。
  *
- * The icon-only rail hides `.nav-text`, so each nav item needs an accessible
- * name that survives display:none; aria-label + title carry it. Called from
- * applyLanguage (label language) and from the toggle itself.
+ * 只剩图标的侧栏会把 `.nav-text` 隐藏掉，所以每个导航项都需要一个能扛住
+ * display:none 的可访问名字；aria-label 加 title 一起承担。由 applyLanguage
+ * （文案语言）和切换动作本身调用。
  */
 function syncSideToggle() {
   const btn = $('#side-toggle');
@@ -1259,13 +1257,13 @@ function syncSideToggle() {
   btn.textContent = collapsed ? '»' : '«';
 }
 
-/** Re-render everything that shows a translated string (nav, titles, counts). */
+/** 重渲染所有显示着翻译文案的东西（导航、标题、计数）。 */
 /**
- * Sidebar labels, including the badge counts.
+ * 侧栏文案，含徽标上的数字。
  *
- * `aria-label` replaces descendant text, so the badges ("969", the issue count,
- * the update dot) were invisible to assistive tech even though they are the only
- * place those numbers live. Keep the visible text in sync for the same reason.
+ * `aria-label` 会覆盖后代文本，所以那些徽标（「969」、问题计数、更新小圆点）对
+ * 辅助技术是不可见的 —— 尽管它们是这些数字唯一存在的地方。出于同样的理由，可见
+ * 文本也要保持同步。
  */
 function syncNavNames() {
   for (const n of $$('.nav-item')) {
@@ -1283,8 +1281,8 @@ function syncNavNames() {
 function applyLanguage(lang) {
   document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
   syncNavNames();
-  // Static markup in index.html opts in with data-i18n / data-i18n-placeholder
-  // / data-i18n-title / data-i18n-label (ARIA names, which have no text node).
+  // index.html 里的静态标记用 data-i18n / data-i18n-placeholder /
+  // data-i18n-title / data-i18n-label（ARIA 名字，它们没有文本节点）来声明参与。
   for (const n of $$('[data-i18n]')) n.textContent = t(n.dataset.i18n);
   for (const n of $$('[data-i18n-placeholder]')) n.placeholder = t(n.dataset.i18nPlaceholder);
   for (const n of $$('[data-i18n-title]')) n.title = t(n.dataset.i18nTitle);
@@ -1293,8 +1291,8 @@ function applyLanguage(lang) {
   if (group) group.textContent = t('nav.groupOperate');
   const overview = $('#nav-group-overview');
   if (overview) overview.textContent = t('nav.groupOverview');
-  // #btn-scan's title comes from data-i18n-title="nav.rescanTitle" in the markup;
-  // do not overwrite it here with a subtitle sentence (it reads wrong on a button).
+  // #btn-scan 的 title 来自标记里的 data-i18n-title="nav.rescanTitle"；这里不要
+  // 拿一句副标题覆盖它（在按钮上读起来是错的）。
   syncSideToggle();
   render();
 }
@@ -1328,9 +1326,8 @@ function filteredAssets() {
       agent: (a, b) => a.agentLabel.localeCompare(b.agentLabel),
       scope: (a, b) => a.scope.localeCompare(b.scope)
     }[S.sortKey];
-    // An explicit sort choice is the whole point of the control, so it must win:
-    // no unconditional re-sort at the end of this function, which would discard
-    // every choice but `default`.
+    // 显式的排序选择正是这个控件的全部意义，所以它必须赢：这个函数末尾不能再有
+    // 一次无条件重排，那会把除 `default` 以外的每个选择都丢掉。
     if (cmp) {
       return list.slice().sort((a, b) => cmp(a, b) || (a.kind + a.name).localeCompare(b.kind + b.name));
     }
@@ -1343,19 +1340,17 @@ function issuesOf(a) {
 }
 
 /**
- * Assets the Health page will list: any format/validation issue or security
- * finding, excluding host caches (their defects are the vendor's, not the
- * user's). The sidebar badge, the dashboard "needs attention" card and the
- * Health page all read this one predicate.
+ * 健康页会列出的资源：任何格式 / 校验问题或安全发现，但排除宿主缓存（那里的缺陷
+ * 是厂商的，不是用户的）。侧栏徽标、仪表盘「需要处理」卡片和健康页读的都是这
+ * 一个判据。
  */
 function issueAssets(d) {
   return (d.assets || []).filter((a) =>
     ((a.issues || []).length || (a.security || []).length) && (a.origin || 'user') !== 'cached');
 }
 
-/* Raw engine enums (`skill`, `mcp`, `global`) are data, not UI text: they must
-   be mapped through the dictionary before they reach a chip or a table cell,
-   otherwise a zh window shows "记忆 3 · global". */
+/* 引擎的原始枚举（`skill`、`mcp`、`global`）是数据、不是 UI 文案：它们必须在到达
+   chip 或表格单元格之前过一遍词典，否则中文窗口会显示「记忆 3 · global」。 */
 
 const KIND_LABEL = {
   skill: 'assets.kindSkill',
@@ -1365,39 +1360,37 @@ const KIND_LABEL = {
   memory: 'assets.kindMemory'
 };
 
-/** "skill" → 技能 / Skills. Unknown kinds (new adapter) fall back to the enum. */
+/** "skill" → 技能 / Skills。未知的 kind（新适配器）退回枚举本身。 */
 function kindName(kind) {
   return KIND_LABEL[kind] ? t(KIND_LABEL[kind]) : kind;
 }
 
-/** "global" / "project" → 全局 / 项目级. */
+/** "global" / "project" → 全局 / 项目级。 */
 function scopeName(scope) {
   return scope === 'project' ? t('assets.scopeProject') : t('assets.scopeGlobal');
 }
 
 /* ------------------------------------------------------------------ */
-/* view: overview                                                      */
+/* 视图：总览                                                          */
 /* ------------------------------------------------------------------ */
 
 /**
- * Asset counts split by kind, for the dashboard's per-agent table.
+ * 按 kind 拆分的资源计数，给仪表盘的「每个 agent」表格用。
  *
- * One shared KIND_COLS definition, so the header order and the cell order can
- * never drift apart — a per-agent row whose columns were built from a
- * different list than its header is exactly the "the numbers do not match the
- * titles" defect.
+ * 共用一份 KIND_COLS 定义，这样表头顺序和单元格顺序永远不可能走偏 —— 一个
+ * 「每个 agent」行的列如果跟表头不是同一份清单生成的，正好就是「数字对不上
+ * 标题」那个缺陷。
  */
 const KIND_COLS = ['skill', 'mcp', 'plugin', 'rule', 'memory'];
 
 function viewOverview() {
   const d = S.data;
   const s = d.summary;
-  // Same predicate as the sidebar badge and the Health page (issueAssets), so
-  // the three cannot disagree about how many assets need attention.
+  // 和侧栏徽标、健康页同一个判据（issueAssets），所以三者不可能对「有多少资源
+  // 需要处理」给出不同的答案。
   const issueCount = issueAssets(d).length;
-  // .view-fill: the view root is a scrolling box of unknown height, so the two
-  // panels below have to claim the remaining space rather than sit as short
-  // cards at the top of an empty page.
+  // .view-fill：视图根是一个高度未知的滚动盒子，所以下面两个面板得去占掉剩余
+  // 空间，而不是缩在空页面顶部当两张矮卡片。
   const wrap = el('div', { class: 'view-fill' });
 
   const cached = s.byOrigin.cached || 0;
@@ -1427,18 +1420,16 @@ function viewOverview() {
   );
   wrap.appendChild(stats);
 
-  // Each panel owns a full row. Side by side they had to share ~560px of card
-  // width at the common 1440px viewport, and the agent table's eight columns
-  // then clipped its own Agent column to 68px — a column narrow enough to
-  // ellipsize the very label it exists to identify. Stacked, each table gets the
-  // full content width, and the two panels split the leftover height.
+  // 每个面板独占一整行。并排的话，在常见的 1440px 视口下它们要分掉约 560px 的
+  // 卡片宽度，于是 agent 表的八列会把自己那列 Agent 压到 68px —— 窄到把它本该
+  // 用来标识的那个标签都做了省略号。改成上下堆叠后，每张表都拿到完整的内容
+  // 宽度，两个面板再瓜分剩下的高度。
   const row = el('div', { class: 'row-fill col mt' });
 
-  /* per agent — full width, one column per kind.
-     The composition panel that used to sit here is gone: its stacked bar
-     duplicated the eight stat cards directly above it (same five kinds, same
-     numbers), and the half-column card it shared a row with left both cards
-     too short to read. */
+  /* 每个 agent —— 整宽，每个 kind 一列。
+     原来放在这里的「构成」面板被去掉了：它的堆叠条重复了正上方那八张统计卡
+     （同样五种 kind，同样那几个数字），而它跟另一张卡共享半列的结果，是两张卡
+     都矮到读不出来。 */
   const perAgent = new Map();
   for (const a of d.assets) {
     if (!perAgent.has(a.agentId)) {
@@ -1481,7 +1472,7 @@ function viewOverview() {
           : el('tr', {}, el('td', { colspan: '8', class: 'empty' }, t('empty.noMatch')))))));
   row.appendChild(el('div', { class: 'flex-1-min' }, agentCard));
 
-  /* recent activity */
+  /* 最近活动 */
   const recent = d.assets
     .filter((a) => a.mtime)
     .sort((a, b) => new Date(b.mtime) - new Date(a.mtime))
@@ -1516,17 +1507,15 @@ function viewOverview() {
 }
 
 /**
- * Dashboard agent row → the asset list filtered to that agent.
+ * 仪表盘的 agent 行 → 过滤到该 agent 的资源列表。
  *
- * Every other dimension is reset before navigating. Leaving a dimension
- * behind is how a click lands on an empty list: the per-agent table sits under
- * eight stat cards, several of which just wrote `kindFilter` and
- * `originFilter`, and those are remembered across navigations (persistUiState)
- * and across restarts (restoreUiState). A row whose agent owns a single asset
- * is then filtered by that asset's kind *and* by an origin filter that hides
- * it, and the Assets page correctly reports "no match" for a filter the user
- * never set. Page must be reset for the same reason: landing on page 4 of a
- * 1-row result set is an empty table.
+ * 跳转之前会把其他每个维度都重置。留下一个维度，正是「点一下却落到空列表」的
+ * 成因：每个 agent 那张表在八张统计卡下面，其中几张刚刚写过 `kindFilter` 和
+ * `originFilter`，而这两个值会跨导航（persistUiState）、跨重启（restoreUiState）
+ * 被记住。于是「某个 agent 只拥有一条资源」的那一行，会同时被那条资源的 kind
+ * *和*一个把它藏起来的来源过滤器过滤掉，资源页就理所当然地报「无匹配」—— 而这
+ * 个筛选条件用户从来没设过。页码必须重置是同一个道理：落在一个只有 1 行结果集
+ * 的第 4 页，看到的就是一张空表。
  */
 function drillAgent(agentId) {
   S.kindFilter = 'all';
@@ -1543,14 +1532,13 @@ function drillAgent(agentId) {
 }
 
 /**
- * Dashboard stat tile. Pass `onClick` to make it a drill-down target —
- * a dead card that only reports a number forces the user to go hunting for
- * where that number lives.
+ * 仪表盘的统计卡。传 `onClick` 就把它变成下钻入口 —— 一张只报数字、点了没反应的
+ * 死卡，会逼着用户自己去别处找这个数字在哪。
  */
 /**
- * Enter/Space handler for rows that are only clickable (agent, recent, matrix,
- * project rows). The asset table is the exception: it moves a
- * cursor with ↑/↓ so 50 rows do not become 50 tab stops.
+ * 给那些只能点的行（agent 行、最近活动行、矩阵行、项目行）用的 Enter/Space
+ * 处理函数。资源表是个例外：它用 ↑/↓ 移动光标，所以 50 行不会变成 50 个
+ * tab 停靠点。
  */
 const rowKey = (fn) => (e) => {
   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); }
@@ -1577,11 +1565,11 @@ function statCard(cls, label, value, foot, onClick) {
   return node;
 }
 
-/* i18n + theme (defined in i18n.js / theme-init.js) */
+/* i18n 与主题（定义在 i18n.js / theme-init.js 里） */
 const i18n = window.__akI18n;
 const t = (k, vars) => i18n.t(k, vars);
 
-/** Switch view and keep the sidebar in sync. Single place for navigation. */
+/** 切换视图并保持侧栏同步。导航只有这一个出口。 */
 function go(view) {
   if (!VIEWS[view]) view = 'overview';
   S.view = view;
@@ -1591,17 +1579,16 @@ function go(view) {
 }
 
 /**
- * `#search` shows `S.filter`, but drill-in paths (stat cards, project rows) set
- * the filter without typing. The box must follow the filter, or the UI claims
- * a query the list is not applying.
+ * `#search` 显示的是 `S.filter`，但下钻路径（统计卡、项目行）是设筛选条件而不是
+ * 敲字的。输入框必须跟着筛选条件走，否则界面会声称有一个列表并没有在用的查询。
  */
 function syncSearchBox() {
   const s = $('#search');
   if (s && document.activeElement !== s) s.value = S.filter || '';
 }
 
-/** Persist the asset-list UI state across restarts. Filters and sort survive;
- * the selected row does not (it may not exist after a rescan). */
+/** 跨重启保存资源列表的 UI 状态。筛选与排序会活下来；选中的那一行不会
+ * （重扫之后它可能已经不存在了）。 */
 function persistUiState() {
   try {
     localStorage.setItem('ak.ui', JSON.stringify({
@@ -1612,7 +1599,7 @@ function persistUiState() {
       sortKey: S.sortKey,
       onlyShadowed: S.onlyShadowed
     }));
-  } catch (e) { /* private mode — filters just don't persist */ }
+  } catch (e) { /* 隐私模式 —— 筛选条件就是不持久化 */ }
 }
 
 function restoreUiState() {
@@ -1621,20 +1608,18 @@ function restoreUiState() {
     for (const k of ['kindFilter', 'agentFilter', 'scopeFilter', 'originFilter', 'sortKey', 'onlyShadowed']) {
       if (ui[k] !== undefined) S[k] = ui[k];
     }
-  } catch (e) { /* corrupt state = defaults */ }
+  } catch (e) { /* 状态损坏 = 用默认值 */ }
 }
 
-/** Jump to Assets with a pre-applied filter. */
+/** 带着预先设好的筛选条件跳到资源页。 */
 function drill(kind, origin) {
   S.kindFilter = kind;
   if (origin) S.originFilter = origin;
   else S.originFilter = kind === 'plugin' ? 'curated' : 'all';
-  // The other four dimensions are sticky: they are persisted across restarts
-  // and survive every navigation, so a stat card that only sets `kindFilter`
-  // can land on a list another filter had already emptied — and the page
-  // index can point past the end of the shorter result set, which is an empty
-  // table rather than an empty list. Reset them; the card names exactly the
-  // one dimension it drills into.
+  // 另外四个维度是「黏」的：它们跨重启持久化，并且每次导航都不会丢，所以一张只
+  // 设 `kindFilter` 的统计卡，可能落到一个已经被别的筛选条件清空的列表上 —— 而且
+  // 页码还可能指向更短结果集的末尾之外，那是一张空表而不是一个空列表。把它们
+  // 重置掉；卡片点名的就是它下钻的那一个维度。
   S.agentFilter = 'all';
   S.scopeFilter = 'all';
   S.onlyShadowed = false;
@@ -1646,15 +1631,14 @@ function drill(kind, origin) {
 }
 
 /* ------------------------------------------------------------------ */
-/* view: assets                                                        */
+/* 视图：资源                                                          */
 /* ------------------------------------------------------------------ */
 
 function viewAssets() {
   const list = filteredAssets();
 
-  // Pagination: rendering 987+ rows at once wastes frames; 50 a page keeps
-  // scroll and paint costs flat as libraries grow. Filter changes reset to
-  // page 1 (selectGroup does that).
+  // 分页：一次渲染 987+ 行是白扔帧；每页 50 行能让滚动和绘制成本随着库变大保持
+  // 平坦。筛选条件变化时回到第 1 页（selectGroup 负责）。
   const PER_PAGE = 50;
   const pageCount = Math.max(1, Math.ceil(list.length / PER_PAGE));
   if (S.page > pageCount) S.page = 1;
@@ -1682,9 +1666,8 @@ function viewAssets() {
 
   const rows = pageItems.map((a) => {
     const errs = issuesOf(a);
-    // A name has to identify the row: `{n} selected` made all 50 checkboxes
-    // announce the same thing, so a screen-reader user could not tell which
-    // asset a checkbox belongs to.
+    // 名字必须能标识这一行：`{n} selected` 会让 50 个勾选框念出同样的东西，
+    // 于是屏幕阅读器用户分不清某个勾选框属于哪条资源。
     const cb = el('input', {
       type: 'checkbox',
       'aria-label': t('batch.rowAria', { name: a.name, agent: zhText(a.agentLabel) }),
@@ -1701,8 +1684,8 @@ function viewAssets() {
       el('td', { class: 'nowrap' }, cb),
       el('td', {}, el('span', { class: `chip ${a.kind}` }, kindName(a.kind))),
       el('td', {},
-        // `title`: the name column ellipsizes at narrow widths, and a
-        // truncated skill name is not recoverable from anywhere else in the row.
+        // `title`：名称列在窄宽度下会做省略号截断，而一个截断掉的技能名从这一行
+        // 的其他任何地方都找不回来。
         el('div', { class: 't-name', title: a.name }, a.name),
         el('div', { class: 't-desc', title: a.description || a.meta.relLabel || '' }, a.description || (a.meta.relLabel || ''))
       ),
@@ -1736,8 +1719,8 @@ function viewAssets() {
     el('tbody', {}, rows.length ? rows : el('tr', {}, el('td', { colspan: '7' }, el('div', { class: 'empty' }, t('empty.noMatch')))))
   );
 
-  // Keyboard navigation: ↑/↓ move a virtual cursor, Enter opens. The active
-  // row scrolls into view so long lists stay operable without a mouse.
+  // 键盘导航：↑/↓ 移动一个虚拟光标，Enter 打开。当前行会滚动进视野，所以长列表
+  // 不用鼠标也照样能操作。
   let kbIndex = -1;
   tbl.addEventListener('keydown', (e) => {
     if (!rows.length) return;
@@ -1753,8 +1736,8 @@ function viewAssets() {
 
   wrap.appendChild(el('div', { class: 'card' }, tbl));
 
-  // Batch bar appears only when something is checked. Actions are disabled
-  // while a dialog is open is unnecessary — modals stack above it anyway.
+  // 批量操作条只在有勾选时出现。至于「对话框打开时禁用操作」则没必要 —— 模态
+  // 本来就叠在它上面。
   if (S.checked.size > 0) {
     const selected = (S.data?.assets || []).filter((a) => S.checked.has(a.id));
     wrap.appendChild(el('div', { class: 'batchbar' },
@@ -1766,7 +1749,7 @@ function viewAssets() {
     ));
   }
 
-  // Pager — only rendered when there is something to page through.
+  // 分页器 —— 只在真有东西可翻页时才渲染。
   if (list.length > PER_PAGE || S.page > 1) {
     wrap.appendChild(el('div', { class: 'card pager' },
       el('span', { class: 'info' }, t('pager.info', {
@@ -1802,7 +1785,7 @@ function agentOptions() {
   });
 }
 
-/** Accessible name for each filter dimension (a select's value is not its name). */
+/** 每个筛选维度的可访问名字（一个 select 的取值并不是它的名字）。 */
 const FILTER_LABEL = {
   kind: 'filter.kind', agent: 'filter.agent', scope: 'filter.scope',
   origin: 'filter.origin', sort: 'filter.sort'
@@ -1811,8 +1794,8 @@ const FILTER_LABEL = {
 function selectGroup(dim, current, options) {
   const s = el('select', {
     class: 'select-inline',
-    // The current option text is the only thing a reader would hear otherwise;
-    // it says "Skills" but not that this control filters *by kind*.
+    // 否则阅读器能听到的只有当前选项的文本；它会说「技能」，但不会说这个控件
+    // 是「按 kind」筛选的。
     'aria-label': t(FILTER_LABEL[dim] || 'filter.kind'),
     'data-focus-key': `filter-${dim}`
   });
@@ -1828,8 +1811,8 @@ function selectGroup(dim, current, options) {
     if (dim === 'origin') S.originFilter = s.value;
     if (dim === 'sort') S.sortKey = s.value === 'default' ? null : s.value;
     S.page = 1;
-    // A filter change redefines what "the selected ones" means. Keeping stale
-    // ids meant the batch bar offered to delete assets the user could not see.
+    // 筛选条件一变，「被选中的那些」的含义就变了。留着过期的 id，意味着批量操作
+    // 条会提出删除用户根本看不见的资源。
     S.checked.clear();
     persistUiState();
     render();
@@ -1838,7 +1821,7 @@ function selectGroup(dim, current, options) {
 }
 
 /* ------------------------------------------------------------------ */
-/* view: agents                                                        */
+/* 视图：agent                                                         */
 /* ------------------------------------------------------------------ */
 
 function viewAgents() {
@@ -1873,15 +1856,14 @@ function viewAgents() {
 }
 
 /**
- * Agent matrix: which assets exist on which agent. skillhub-local's core
- * view — gaps are immediately visible, and clicking a gap cell offers to
- * distribute the asset to that agent.
+ * Agent 矩阵：哪些资源在哪些 agent 上存在。skillhub-local 的核心视图 —— 缺口
+ * 一眼可见，点一个缺口单元格就会提出把该资源分发到那个 agent。
  */
 function matrixCard() {
   const d = S.data;
   const kind = S.matrixKind || 'skill';
   const agents = d.agents.filter((a) => a.installed);
-  // One row per (name, kind) across all agents; scope shown for ambiguity.
+  // 跨所有 agent 的每行是（name, kind）；scope 只在有歧义时显示。
   const byName = new Map();
   for (const a of d.assets) {
     if (a.kind !== kind) continue;
@@ -1906,7 +1888,7 @@ function matrixCard() {
     const row = byName.get(name);
     const missing = agents.filter((ag) => !row[ag.id]);
     const present = agents.filter((ag) => row[ag.id]);
-    // Row click opens the asset wherever it exists; gap cells stay inert.
+    // 点一行会打开它在任意 agent 上存在那份资源；缺口单元格保持无反应。
     const first = present.length ? row[present[0].id] : null;
     const openFirst = first ? () => openAsset(first.id) : null;
     return el('tr', {
@@ -1944,7 +1926,7 @@ function matrixCard() {
 }
 
 /* ------------------------------------------------------------------ */
-/* view: projects                                                      */
+/* 视图：项目                                                          */
 /* ------------------------------------------------------------------ */
 
 function viewProjects() {
@@ -1958,8 +1940,8 @@ function viewProjects() {
   wrap.appendChild(head);
 
   const rows = d.projects.map((p) =>
-    // Clicking a project filters the asset list to it (text search over the
-    // project name) — the fastest path from "which project owns this" to the assets.
+    // 点一个项目会把资源列表过滤到它（按项目名做文本搜索）—— 这是从「这个项目
+    // 拥有哪个」走到资源的最快路径。
     el('tr', { onclick: () => { S.filter = p.name.toLowerCase(); go('assets'); },
       tabindex: '0', onkeydown: rowKey(() => { S.filter = p.name.toLowerCase(); go('assets'); }) },
       el('td', {},
@@ -1972,8 +1954,8 @@ function viewProjects() {
       el('td', {}, el('button', {
         class: 'btn sm danger',
         onclick: async () => {
-          // Removing a project only rewrites the registry, so the target is the
-          // project directory the user is giving up — not a file that changes.
+          // 移除一个项目只改写注册表，所以目标就是用户放弃的那个项目目录 ——
+          // 而不是某个会被改动的文件。
           const ok = await confirmWrite({
             title: t('activity.removeProject'),
             action: t('common.remove'),
@@ -2014,14 +1996,14 @@ async function doImportProject() {
 }
 
 /* ------------------------------------------------------------------ */
-/* view: health                                                        */
+/* 视图：健康                                                          */
 /* ------------------------------------------------------------------ */
 
 function viewHealth() {
   const d = S.data;
   const wrap = el('div', {});
 
-  /* --- security findings first: they outrank format problems --- */
+  /* --- 安全发现排在最前面：它们比格式问题更严重 --- */
   const risky = d.assets.filter((a) => (a.security || []).length)
     .sort((a, b) => b.security.length - a.security.length);
   if (risky.length) {
@@ -2047,13 +2029,12 @@ function viewHealth() {
     ));
   }
 
-  /* --- format/validation issues --- */
+  /* --- 格式 / 校验问题 --- */
   const bad = d.assets.filter((a) => (a.issues || []).length && (a.origin || 'user') !== 'cached');
   if (!bad.length && !risky.length) {
-    // No `return` here: the baseline card below is also the only place a user
-    // can *anchor* a baseline ("建立基线"). Returning early meant the feature was
-    // unreachable on a healthy machine — exactly when you would want to record
-    // a clean starting point. Reported by the renderer audit as a UI dead end.
+    // 这里不能 `return`：下面那张基线卡同时也是用户**锚定**基线的唯一入口
+    // （「建立基线」）。提前返回会让这个功能在一台健康的机器上永远够不着 ——
+    // 而恰恰是这个时候你最想记下一个干净的起点。渲染层审计把它报为一个 UI 死路。
     wrap.appendChild(el('div', { class: 'card' }, el('div', { class: 'empty' },
       el('div', { class: 'fs-26 mb-8' }, '✓'),
       t('health.fine'))));
@@ -2083,9 +2064,8 @@ function viewHealth() {
 }
 
 /**
- * Fingerprint baseline: what changed since the user last looked. Shows counts
- * of changed/added/gone assets and lets the user re-anchor. Purely local —
- * the fingerprints are SHA256 of file content, already computed by the scan.
+ * 指纹基线：自用户上次看过之后发生了什么变化。显示变更 / 新增 / 消失的资源数量，
+ * 并允许用户重新锚定。纯本地 —— 指纹是文件内容的 SHA256，扫描时已经算好了。
  */
 function baselineCard() {
   const box = el('div', { class: 'card' },
@@ -2113,8 +2093,8 @@ function baselineCard() {
         render();
       } }, t('baseline.anchor')));
   }).catch((e) => {
-    // The card sat on "loading…" forever before this: a rejected invoke left no
-    // trace in the UI and only an unhandled rejection in the console.
+    // 在这之前，这张卡会永远停在「加载中…」：一个被拒绝的 invoke 在界面上留不下
+    // 任何痕迹，只在控制台留一条 unhandled rejection。
     reportUiError('error', e);
     const body = box.querySelector('.card-body');
     if (body) inlineRetry(body, () => render());
@@ -2123,16 +2103,16 @@ function baselineCard() {
 }
 
 /* ------------------------------------------------------------------ */
-/* view: activity                                                      */
+/* 视图：活动                                                          */
 /* ------------------------------------------------------------------ */
 
 async function viewActivity() {
   const wrap = el('div', {});
   const audit = await window.ak.audit({ limit: 200 });
 
-  // No transaction list and no undo button: the store no longer keeps
-  // backups, so an "undo" here could not restore anything — the journal is
-  // now purely a record of what happened, not a menu of things to reverse.
+  // 没有事务列表，也没有撤销按钮：存储不再保留备份，所以这里的「撤销」恢复不了
+  // 任何东西 —— 日志现在纯粹是一份「发生过什么」的记录，而不是一份可反向操作的
+  // 菜单。
   const items = audit.filter((r) => r.txId || r.action === 'scan').slice(0, 160).map((r) =>
     el('div', { class: `tl-item ${r.status === 'ok' ? 'ok' : r.status === 'failed' ? 'failed' : ''}` },
       el('div', { class: 'tl-head' },
@@ -2163,11 +2143,11 @@ function labelFor(r) {
 }
 
 /* ------------------------------------------------------------------ */
-/* view: settings                                                      */
+/* 视图：设置                                                          */
 /* ------------------------------------------------------------------ */
 
 /* ------------------------------------------------------------------ */
-/* discover: search the public registry, install skills via git        */
+/* 发现：搜索公共注册表，通过 git 安装技能                                */
 /* ------------------------------------------------------------------ */
 
 function viewDiscover() {
@@ -2195,10 +2175,9 @@ function viewDiscover() {
     )
   ));
 
-  // Direct install by repository. The engine has always accepted any
-  // owner/repo or GitHub URL (ak:install-skill); without this box the only
-  // reachable path was "already listed in the registry", which excludes every
-  // private or brand-new repository.
+  // 按仓库直接安装。引擎一直都接受任意 owner/repo 或 GitHub URL
+  // （ak:install-skill）；没有这个输入框，唯一走得通的路径就是「已经在注册表里列
+  // 出来了」，这把所有私有或刚建的仓库都排除在外。
   root.appendChild(el('div', { class: 'card mt-14' },
     el('div', { class: 'card-head' }, el('h2', {}, t('discover.byRepo'))),
     el('div', { class: 'card-body' },
@@ -2215,9 +2194,8 @@ function viewDiscover() {
 }
 
 /**
- * Install straight from a pasted repository reference. Reuses the same
- * dialog as a registry result so the destination picker, the security scan and
- * the shadow-layer staging behave identically.
+ * 从粘进来的仓库引用直接安装。复用和注册表结果相同的那个对话框，这样目标选择、
+ * 安全扫描和影子层暂存的行为完全一致。
  */
 async function discInstallFromInput() {
   const input = $('#disc-repo');
@@ -2236,8 +2214,8 @@ async function discInstallFromInput() {
   const cancel = el('button', { class: 'btn', onclick: closeModal }, t('common.cancel'));
   const okBtn = el('button', {
     class: 'btn primary', onclick: async () => {
-      // Installing writes new files into the agent's global skills directory —
-      // a mutation, so it asks like every other one before starting the clone.
+      // 安装会把新文件写进 agent 的全局技能目录 —— 这是一次写操作，所以它跟其他
+      // 所有写操作一样，在克隆之前先问一句。
       const ok = await confirmWrite({
         action: t('verb.install'),
         targets: targetPaths([{ agentId: sel.value, scope: 'global', projectId: null }], 'skills'),
@@ -2272,7 +2250,7 @@ async function discSearch() {
   try {
     r = await window.ak.searchRegistry({ q: S.discQ, limit: 30 });
   } catch (e) {
-    // The button stayed in its loading state forever when the invoke rejected.
+    // invoke 被拒绝时，那个按钮会永远停在 loading 状态。
     reportUiError('error', e);
     r = { ok: false, error: (e && e.message) || String(e) };
   } finally {
@@ -2288,7 +2266,7 @@ function renderDiscResults(container) {
   if (!container) return;
   container.innerHTML = '';
   if (S.discLoading) {
-    // Skeleton rows shimmer while the registry round-trip is in flight.
+    // 注册表的请求在途时，用骨架行做微光动画。
     for (const w of ['s1', 's2', 's3', 's2']) {
       container.appendChild(el('div', { class: 'disc-row' },
         el('div', { class: 'skeleton ' + w })));
@@ -2377,13 +2355,11 @@ function viewSettings() {
   const wrap = el('div', {});
   const cfg = S.settings || {};
 
-  /* --- one row per setting ------------------------------------------- */
+  /* --- 每项设置一行 -------------------------------------------------- */
   /**
-   * A settings row is a real <label for> plus an id on the control, never a
-   * styled div: a screen reader announces "Notifications, switch" from the
-   * label, and clicking the text operates the control. Rows whose control is
-   * not labelable (a read-only path, a button group) keep the plain div and
-   * the control carries its own name.
+   * 一行设置是一个真正的 <label for> 加上控件上的一个 id，绝不是一个带样式的
+   * div：屏幕阅读器会从 label 念出「通知，开关」，而点文字就能操作控件。控件本身
+   * 不可加 label 的那些行（只读路径、按钮组）保留普通 div，由控件自带名字。
    */
   let setRowSeq = 0;
   const LABELABLE = 'input, select, textarea, button, meter, output, progress';
@@ -2399,7 +2375,7 @@ function viewSettings() {
     if (!target.id) target.id = `set-row-${++setRowSeq}`;
     const hintId = hint ? `${target.id}-hint` : null;
     if (hintId) target.setAttribute('aria-describedby', hintId);
-    // role="switch" exposes no text of its own: the label is its only name.
+    // role="switch" 自己不带任何文本：label 就是它唯一的名字。
     if (target.getAttribute('role') === 'switch' && !target.getAttribute('aria-label')) {
       target.setAttribute('aria-label', label);
     }
@@ -2421,7 +2397,7 @@ function viewSettings() {
     return s;
   };
 
-  /** `name` becomes the switch's accessible name (role=switch has no text). */
+  /** `name` 会成为这个开关的可访问名字（role=switch 本身没有文本）。 */
   const toggle = (on, onChange, name) => {
     const b = el('button', {
       class: `switch${on ? ' on' : ''}`,
@@ -2441,13 +2417,13 @@ function viewSettings() {
       render();
     } else {
       toast(r.error || t('toast.saveFailed'), 'err');
-      // The control still showed the rejected value, so the UI claimed a change
-      // that never reached settings.json. Re-read what was actually stored.
+      // 控件上还显示着那个被拒绝的值，于是界面声称了一个从未写进 settings.json
+      // 的变更。重新读一遍真正存下来的东西。
       render();
     }
   };
 
-  /* --- appearance --------------------------------------------------- */
+  /* --- 外观 ---------------------------------------------------------- */
   const appearance = el('div', { class: 'card' },
     el('div', { class: 'card-head' }, el('h2', {}, t('settings.appearance'))),
     el('div', { class: 'card-body' },
@@ -2467,12 +2443,12 @@ function viewSettings() {
     ));
 
   /**
-   * The GitHub mark, inline (Octicons `mark-github`, 16×16).
+   * GitHub 的标记，内联（Octicons `mark-github`，16×16）。
    *
-   * Inline SVG rather than an <img>: the CSP allows `img-src 'self' data:`, so
-   * an icon would have to become a packaged asset that `copy-frontend.js` ships
-   * and the dist gate keeps in sync — for one glyph. `fill: currentColor` lets
-   * the surrounding button own the colour, including hover.
+   * 用内联 SVG 而不是 <img>：CSP 允许的是 `img-src 'self' data:`，所以一个图标
+   * 就得变成一个要由 `copy-frontend.js` 打包发布、并由 dist 关卡保持同步的随包
+   * 资源 —— 而这一切只为字形。用 `fill: currentColor`，就让外层的按钮自己掌握
+   * 颜色，hover 状态也包含在内。
    */
   const GITHUB_MARK = 'M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z';
 
@@ -2495,11 +2471,11 @@ function viewSettings() {
   }
 
   /**
-   * Software update card.
+   * 软件更新卡片。
    *
-   * Reads `S.update` — the snapshot the main process pushes. Every control
-   * saves through `ak:update-settings` and re-renders from the returned
-   * snapshot, so the card can never show a value the updater is not using.
+   * 读的是 `S.update` —— 主线程推过来的那份快照。每个控件都经 `ak:update-settings`
+   * 保存，并用返回的那份快照重新渲染，所以卡片绝不可能显示出一个更新器并没在用
+   * 的值。
    */
   function updateCard() {
     const u = S.update || {};
@@ -2530,8 +2506,8 @@ function viewSettings() {
       btn.textContent = label;
       if (r) {
         S.update = r;
-        // "throttled" is a successful reuse of the previous answer — anything
-        // else that failed (including a GitHub cooldown) must say why.
+        // 「被节流」是对上一次结果的一次成功复用 —— 除此之外任何失败（包括
+        // GitHub 的冷却）都必须说清楚原因。
         if (r.ok === false && r.reason !== 'throttled') {
           toast(t('settings.updateError', { error: r.lastError || r.error || 'unknown' }), 'err');
         }
@@ -2545,11 +2521,10 @@ function viewSettings() {
       if (u.hasUpdate === true) return t('settings.updateAvailable');
       if (u.hasUpdate === false) return t('settings.updateUpToDate');
       if (u.comparison === 'older') return t('settings.updateOlder');
-      // Checked but no release came back. GitHub answers 404 both for "no
-      // release published yet" and for "this repository is private and you are
-      // anonymous" — it cannot tell the two apart on purpose. With no token
-      // saved, the second cause is the one worth naming: the panel used to say
-      // "no release yet" on a repository that had one, which reads as a bug.
+      // 检查过了，但没有 release 回来。GitHub 对「还没发布任何 release」和「这个
+      // 仓库是私有的、而你是匿名用户」两种情况都返回 404 —— 它是故意不做区分的。
+      // 在没有保存 token 的前提下，第二种成因才是值得点名的：这块面板过去会在一个
+      // 明明有 release 的仓库上说「暂无 release」，读起来就像个 bug。
       if (u.checked && !u.latest) {
         return u.token && u.token.filled === false
           ? t('settings.updateNoReleaseToken')
@@ -2561,19 +2536,18 @@ function viewSettings() {
     const checkBtn = el('button', { class: 'btn sm', onclick: (e) => void checkNow(e.currentTarget) }, t('settings.updateCheckNow'));
 
     /**
-     * The auto-update settings behind one button.
+     * 一个按钮背后的那套自动更新设置。
      *
-     * Source, interval, beta channel, proxy, silent install and the token are
-     * six controls a user opens once and then never touches again. Inlined in
-     * the card they pushed the version comparison — the one thing that needs a
-     * decision — below the fold, so they now live in a dialog and the card
-     * carries only the state and the two actions.
+     * 更新源、间隔、beta 通道、代理、静默安装和 token 是六个「用户打开一次、之后
+     * 再也不碰」的控件。内联在卡片里时，它们会把版本比对 —— 唯一需要用户做决定的
+     * 那件事 —— 挤到首屏之外，所以现在它们住在一个对话框里，卡片只承担状态和那
+     * 两个动作。
      */
     const openUpdateSettings = () => openUpdateSettingsModal(ucfg, saveUpdate);
 
-    // Version comparison — the two numbers plus a one-line verdict. Both
+    // 版本比对 —— 两个数字加一行结论。
     // actions sit at the right end: 检查更新 is the right-most element, so the
-    // eye lands on the primary action rather than having to search for it.
+    // 眼睛直接落在主动作上，而不是先去找它。
     const versionRow = el('div', { class: 'upd-version' },
       el('div', { class: 'upd-version-cell' },
         el('div', { class: 'set-hint' }, t('settings.updateCurrent')),
@@ -2581,8 +2555,8 @@ function viewSettings() {
       el('div', { class: 'upd-arrow' }, '→'),
       el('div', { class: 'upd-version-cell' },
         el('div', { class: 'set-hint' }, t('settings.updateLatest')),
-        // A dash reads as "this field is empty"; the honest state is "the last
-        // check could not name a version", so say that instead.
+        // 一个破折号读起来是「这个字段是空的」；诚实的状态是「上次检查没能说出
+        // 一个版本号」，所以照实说。
         el('div', { class: `upd-version-num mono${u.hasUpdate === true ? ' is-new' : ''}` }, u.latest || t('settings.updateUnknown'))),
       el('div', { class: 'spacer' }),
       el('button', { class: 'btn sm', onclick: openUpdateSettings }, t('settings.updateSettingsBtn')),
@@ -2592,8 +2566,8 @@ function viewSettings() {
     const verdict = versionLine();
     if (verdict) body.appendChild(el('div', { class: 'muted fs-11 mt-6' }, verdict));
 
-    // Timestamps: "checked at" is the moment of the real check (main-process
-    // clock), never "a few minutes ago because the page re-rendered".
+    // 时间戳：「检查于」指的是真正那次检查的时刻（主线程的时钟），绝不是「因为
+    // 页面重渲染了所以说是几分钟前」。
     const stamps = [];
     if (u.checkedAt) stamps.push(t('settings.updateCheckedAt', { time: new Date(u.checkedAt).toLocaleString() }));
     if (u.settings && u.settings.auto && u.nextCheckAt) {
@@ -2602,7 +2576,7 @@ function viewSettings() {
     if (stamps.length) body.appendChild(el('div', { class: 'muted fs-11 mt-6' }, stamps.join(' · ')));
     if (u.lastError) body.appendChild(el('div', { class: 'alert warn mt-8' }, t('settings.updateError', { error: u.lastError })));
 
-    // Download state: progress while active, install button once ready.
+    // 下载状态：进行中是进度条，就绪之后变成安装按钮。
     const task = u.task;
     if (task && task.active) {
       const line = el('div', { class: 'upd-progress-line' });
@@ -2634,9 +2608,9 @@ function viewSettings() {
         installBtn));
     }
 
-    // No "open the release page" button on this card: the changelog panel
-    // below already links every version to its release page, and the card stays
-    // about the decision (compare, check, settings).
+    // 这张卡片上不放「打开 release 页面」按钮：下面那个更新日志面板已经把每个
+    // 版本都链到了它的 release 页，而卡片只需要专注于那个决定（比对、检查、
+    // 设置）。
 
     return el('div', { class: 'card' },
       el('div', { class: 'card-head' },
@@ -2648,14 +2622,13 @@ function viewSettings() {
   /**
    * Auto-update settings, behind the card's 更新设置 button.
    *
-   * Every control writes through `saveUpdate` and re-renders from the snapshot
-   * the main process returns, so a value on screen is always the value the
-   * updater is using. The interval field keeps its draft in S so a re-render
-   * (a poll lands while the user is typing) does not discard half-typed input.
+   * 每个控件都经 `saveUpdate` 写入，并用主线程返回的那份快照重新渲染，所以屏幕上
+   * 的值永远就是更新器正在用的那个值。间隔输入框把草稿存在 S 里，这样一次重渲染
+   * （用户正在打字时一次轮询回来了）不会把打了一半的内容丢掉。
    *
-   * The release repository is NOT editable: it is a property of this build
-   * (package.json → repository), and asking the user to type their own
-   * project's address is the single most confusing thing this dialog could do.
+   * 发布仓库是不可编辑的：它是这个构建产物的一项属性（package.json → repository），
+   * 而让用户去输入他们自己项目的地址，是这个对话框能做出来的最容易让人困惑的
+   * 一件事。
    */
   function openUpdateSettingsModal(ucfg, saveUpdate) {
     const u = S.update || {};
@@ -2693,11 +2666,10 @@ function viewSettings() {
       return b;
     };
 
-    // The source is a link, not a sentence: the repository is the one thing in
-    // this dialog a user may need to open — to read a release, or to check
-    // whether the repository is private before hunting for a token. Rendered as
-    // the GitHub mark + `owner/repo`, opening through the same command the
-    // release-page links use (so the URL allow-list stays in Rust).
+    // 更新源是一个链接，不是一句话：仓库是这个对话框里用户唯一可能需要打开的东西
+    // —— 读一个 release，或者在去找 token 之前先确认这个仓库是不是私有的。渲染成
+    // GitHub 标记加 `owner/repo`，并且复用 release 页链接用的那条命令来打开
+    // （这样 URL 白名单就始终留在 Rust 那边）。
     const repoUrl = u.repo ? `https://github.com/${u.repo}` : '';
     const repoLabel = u.repo || t('settings.updateUnknown');
     body.appendChild(row(t('settings.updateSource'),
@@ -2716,11 +2688,11 @@ function viewSettings() {
 
     const minutesValue = S.updateMinutesDraft !== '' ? S.updateMinutesDraft : String(ucfg.minutes || 20);
     /**
-     * One validator for both ways out of this field.
+     * 离开这个字段的两条路，共用同一个校验器。
      *
-     * The input's `onchange` checked 1–1440 but the Save button wrote whatever
-     * was typed (`0`, `99999`) straight to disk, and the failure text was the
-     * hint sentence rather than a statement that nothing was saved.
+     * 输入框的 `onchange` 会检查 1–1440，但保存按钮却把敲进去的任何东西（`0`、
+     * `99999`）直接写进磁盘，而失败文案还是那句提示语，而不是一句「什么都没保存」
+     * 的陈述。
      */
     const commitMinutes = () => {
       const draft = S.updateMinutesDraft;
@@ -2751,8 +2723,8 @@ function viewSettings() {
       switchFor(ucfg.beta, (v) => void saveUpdate({ beta: v }), t('settings.updateBeta')),
       t('settings.updateBetaHint')));
 
-    // Proxy: auto / direct / the Clash mixed port. A hand-edited settings file
-    // may hold another URL — keep it visible instead of silently rewriting it.
+    // 代理：自动 / 直连 / Clash 的混合端口。手改过的设置文件里可能存着另一个
+    // URL —— 要让它保持可见，而不是悄悄把它改写掉。
     const proxyOptions = [
       ['auto', t('settings.updateProxyAuto')],
       ['direct', t('settings.updateProxyDirect')],
@@ -2770,16 +2742,16 @@ function viewSettings() {
     proxySel.addEventListener('change', () => void saveUpdate({ proxy: proxySel.value }));
     body.appendChild(row(t('settings.updateProxy'), proxySel, t('settings.updateProxyHint')));
 
-    // Silent install: NSIS /S /R. Windows-only wording, but the switch is
-    // always visible so the setting is discoverable before it matters.
+    // 静默安装：NSIS 的 /S /R。文案只在 Windows 上成立，但这个开关始终可见，
+    // 这样等到真需要它的时候，用户已经知道有这个设置了。
     if (window.ak.platform === 'win32') {
       body.appendChild(row(t('settings.updateSilent'),
         switchFor(ucfg.silent !== false, (v) => void saveUpdate({ silent: v }), t('settings.updateSilent')),
         t('settings.updateSilentHint')));
     }
 
-    // Token: status badge + write-only input. The value is never echoed —
-    // the main process only reports filled/origin.
+    // Token：状态徽标加一个只写不读的输入框。值永远不回显 —— 主线程只报告
+    // 是否已填写以及来源。
     const token = u.token || { filled: false, origin: null, error: null };
     let badge = t('settings.updateTokenEmpty');
     if (token.error) badge = token.error;
@@ -2838,14 +2810,13 @@ function viewSettings() {
   }
 
   /**
-   * Changelog panel: every published release, newest first.
+   * 更新日志面板：每一个已发布的 release，最新的在前。
    *
-   * Fetched on its own, on first render, and cached for the session — the
-   * release history is a separate fact from the update *check* (which the
-   * updater throttles), so it must not go through `updateCheck`: clicking
-   * 检查更新 would then mean "also refetch 30 release bodies". A failure here
-   * says so in place and can be retried, rather than leaving an empty panel
-   * that looks like "this project has no releases".
+   * 它自己单独抓取，只在首次渲染时抓，并在本次会话内缓存 —— release 历史和
+   * 更新*检查*（更新器会做节流）是两件不同的事实，所以它绝不能走
+   * `updateCheck`：否则点一次「检查更新」就等于「顺带重新抓取 30 份 release
+   * 正文」。这里的失败会就地说明并且可以重试，而不是留下一块空面板 —— 那看起来
+   * 就像「这个项目从来没有 release」。
    */
   function changelogCard() {
     const list = el('div', { class: 'upd-changelog' }, el('div', { class: 'muted' }, t('common.loading')));
@@ -2870,16 +2841,14 @@ function viewSettings() {
         const current = (S.update && S.update.current) || (S.boot && S.boot.version) || '';
         list.innerHTML = '';
         for (const rel of r) {
-          // No per-row "open the release page" button: twenty of them are one
-          // action repeated twenty times. The version label itself is the link.
+          // 每行不放「打开 release 页面」按钮：二十个那样的按钮，是把同一个动作
+          // 重复二十遍。版本号文字本身就是那个链接。
           //
-          // The row is NOT a <details>/<summary> any more. It was, and the
-          // focusable link inside <summary> made axe report `nested-interactive`
-          // (serious): two controls nested in one, which screen readers read as
-          // one activation target. Rows are always expanded instead — that is
-          // what a changelog is for — and the scrollable notes carry
-          // `tabindex="0"` so a keyboard user can scroll them
-          // (`scrollable-region-focusable`).
+          // 这一行不再是 <details>/<summary> 了。它曾经是，而 <summary> 里那个
+          // 可聚焦的链接让 axe 报了 `nested-interactive`（严重级）：两个控件套在
+          // 一起，屏幕阅读器会当成一个激活目标。所以行改成始终展开 —— 更新日志
+          // 本来就该是这样的 —— 而可滚动的 release notes 带上 `tabindex="0"`，
+          // 好让键盘用户能滚动它们（`scrollable-region-focusable`）。
           const verLabel = el('span', { class: 'upd-log-ver mono' }, `v${rel.version}`);
           if (rel.url) {
             verLabel.classList.add('clickable');
@@ -2918,12 +2887,12 @@ function viewSettings() {
     return card;
   }
 
-  /* --- storage ------------------------------------------------------ */
+  /* --- 存储策略 ------------------------------------------------------ */
 
-  // No backup row: the store keeps no file copies, and a `backups\` directory
-  // left by an older build is deleted on the next launch (settings.rs
-  // `remove_legacy_backups`). Pointing the user at a folder that no longer
-  // exists would be worse than saying nothing.
+  // 不做备份行：存储层不保留文件副本，旧版本留下的 `backups` 目录会在下次启动
+  // 时被删掉（settings.rs 的 `remove_legacy_backups`）。指给用户一个已经不存在
+  // 的目录，比什么都不说更糟：用户会去点一个空路径，然后收到一句「找不到」。
+  // （旧版本确实留过备份目录，删掉它是为了不再让人以为可以回滚。）
   const storage = el('div', { class: 'card' },
     el('div', { class: 'card-head' }, el('h2', {}, t('settings.storage'))),
     el('div', { class: 'card-body' },
@@ -2936,7 +2905,7 @@ function viewSettings() {
         el('button', { class: 'btn', onclick: () => window.ak.openStore() }, t('settings.openStore')))
     ));
 
-  /* --- adapters ----------------------------------------------------- */
+  /* --- 适配器 ------------------------------------------------------- */
   const adapters = el('div', { class: 'card' },
     el('div', { class: 'card-head' },
       el('h2', {}, t('settings.adapters')),
@@ -2948,8 +2917,8 @@ function viewSettings() {
     ));
 
   wrap.appendChild(appearance);
-  // Full width: the update card holds the version comparison and the latest
-  // release notes; half a column squeezes them. The channel/proxy/token
+  // 整行宽度：更新卡片只放版本对比与两个动作；挤在半列里会把它压扁。通道/代
+  // 理/令牌这些控件已经挪到它的「更新设置」按钮后面，说明文字在下面的更新日志面板里。
   // controls moved behind its 更新设置 button.
   wrap.appendChild(el('div', { class: 'mt-14' }, updateCard()));
   wrap.appendChild(changelogCard());
@@ -2958,11 +2927,11 @@ function viewSettings() {
 }
 
 /**
- * Apply a theme preference to <html>.
+ * 把主题偏好应用到 <html>。
  *
- * localStorage wins over the persisted settings: it is what the user just
- * clicked, and settings.json only refreshes after the save round-trip. Without
- * this precedence a fresh reload re-applies the stale stored value.
+ * localStorage 优先于持久化设置：它才是用户刚点的那一下，而 settings.json 要等
+ * 保存往返之后才刷新。没有这个优先级，重新加载页面会把旧值又盖回来。
+ *
  */
 function applyTheme(pref) {
   const stored = localStorage.getItem('ak.theme');
@@ -2974,7 +2943,7 @@ function applyTheme(pref) {
 }
 
 /* ------------------------------------------------------------------ */
-/* asset drawer                                                        */
+/* 资产抽屉                                                          */
 /* ------------------------------------------------------------------ */
 
 async function openAsset(id) {
@@ -2983,8 +2952,8 @@ async function openAsset(id) {
   try {
     r = await window.ak.readAsset(id);
   } catch (e) {
-    // No catch here meant a rejected invoke turned the row click into a dead
-    // click: no panel, no toast, nothing.
+    // 这里不 catch，rejected 的 invoke 会让整行点击变成死点击：没有面板、没有
+    // 提示、什么都没有。
     reportUiError('error', e);
     S.selected = null;
     return toast(t('toast.readFailed'), 'err');
@@ -3032,7 +3001,7 @@ async function openAsset(id) {
     a.meta.skillCount ? el('dd', {}, t('drawer.bundledCount', { skills: a.meta.skillCount, agents: a.meta.agentCount, list: (a.meta.components || []).join(', ') })) : null
   ));
 
-  /* actions */
+  /* 动作 */
   const actions = el('div', { class: 'flex flex-wrap gap-sm my-14' });
   if (a.kind === 'skill' && a.writable) {
     actions.appendChild(el('button', { class: 'btn primary', onclick: () => openSkillEditor(a) }, t('editor.edit')));
@@ -3045,9 +3014,9 @@ async function openAsset(id) {
     actions.appendChild(el('button', { class: 'btn primary', onclick: () => openMcpEditor(a) }, t('mcp.editServer')));
     actions.appendChild(el('button', { class: 'btn danger', onclick: () => doDelete(a) }, t('common.remove')));
   }
-  // Same gate as the context menu (`showCtxMenu`): a plugin cache or a
-  // host-owned file has no writable destination, and offering the button there
-  // opened an empty picker.
+  // 与右键菜单（`showCtxMenu`）同一道闸：插件缓存或宿主自有的文件没有可写目标，
+  // 在那里还摆按钮，只会打开一个空的文件选择器。
+  // 按钮因此只在真的有目标时出现。
   if (a.writable && DISTRIBUTE_KEY[a.kind]) {
     actions.appendChild(el('button', { class: 'btn', onclick: () => openDistribute(a) }, t('distribute.go') + '…'));
   }
@@ -3057,7 +3026,7 @@ async function openAsset(id) {
   actions.appendChild(el('button', { class: 'btn ghost', onclick: () => window.ak.openPath(a.file) }, t('assets.reveal')));
   wrap.appendChild(actions);
 
-  /* editor */
+  /* 编辑器 */
   if (editable) {
     wrap.appendChild(el('div', { class: 'sec-title' }, t('editor.content')));
     const ta = el('textarea', { class: 'editor', id: 'asset-editor' });
@@ -3067,7 +3036,7 @@ async function openAsset(id) {
     wrap.appendChild(el('div', { class: 'muted fs-11 mt-6' }, t('drawer.saveHint')));
   } else if (a.kind === 'plugin') {
     wrap.appendChild(el('div', { class: 'sec-title' }, t('drawer.nested', { n: (a.meta.nested || []).length })));
-    // .tbl.static: read-only inventory, rows deliberately not clickable.
+    // .tbl.static：只读清单，行刻意不可点。
     wrap.appendChild(el('table', { class: 'tbl static' },
       el('thead', {}, el('tr', {}, el('th', {}, t('th.type')), el('th', {}, t('th.name')))),
       el('tbody', {}, (a.meta.nested || []).map((n) =>
@@ -3089,8 +3058,8 @@ async function saveSelected() {
   const d = await window.ak.diff(S.selected, content);
   if (d.ok && d.lines.length === 0) return toast(t('editor.noChanges'), 'warn');
   const asset = (S.data?.assets || []).find((a) => a.id === S.selected);
-  // The diff already ran, so the dialog can name the file that changes; the
-  // write itself waits for the answer.
+  // diff 已经跑过，所以对话框能直接点名要改的是哪个文件；写入本身要等用户回答。
+  // （先算 diff 再问，是为了让人看清到底会改什么，而不是对着文件名猜。）
   const ok = await confirmWrite({
     action: t('verb.update'),
     targets: [asset ? asset.file : S.selected],
@@ -3123,11 +3092,11 @@ async function doDelete(a) {
   if (!r.ok) return toast(r.error, 'err');
   S.checked.delete(a.id);   // keep the batch bar honest after a drawer delete
   toast(t('toast.deleted'), 'ok');
-  // A delete is the one destructive action the user is most likely to walk
-  // away from — it must reach them even if they were not looking at the window.
+  // 删除是用户最可能中途走开的那个破坏性动作：即使他没在看窗口，这个确认也必须
+  // 送到他面前。
   maybeNotify('notify.deleted', { name: a.name });
-  // The asset is gone; the unsaved edit can no longer be written, so the discard
-  // guard must not ask about it on the way out.
+  // 资产已经没了，那份没保存的编辑也写不回去了，所以离开时的「放弃未保存」
+  // 提示不该再问它。
   S.dirty = false;
   void closeDrawer();
   $('#scrim').classList.remove('on');
@@ -3159,7 +3128,7 @@ function doDiff(a, current) {
 }
 
 /* ------------------------------------------------------------------ */
-/* editors                                                             */
+/* 编辑器                                                            */
 /* ------------------------------------------------------------------ */
 
 function targetPicker(selected, kindRel = 'skills') {
@@ -3191,7 +3160,7 @@ function openSkillEditor(asset) {
   const bodyVal = asset ? asset.raw ? asset.raw.replace(/^---[\s\S]*?\n---\n/, '') : '' : '';
 
   const f = {};
-  /** A label that is actually attached to its control (click-to-focus works). */
+  /** 一个真正绑到控件上的 label（点文字能聚焦）。 */
   let fieldSeq = 0;
   const lab = (text, control) => {
     if (!control.id) control.id = `ed-field-${++fieldSeq}`;
@@ -3199,10 +3168,10 @@ function openSkillEditor(asset) {
   };
   const mk = (key, label, hint, value, ph, locked) => {
     const i = el('input', { placeholder: ph || '', value: value ?? '' });
-    // A skill's name is its directory name. Letting the field be edited on an
-    // existing asset only produces a validation error the user cannot act on
-    // ("name must match its directory"), so it is read-only with the reason
-    // shown instead.
+    // 技能名就是目录名。允许改已有资产的这个字段，只会产出一条用户没法处理的
+    // 校验错误（「名称必须与目录一致」），所以这个字段是只读的，并把原因写出来。
+    // （改名的正确做法是改目录名，引擎会跟着走。）
+    //
     if (locked) {
       i.readOnly = true;
       i.disabled = false;
@@ -3240,9 +3209,9 @@ function openSkillEditor(asset) {
   save.addEventListener('click', async () => {
     const targets = picker.get();
     if (!targets.length) return toast(t('editor.selectTarget'), 'warn');
-    // Directory-level list: the skill's folder name comes from the form and is
-    // validated by the engine, so naming `<dir>\<name>` here could print a path
-    // that never gets created.
+    // 目录级清单：技能的文件夹名来自表单并由引擎校验，在这里拼出 `<dir>\<name>`
+    // 只会打印一个根本不会被创建的路径。
+    //
     const ok = await confirmWrite({
       action: t(asset ? 'verb.update' : 'verb.create'),
       targets: targetPaths(targets, 'skills'),
@@ -3278,19 +3247,19 @@ function openSkillEditor(asset) {
   openModal(asset ? t('editor.editSkillTitle', { name: asset.name }) : t('editor.newSkill'), node, [el('button', { class: 'btn', onclick: closeModal }, t('common.cancel')), save]);
 }
 
-/** `KEY<sep>value` object → textarea lines (inverse of parseKv below). */
+/** `KEY<sep>value` 对象 ⇄ textarea 行（下面 parseKv 的逆运算）。 */
 function kvLines(obj, sep) {
   return Object.entries(obj || {}).map(([k, v]) => k + sep + v).join('\n');
 }
 
 /**
- * MCP server editor.
- * A structured form, not a JSON text box. The engine already validates
- * transports (`core/validate.rs`), and a JSON textarea made the user the
- * integration's last line of defence against a typo that the validator would
- * have caught two fields earlier. The raw JSON box stays available under
- * "advanced" for configs this form cannot express (headers, custom types),
- * and whichever of the two the user touched last is what gets saved.
+ * MCP 服务编辑器。
+ *
+ * 一个结构化表单，不是 JSON 文本框。引擎已经会校验传输方式（`core/validate.rs`），
+ * 而 JSON 文本框等于让用户去当这次集成的最后一道防线，替校验器挡下它本该
+ * 提前两栏就拦住的笔误。原始 JSON 框仍保留在「高级」里，给这个表单表达不了的
+ * 配置用（自定义头、自定义类型）；用户最后碰过哪一个，就保存哪一个。
+ *
  */
 function openMcpEditor(asset) {
   const cfg = asset ? { ...(asset.meta.config || {}) } : {};
@@ -3306,9 +3275,9 @@ function openMcpEditor(asset) {
     transportSel.appendChild(el('option', { value: v, selected: (v === 'http') === isHttp }, label));
   }
   const cmdI = el('input', { value: cfg.command || '', placeholder: 'npx' });
-  // `value` is not a valid attribute on <textarea>: el() sets attributes, so the
-  // text would never appear and saving would silently drop the existing args /
-  // env / headers. Assign the property instead.
+  // `value` 不是 <textarea> 上的合法属性：el() 设的是属性，文本就永远出不来，
+  // 保存时会悄悄丢掉已有的 args / env / headers。这里要赋给 DOM 属性本身。
+  //
   const linesBox = (cls, text) => {
     const box = el('textarea', { class: cls });
     box.value = text;
@@ -3319,7 +3288,7 @@ function openMcpEditor(asset) {
   const envI = linesBox('editor editor-short', kvLines(cfg.env, '='));
   const headersI = linesBox('editor editor-short', kvLines(cfg.headers, ': '));
 
-  /** Attach each label to its control, so clicking the text focuses the field. */
+  /** 把每个 label 绑到它的控件上，点文字就能聚焦到输入框。 */
   let mcpFieldSeq = 0;
   const mcpLab = (text, control) => {
     if (!control.id) control.id = `mcp-field-${++mcpFieldSeq}`;
@@ -3335,7 +3304,7 @@ function openMcpEditor(asset) {
     el('div', { class: 'form-row' }, mcpLab(t('editor.mcpHeaders'), headersI), headersI,
       el('div', { class: 'form-hint' }, t('editor.mcpHeadersHint'))));
 
-  /** Which transport section is on screen — a display toggle, not a re-render. */
+  /** 当前显示的是哪一段传输配置 —— 这是显示开关，不是重新渲染。 */
   function syncTransport() {
     const showHttp = transportSel.value === 'http';
     const form = stdioBox.parentNode;
@@ -3347,7 +3316,7 @@ function openMcpEditor(asset) {
   }
   transportSel.addEventListener('change', syncTransport);
 
-  /** `KEY<sep>value` lines → object; blank lines and `#` comments ignored. */
+  /** `KEY<sep>value` 行 ⇄ 对象；空行与 `#` 注释忽略。 */
   function parseKv(text, sep) {
     const out = {};
     for (const line of String(text || '').split('\n')) {
@@ -3361,9 +3330,9 @@ function openMcpEditor(asset) {
   }
 
   /**
-   * Build the config to persist: the raw box when the user edited it,
-   * otherwise the structured fields. Keys the form does not model are carried
-   * over from the original config so an edit never silently drops them.
+   * 组装要保存的配置：用户动过原始框就用原始框，否则用结构化字段。表单没有建模
+   * 的键从原配置里带过来，这样一次编辑不会悄悄把它们丢掉。
+   *
    */
   function buildConfig() {
     if (advancedDirty) {
@@ -3425,9 +3394,9 @@ function openMcpEditor(asset) {
     const parsed = buildConfig();
     if (parsed.error) return toast(t('err.badJson', { msg: parsed.error }), 'err');
     if (!parsed.command && !parsed.url) return toast(t('editor.mcpNeedTransport'), 'err');
-    // The engine merges the server into the agent's MCP config file; the
-    // adapter declares which file that is, so it is resolved the same way the
-    // distribution dialog resolves its directories.
+    // 引擎把这个服务合并进该 Agent 的 MCP 配置文件；是哪个文件由适配器声明，
+    // 所以解析方式和分发对话框解析目录的方式一致。
+    //
     const ok = await confirmWrite({
       action: t(asset ? 'verb.update' : 'verb.create'),
       targets: asset && asset.file
@@ -3457,19 +3426,19 @@ function openMcpEditor(asset) {
   openModal(asset ? t('editor.editMcpTitle', { name: asset.name }) : t('editor.addMcp'), node, [el('button', { class: 'btn', onclick: closeModal }, t('common.cancel')), save]);
 }
 
-/* ---------------- batch operations ---------------- */
+/* ---------------- 批量操作 ---------------- */
 /**
- * Batch delete. Each asset goes through the normal delete path (its own
- * backup + transaction), because one giant transaction across heterogeneous
- * agents would be harder to reason about than N small reversible ones.
- * Read-only assets (cached plugins) are skipped with a note.
+  * 批量删除。每个资产都走正常的删除路径（各自的备份 + 事务），因为跨异构
+  * Agent 的一个大事务比 N 个小的、可回滚的事务更难推理。
+  * 只读资产（缓存里的插件）会跳过并给出说明。
+  *
  */
 /**
- * Mark the batch bar busy for the duration of a serial loop.
+  * 串行循环期间把批量操作条标成忙。
  *
- * The bar was the only feedback a long multi-asset write had, and it stayed
- * clickable: a second click started a second loop over the same assets. Now the
- * buttons are disabled and the count becomes progress (aria-busy tells AT).
+  * 以前长批量的写入只有这条操作条作为反馈，而它一直可点：再点一次就会对同一批
+  * 资产开第二个循环。现在按钮被禁用，计数变成进度（aria-busy 告诉辅助技术）。
+  *
  */
 function batchBusy() {
   const bar = document.querySelector('.batchbar');
@@ -3523,9 +3492,9 @@ async function doBatchDelete(selected) {
 }
 
 /**
- * Batch distribute: one destination picker for the whole selection. Only
- * skills/rules/memories participate — plugins are read-only and MCP configs
- * have their own per-server editor.
+  * 批量分发：整批共用一个目标选择器。只有技能/规则/记忆参与 —— 插件是只读的，
+  * MCP 配置各有自己的逐服务编辑器。
+  *
  */
 function openBatchDistribute(selected) {
   const movable = selected.filter((a) => ['skill', 'rule', 'memory'].includes(a.kind));
@@ -3560,8 +3529,8 @@ function openBatchDistribute(selected) {
     if (!ok) return;
     let written = 0, failed = 0, lastTx = null;
     const total = movable.length;
-    // Same reason as the delete loop: this is N sequential IPC writes with the
-    // modal still up, so the button must show progress and refuse re-entry.
+    // 与删除循环同一个理由：这是弹窗还开着时的 N 次串行 IPC 写入，所以按钮必须
+    // 显示进度并拒绝再次进入。
     go.disabled = true;
     try {
       for (const [i, a] of movable.entries()) {
@@ -3588,7 +3557,7 @@ function openBatchDistribute(selected) {
     [el('button', { class: 'btn', onclick: closeModal }, t('common.cancel')), go]);
 }
 
-/* ---------------- bundle import / export ---------------- */
+/* ---------------- Bundle 导入 / 导出 ---------------- */
 
 async function doExportBundle(selected) {
   const ids = selected.map((a) => a.id);
@@ -3598,9 +3567,9 @@ async function doExportBundle(selected) {
 }
 
 async function doImportBundle() {
-  // The picker and the write are one IPC call, so the only place to ask is
-  // before it: the manifest decides which agent each asset lands in, and those
-  // are always the installed agents' own directories.
+  // 选择与写入是同一次 IPC 调用，所以只能问一次，而且要在写之前：清单决定每个
+  // 资产落到哪个 Agent，而那些目录始终是已安装 Agent 自己的目录。
+  //
   const homes = [...new Set(S.boot.agents.filter((a) => a.installed).map((a) => a.home))];
   const ok = await confirmWrite({
     action: t('verb.import'),
@@ -3614,14 +3583,14 @@ async function doImportBundle() {
   await rescan(true);
 }
 
-/* ---------------- context menu ---------------- */
+/* ---------------- 右键菜单 ---------------- */
 
 function hideCtxMenu() {
   const m = $('#ctxmenu');
   if (m) m.classList.remove('on');
 }
 
-/** Right-click menu for an asset row. Items that do not apply are omitted. */
+/** 资产行的右键菜单。不适用的条目直接不出现。 */
 function showCtxMenu(e, a) {
   e.preventDefault();
   const m = $('#ctxmenu');
@@ -3650,8 +3619,8 @@ function showCtxMenu(e, a) {
     item(t('ctx.delete'), () => doDelete(a), 'danger');
   }
 
-  // Measure first (menu is display:none while we position it), then reveal —
-  // showing before measuring produced a one-frame flash at 0,0.
+  // 先量再显示（定位时菜单是 display:none），然后再显示 ——
+  // 先显示再量会在 0,0 位置闪一帧。
   m.classList.add('on');
   const r = m.getBoundingClientRect();
   m.classList.remove('on');
@@ -3661,12 +3630,11 @@ function showCtxMenu(e, a) {
 }
 
 /**
- * Adapter directory list that holds each distributable kind.
+ * 装着各类可分发资产的适配器目录清单。
  *
- * `targetPicker` above has always used the plural list names; this picker used
- * the singular kind (`a.globals['skill']`), which does not exist in the
- * bootstrap payload — every destination was filtered out and the dialog opened
- * empty. Keep the mapping in one place so the two pickers cannot drift again.
+ * 上面的 `targetPicker` 一直用复数形式的名字，这个选择器却用了单数
+ * （`a.globals['skill']`），而 bootstrap 载荷里根本没有这个键 —— 于是每个目标
+ * 都被过滤掉，对话框是空的。映射要放在一处，两个选择器不能再走偏。
  */
 const DISTRIBUTE_KEY = { skill: 'skills', rule: 'rules', memory: 'memory', mcp: 'mcp' };
 
@@ -3690,9 +3658,9 @@ function openDistribute(asset) {
     if (!rels.length) continue;
     addTarget(`${a.id}|global`, { agentId: a.id, scope: 'global', projectId: null }, a.label, rels);
   }
-  // A project destination is (registered project × installed agent): the engine
-  // resolves it as registry[projectId] + that agent's project-relative dir, so
-  // the agent half must come from the clicked row, never a fixed id.
+  // 项目目标是「已登记项目 × 已安装 Agent」：引擎把它解析成 registry[projectId] 加上
+  // 该 Agent 的项目内目录，所以 Agent 那一半必须来自被点的那一行，不能写死 id。
+  //
   for (const p of (S.data?.projects || [])) {
     for (const a of S.boot.agents) {
       if (!a.installed) continue;
@@ -3731,23 +3699,23 @@ function openDistribute(asset) {
 }
 
 /* ------------------------------------------------------------------ */
-/* startup                                                             */
+/* 启动                                                                */
 /* ------------------------------------------------------------------ */
 
 /**
- * Paint the startup failure into the main area.
+  * 把启动失败画到主区域里。
  *
- * Kept as a plain DOM paint (not render()) because boot() failed before there
- * is any data to render. The retry button re-runs boot() — bootstrap + scan —
- * so a transient IPC failure no longer costs the user an application restart.
+  * 用普通 DOM 画（而不是 render()），因为 boot() 失败时还没有任何数据可渲染。
+  * 重试按钮重跑 boot()（bootstrap + 扫描），所以一次偶发的 IPC 失败不再需要
+  * 用户重启整个应用。
  */
 function showStartupError(e) {
   const root = document.getElementById('view-root');
   if (!root) return;
   if (!window.__akI18n) {
-    // No-degradation policy, last resort: even the dictionary failed to load,
-    // so t() itself would throw. Plain Chinese, escaped, no retry (there is no
-    // reliable translator to build the button label with).
+    // 不降级原则的最后手段：连字典都没加载成功，t() 本身就会抛。这里用纯中文、
+    // 手动转义、不做重试（没有可靠的翻译器可以用来拼按钮文字）。
+    //
     root.innerHTML = `<div class="alert err">启动失败：${esc(zhText(e && e.message))}</div>`;
     return;
   }
@@ -3755,7 +3723,7 @@ function showStartupError(e) {
   root.appendChild(errorPanel(t('err.startupFailed', { msg: zhError(e) }), retryBoot));
 }
 
-/** Retry target of the startup panel; reports a repeat failure the same way. */
+/** 启动面板的重试入口；重复失败也用同样的方式上报。 */
 async function retryBoot() {
   try {
     await boot();
@@ -3774,9 +3742,9 @@ function startBoot() {
 
 /* ------------------------------------------------------------------ */
 
-// Stamp the drawer's inert branch before the first boot can fail: a probe that
-// inspects a window stuck on a startup error still has to be able to tell
-// native from fallback. boot() repeats this, and setDrawerInert() is idempotent.
+// 在第一次 boot 失败之前就给抽屉的 inert 分支打上标记：即使窗口卡在启动错误
+// 画面上，探针也必须能分出原生分支和兜底分支。boot() 会重复这一步，
+// 而 setDrawerInert() 是幂等的。
 setDrawerInert(true);
 wireErrorReporting();
 startBoot();
