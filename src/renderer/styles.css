@@ -994,6 +994,9 @@ textarea.editor:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(-
 .toasts { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 80; display: flex; flex-direction: column; gap: 8px; align-items: center; }
 .toast {
   background: var(--toast-bg); color: var(--toast-text); padding: 9px 15px; border-radius: var(--r-sm); font-size: var(--fs-small);
+  /* A failed check toasts the raw GitHub message. With no width cap that ran
+     the whole width of the window; wrap it and cap it instead. */
+  max-width: min(560px, 92vw); white-space: normal; overflow-wrap: anywhere;
   box-shadow: var(--shadow-lg); display: flex; gap: 8px; align-items: center;
   animation: pop .18s ease-out;
 }
@@ -1249,7 +1252,10 @@ input:focus, select:focus, textarea:focus {
      ellipsizes instead, which keeps every head one 48px row and stops the
      body below it from stepping down the card. */
 .card-head h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card-head .sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* `white-space: normal` (from the `.sub` rule above) means this text wraps and
+   is never ellipsized — a `text-overflow` here would be dead and misleading:
+   measured in the running app at 900px, no `.card-head .sub` clipped. */
+.card-head .sub { min-width: 0; overflow: hidden; }
 
 .topbar-title { min-width: 0; }
 .topbar-title h1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

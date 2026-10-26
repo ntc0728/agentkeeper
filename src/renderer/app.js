@@ -797,6 +797,8 @@ function setDrawerInert(inert) {
 function openDrawer(title, node) {
   drawerReturnFocus = document.activeElement;
   $('#drawer-title').textContent = title;
+  // The heading ellipsizes; the tooltip is the only way back to the full name.
+  $('#drawer-title').setAttribute('title', title);
   const b = $('#drawer-body');
   b.innerHTML = '';
   b.appendChild(node);
@@ -1754,7 +1756,9 @@ function viewAssets() {
       el('td', { class: 'nowrap' }, cb),
       el('td', {}, el('span', { class: `chip ${a.kind}` }, kindName(a.kind))),
       el('td', {},
-        el('div', { class: 't-name' }, a.name),
+        // `title`: the name column ellipsizes at narrow widths, and a
+        // truncated skill name is not recoverable from anywhere else in the row.
+        el('div', { class: 't-name', title: a.name }, a.name),
         el('div', { class: 't-desc', title: a.description || a.meta.relLabel || '' }, a.description || (a.meta.relLabel || ''))
       ),
       el('td', { class: 'nowrap' },
@@ -2014,8 +2018,8 @@ function viewProjects() {
     el('tr', { onclick: () => { S.filter = p.name.toLowerCase(); go('assets'); },
       tabindex: '0', onkeydown: rowKey(() => { S.filter = p.name.toLowerCase(); go('assets'); }) },
       el('td', {},
-        el('div', { class: 't-name' }, p.name),
-        el('div', { class: 't-mono' }, p.dir)
+        el('div', { class: 't-name', title: p.name }, p.name),
+        el('div', { class: 't-mono', title: p.dir }, p.dir)
       ),
       el('td', { class: 'nowrap' }, el('span', { class: 'chip' }, t('projects.agentsCount', { n: p.agents.length }))),
       ...['skill', 'mcp', 'plugin', 'rule', 'memory'].map((k) => el('td', { class: 'num' }, String(p.counts[k] || 0))),
@@ -2367,7 +2371,7 @@ function renderDiscResults(container) {
       S.discResults.map((item) => el('div', { class: 'disc-row' },
         el('div', { class: 'disc-main' },
           el('div', { class: 'flex' },
-            el('span', { class: 'disc-name' }, item.name),
+            el('span', { class: 'disc-name', title: item.name }, item.name),
             item.author ? el('span', { class: 'chip ghost' }, item.author) : null,
             item.category ? el('span', { class: 'chip' }, item.category) : null,
             item.installs ? el('span', { class: 'mini' }, t('discover.installs', { n: item.installs })) : null
@@ -2921,11 +2925,16 @@ function viewSettings() {
         const current = (S.update && S.update.current) || (S.boot && S.boot.version) || '';
         list.innerHTML = '';
         for (const rel of r) {
-          // No per-row button: twenty "open the releases page" buttons are one
-          // action repeated twenty times, and each one only navigated away from
-          // the notes the user was reading. The version label itself is the
-          // link — one target per release, and the row still expands to show
-          // what that version changed.
+          // No per-row "open the release page" button: twenty of them are one
+          // action repeated twenty times. The version label itself is the link.
+          //
+          // The row is NOT a <details>/<summary> any more. It was, and the
+          // focusable link inside <summary> made axe report `nested-interactive`
+          // (serious): two controls nested in one, which screen readers read as
+          // one activation target. Rows are always expanded instead — that is
+          // what a changelog is for — and the scrollable notes carry
+          // `tabindex="0"` so a keyboard user can scroll them
+          // (`scrollable-region-focusable`).
           const verLabel = el('span', { class: 'upd-log-ver mono' }, `v${rel.version}`);
           if (rel.url) {
             verLabel.classList.add('clickable');
@@ -2938,8 +2947,8 @@ function viewSettings() {
               if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); }
             });
           }
-          list.appendChild(el('details', { class: 'upd-log-item', open: true },
-            el('summary', {},
+          list.appendChild(el('div', { class: 'upd-log-item' },
+            el('div', { class: 'upd-log-head' },
               verLabel,
               el('span', { class: 'upd-log-date' }, (rel.date || '').slice(0, 10)),
               String(rel.version) === String(current)
@@ -2947,7 +2956,11 @@ function viewSettings() {
                 : null,
               el('span', { class: 'spacer' }),
               rel.prerelease ? el('span', { class: 'chip warn' }, t('settings.changelogPre')) : null),
-            el('pre', { class: 'upd-log-notes' }, rel.notes || t('update.noNotes'))));
+            el('pre', {
+              class: 'upd-log-notes',
+              tabindex: '0',
+              'aria-label': t('settings.updateNotesLabel', { version: rel.version })
+            }, rel.notes || t('update.noNotes'))));
         }
       } catch (e) {
         reportUiError('error', e);
