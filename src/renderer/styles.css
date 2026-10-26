@@ -801,9 +801,15 @@ table.tbl tbody tr:focus-visible { outline: 2px solid var(--accent); outline-off
 table.tbl .t-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 table.tbl .t-mono { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .t-name { font-weight: 550; }
+/* Two lines, then clamp — one rule, not two. The declaration at the top of the
+   file used to be a one-line `nowrap` cut and was silently overridden by a
+   second `.t-desc` further down; the loser half stayed behind and read as if it
+   were in effect. `-webkit-line-clamp` needs `display: -webkit-box` and
+   `overflow: hidden`, both here. */
 .t-desc {
   font-size: var(--fs-micro); color: var(--text-3); max-width: 380px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  white-space: normal; display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; line-height: 1.45; padding: 2px 0; overflow: hidden;
 }
 .t-mono { font-family: var(--mono); font-size: var(--fs-micro); color: var(--text-2); }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -1263,12 +1269,6 @@ input:focus, select:focus, textarea:focus {
 
 .tl-head { min-width: 0; }
 .tl-title { min-width: 0; word-break: break-word; }
-
-/* descriptions clamp to two lines instead of a hard one-line cut */
-.t-desc {
-  white-space: normal; display: -webkit-box; -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical; line-height: 1.45; padding: 2px 0;
-}
 .disc-desc {
   white-space: normal; display: -webkit-box; -webkit-line-clamp: 2;
   -webkit-box-orient: vertical; line-height: 1.45;

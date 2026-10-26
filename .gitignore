@@ -81,3 +81,6 @@ tauri-shell/src-tauri/binaries/
 # The workspace never creates a separate target/ for a member, but listing it
 # costs nothing and protects against a future per-member target directory.
 tauri-shell/core/target/
+
+# 视觉回归比对的临时截图（capture/compare 之间用完即删）
+.ui-baseline-tmp/

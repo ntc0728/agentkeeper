@@ -1,38 +1,32 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * The release-note record: ONE file, ONE release cycle, replaced — never accumulated.
+ * 发布说明的记录文件：一个文件、一个发布周期，用完即替换 —— 从不累加历史。
  *
- *   changelog/next.json     what changed since the last release
+ *   changelog/next.json                      距上次发版的改动
  *
- *   node scripts/changelog.js show                    # record + the rendered body
- *   node scripts/changelog.js add fix "…"             # append one entry
- *   node scripts/changelog.js summary "…"             # the one-line title of the release
- *   node scripts/changelog.js render --version 0.2.1  # the markdown body a release carries
- *   node scripts/changelog.js check                   # validate, exit 1 on any finding
- *   node scripts/changelog.js reset                   # clear it after the release went out
+ *   node scripts/changelog.js show                    # 记录 + 它会渲染成什么
+ *   node scripts/changelog.js add fix "…"             # 追加一条
+ *   node scripts/changelog.js summary "…"             # 这次发版的标题行
+ *   node scripts/changelog.js render --version 0.2.1  # 发布说明正文
+ *   node scripts/changelog.js check                   # 校验，有问题非 0 退出
+ *   node scripts/changelog.js reset                   # 发出去之后清空
  *
- * Why a file instead of `generate_release_notes: true`: this repository merges
- * without pull requests, so GitHub's generated notes are exactly one line —
- * "Full Changelog: compare/v0.2.0...v0.2.1" — which is what an update check
- * showed to the user. The notes are read inside the app (the update panel shows
- * the release body), so they have to say what changed, in the language the rest
- * of the product speaks.
+ * 为什么不用 `generate_release_notes`：这个仓库不合并 PR，GitHub 生成的说明只有
+ * 一行「Full Changelog: compare/…」，而应用里的更新面板显示的就是这一行文字。
+ * 说明是在应用内读的（更新面板展示的就是发布正文），所以必须说清改了什么，并且用
+ * 产品其余部分的语言来说。
  *
- * Why one file and not a growing CHANGELOG.md: the body of a release describes
- * that release. A file that accumulates history invites editing old releases by
- * accident, and the archive already exists — every published body stays on the
- * Releases page. After a release goes out, `reset` empties the record; the next
- * release writes over it. No history is kept here on purpose.
+ * 为什么是「一个文件」而不是一份不断变长的 CHANGELOG.md：发布正文描述的是这一次
+ * 发布。累积历史的文件会诱使人去编辑旧的发布，而历史本来就在 —— 每个发出去的正文
+ * 都留在 Releases 页面。所以发完就 `reset`，下一次发布整个覆盖。这里故意不留历史。
  *
- * What goes in: changes a user of the build can notice — behaviour, fixes,
- * performance, UI copy that moved. What does not: docs-only edits, CI/tooling
- * churn, formatting, refactors with an identical observable behaviour. A record
- * that lists everything is a record nobody reads.
+ * 什么写进去：用这个构建的人能察觉的变化 —— 行为、缺陷修复、性能、移动过的文案。
+ * 什么不写：纯文档修改、CI/工具链改动、格式化、可观察行为没变的重构。什么都记的
+ * 记录，就是没人读的记录。
  *
- * Kinds are fixed to three, in the order the reference project uses: 修复 /
- * 新增 / 优化. They render as the bullet prefix, and the number is added by the
- * renderer, so the record never stores "1." and cannot drift out of order.
+ * kind 固定三种，顺序沿用参考项目：修复 / 新增 / 优化。它们只作为渲染时的前缀，
+ * 编号由渲染器生成 —— 所以记录里不写「1.」，也不会排错序。
  */
 
 const fs = require('fs');

@@ -116,3 +116,16 @@ npm run hooks:install     # git config core.hooksPath .githooks
 
 `.githooks/commit-msg` 会拒绝不符合上述前缀的标题（`Merge` / `Revert` 除外）。
 纯 CI、纯文档、纯格式改动不进 `next.json`，但提交标题仍用同一套前缀。
+
+---
+
+## 8. 注释语言与进度尺
+
+整仓注释统一中文（用户原话：「还有项目中注释都使用中文注释」）。几千行注释一次性
+机翻会把技术含义译坏——Rust 的 `///` 文档注释还会被 doctest 编译——所以：
+
+```bash
+npm run comments:lang     # 按文件列出还没翻译的英文注释行与当前覆盖率
+```
+
+新写的注释一律中文；存量按 `scripts/comment-lang.js` 列出的文件逐个迁移。

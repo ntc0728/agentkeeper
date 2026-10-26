@@ -1,7 +1,7 @@
 {
   "name": "agentkeeper",
   "productName": "AgentKeeper",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Unified dashboard for discovering and managing agent assets: skills, MCP servers, plugins, rules and memory across multiple AI agents and projects.",
   "repository": {
     "type": "git",
@@ -18,6 +18,9 @@
     "changelog:check": "node scripts/changelog.js check",
     "changelog:reset": "node scripts/changelog.js reset",
     "changelog:show": "node scripts/changelog.js show",
+    "comments:lang": "node scripts/comment-lang.js",
+    "ui:baseline": "node scripts/ui-baseline.js capture",
+    "ui:baseline:check": "node scripts/ui-baseline.js compare",
     "hooks:install": "git config core.hooksPath .githooks",
     "changelog:summary": "node scripts/changelog.js summary",
     "test": "node scripts/test-affected.js",
