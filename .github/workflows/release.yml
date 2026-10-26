@@ -1,17 +1,16 @@
 name: release
 
-# TWO release channels, one workflow:
+# TWO build kinds, one workflow:
 #
 #   1. tag push (`git tag v0.3.0 && git push origin v0.3.0`)  → FINAL release.
 #      Version is stamped from the tag; prerelease only for beta/rc/alpha.
-#   2. push to main → CI PRERELEASE `v<tree-version>-ci.<run_number>`.
-#      Every commit lands on the Releases page, but as a Pre-release: the
-#      in-app updater's stable channel reads `/releases/latest`
-#      (core/update/manager.rs:1110), which GitHub serves EXCLUDING
-#      prereleases — so a CI build can never hijack a stable user's
-#      "check for updates". The `-ci.N` suffix parses as a prerelease
-#      segment (core/update/version.rs:26) and sorts BELOW the tree
-#      version, so once v0.2.0 ships it outranks every 0.2.0-ci.* build.
+#      The installer and the portable zip are attached to the Release.
+#   2. push to main → BUILD ONLY. The same installer is produced and uploaded
+#      as a workflow artefact, but nothing is published: every main commit used
+#      to land on the Releases page as a `v<ver>-ci.<run>` prerelease, which
+#      buried the real versions under CI noise (the in-app updater ignores
+#      prereleases, so they were pure clutter). A commit is downloadable from
+#      the run's Artifacts section when it is actually wanted.
 #
 # What the in-app updater actually consumes (see docs/UPDATE.md):
 #   GET /repos/{repo}/releases/latest  ->  pick one entry of `assets[]`
@@ -258,26 +257,8 @@ jobs:
             dist-artifacts/*.exe
             dist-artifacts/*.zip
 
-      # A main-push build is a CI artefact: generated notes are enough, and it
-      # is ALWAYS a prerelease — that is what keeps it out of /releases/latest
-      # and away from stable-channel updaters (see header).
-      - name: Publish to the Release (CI build)
-        if: github.ref_type != 'tag'
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ format('AgentKeeper {0} — CI build {1}', steps.stamp.outputs.version, github.run_number) }}
-          # A main-push build gets a synthetic tag `v<version>-ci.<run>`.
-          # Version source, in order: the vX.Y.Z ref, else the tree
-          # (stamp-version printed which one applied).
-          tag_name: ${{ format('v{0}-ci.{1}', steps.stamp.outputs.version, github.run_number) }}
-          draft: false
-          generate_release_notes: true
-          prerelease: true
-          fail_on_unmatched_files: true
-          files: |
-            dist-artifacts/*.exe
-            dist-artifacts/*.zip
-
+      # A main-push build stops here: artefacts go to the run, not to the
+      # Releases page. Only a tag publishes (see header).
       - uses: actions/upload-artifact@v4
         with:
           name: agentkeeper-windows-x64

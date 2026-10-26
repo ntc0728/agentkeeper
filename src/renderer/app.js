@@ -13,7 +13,6 @@ const S = {
   data: null,
   settings: {},
   lastIssueCount: null,
-  localStats: null,
   filter: '',
   kindFilter: 'all',
   agentFilter: 'all',
@@ -2519,18 +2518,6 @@ function viewSettings() {
       el('div', { class: 'muted fs-11 mt-6' }, t('settings.restartNote'))
     ));
 
-  /* --- behaviour ---------------------------------------------------- */
-  const behaviour = el('div', { class: 'card' },
-    el('div', { class: 'card-head' }, el('h2', {}, t('settings.behaviour'))),
-    el('div', { class: 'card-body' },
-      row(t('settings.notifications'), toggle(cfg.notifications !== false, (v) => save({ notifications: v }), t('settings.notifications')), t('settings.notificationsHint')),
-      row(t('settings.localStats'),
-        el('div', { class: 'flex gap-sm' },
-          toggle(cfg.showLocalStats !== false, (v) => save({ showLocalStats: v }), t('settings.localStats')),
-          localStatsRow()),
-        t('settings.localStatsHint'))
-    ));
-
   /**
    * The GitHub mark, inline (Octicons `mark-github`, 16×16).
    *
@@ -2699,18 +2686,9 @@ function viewSettings() {
         installBtn));
     }
 
-    // The release notes are NOT repeated here. They used to be a <details> on
-    // this card, and the changelog panel below lists every released version
-    // with the same body — so the newest release appeared twice, word for word,
-    // one card apart. One place per version: the panel owns the notes, this
-    // card owns the decision and keeps the single link to the release page.
-    if (u.pageUrl) {
-      body.appendChild(el('div', { class: 'mt-6' },
-        el('button', {
-          class: 'btn ghost sm',
-          onclick: () => void window.ak.openReleasePage(u.pageUrl).catch(() => {})
-        }, t('settings.updateOpenPage'))));
-    }
+    // No "open the release page" button on this card: the changelog panel
+    // below already links every version to its release page, and the card stays
+    // about the decision (compare, check, settings).
 
     return el('div', { class: 'card' },
       el('div', { class: 'card-head' },
@@ -2961,7 +2939,7 @@ function viewSettings() {
               if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); }
             });
           }
-          list.appendChild(el('details', { class: 'upd-log-item' },
+          list.appendChild(el('details', { class: 'upd-log-item', open: true },
             el('summary', {},
               verLabel,
               el('span', { class: 'upd-log-date' }, (rel.date || '').slice(0, 10)),
@@ -2981,36 +2959,6 @@ function viewSettings() {
 
     load();
     return card;
-  }
-
-  /**
-   * Local usage counters, read from the audit journal — nothing leaves the
-   * machine. The row is the visible half of `showLocalStats`: a number with no
-   * switch is a promise the user cannot keep.
-   */
-  function localStatsRow() {
-    const box = el('div', { class: 'mono fs-11 stats-value-right' });
-    if (cfg.showLocalStats === false) {
-      box.textContent = '—';
-      return box;
-    }
-    box.appendChild(el('div', { class: 'muted' }, t('common.loading')));
-    window.ak.localStats().then((r) => {
-      if (!r.ok) { box.textContent = '—'; return; }
-      S.localStats = r.counts;
-      // One <span class="nowrap"> per counter inside a wrapping flex row: the
-      // card is narrow, and inline text broke "0 次失败" in half between "0"
-      // and "次". Wrapping is allowed between counters, never inside one.
-      box.textContent = '';   // drop the "loading…" placeholder
-      String(t('settings.localStatsValue', r.counts)).split(' · ')
-        .forEach((part) => box.appendChild(el('span', { class: 'nowrap' }, part)));
-    }).catch((e) => {
-      // A plain "—" would hide the failure; the row says it failed and can be
-      // retried in place (retry re-renders the settings view).
-      reportUiError('error', e);
-      inlineRetry(box, () => render());
-    });
-    return box;
   }
 
   /* --- storage ------------------------------------------------------ */
@@ -3042,7 +2990,7 @@ function viewSettings() {
         ...S.boot.agents.map((a) => el('span', { class: `chip ${a.installed ? 'ok' : 'ghost'}` }, a.label)))
     ));
 
-  wrap.appendChild(el('div', { class: 'grid grid-2' }, appearance, behaviour));
+  wrap.appendChild(appearance);
   // Full width: the update card holds the version comparison and the latest
   // release notes; half a column squeezes them. The channel/proxy/token
   // controls moved behind its 更新设置 button.

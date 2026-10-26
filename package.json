@@ -1,7 +1,7 @@
 {
   "name": "agentkeeper",
   "productName": "AgentKeeper",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Unified dashboard for discovering and managing agent assets: skills, MCP servers, plugins, rules and memory across multiple AI agents and projects.",
   "repository": {
     "type": "git",
