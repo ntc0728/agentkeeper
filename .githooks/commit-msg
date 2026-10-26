@@ -1,0 +1,15 @@
+#!/bin/sh
+# Commit subjects follow the changelog vocabulary, so a commit and the release
+# note it produces read as the same sentence: 修复 / 新增 / 优化 + ": " + text.
+# Merges, reverts and the initial import are exempt.
+subject=$(head -1 "$1")
+case "$subject" in
+  Merge*|Revert*|"Initial commit"*) exit 0 ;;
+esac
+if printf '%s' "$subject" | grep -Eq '^(修复|新增|优化)(: |：)[^[:space:]]'; then
+  exit 0
+fi
+echo "commit-msg: 提交标题必须与 changelog 同一套写法：" >&2
+echo "  修复: …   /   新增: …   /   优化: …" >&2
+echo "  实际：$subject" >&2
+exit 1

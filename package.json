@@ -18,6 +18,7 @@
     "changelog:check": "node scripts/changelog.js check",
     "changelog:reset": "node scripts/changelog.js reset",
     "changelog:show": "node scripts/changelog.js show",
+    "hooks:install": "git config core.hooksPath .githooks",
     "changelog:summary": "node scripts/changelog.js summary",
     "test": "node scripts/test-affected.js",
     "test:all": "node scripts/test-affected.js --all",

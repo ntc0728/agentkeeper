@@ -95,3 +95,24 @@ npm run changelog:show      # 预览渲染结果
 ```
 
 CI 里 `render` 走的是同一份校验，所以本地过 = 发版不会因为格式失败。
+
+## 7. 提交信息同一套写法
+
+提交标题和改动记录说同一句话，避免「commit 写英语、changelog 写中文、发版再翻译一遍」：
+
+```
+修复: 设置页「最新版本」读不到发布版本时显示「未知」
+新增: 更新来源改为 GitHub 图标，点击打开仓库
+优化: 更新日志改为标题在上、说明在下
+```
+
+- 三种前缀与 `next.json` 的 `kind` 一一对应：`fix` → 修复、`feat` → 新增、`opt` → 优化；
+- 标题就是那条改动记录的文字（可以更短，但不要换个说法）；
+- 钩子由仓库提供，装一次即可：
+
+```bash
+npm run hooks:install     # git config core.hooksPath .githooks
+```
+
+`.githooks/commit-msg` 会拒绝不符合上述前缀的标题（`Merge` / `Revert` 除外）。
+纯 CI、纯文档、纯格式改动不进 `next.json`，但提交标题仍用同一套前缀。
