@@ -66,7 +66,6 @@
   --side-muted: #5f6877;   /* 4.88:1 */
   --side-group: #5f6877;   /* 4.88:1 */
   --side-note: #646d7c;    /* 4.53:1 */
-  --side-foot-border: #dfe3ea;
   --nav-text: #4a5361;
   --nav-hover-bg: #e2e6ed;
   --nav-active-bg: #e2eaff;
@@ -248,7 +247,6 @@
   --side-muted: #8f97a5;
   --side-group: #8f97a5;
   --side-note: #8b93a1;
-  --side-foot-border: #1e232d;
   --nav-text: #b9c1cd;
   --nav-hover-bg: #1b1f28;
   --nav-active-bg: #222836;
@@ -298,13 +296,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .app.collapsed { grid-template-columns: 60px 1fr; }
 .app.collapsed .brand-text,
 .app.collapsed .nav-text,
-.app.collapsed .nav-badge,
-.app.collapsed .side-foot-note { display: none; }
+.app.collapsed .nav-badge { display: none; }
 .app.collapsed .brand,
 .app.collapsed .nav-item { justify-content: center; }
 .app.collapsed .brand { padding: 14px 0 10px; flex-direction: column; gap: 8px; }
 .app.collapsed .nav-item { padding: 8px 0; }
-.app.collapsed .side-foot { padding: 12px 8px 14px; }
 /* Group captions become empty spacing rather than a vertical column of single
    letters inside a 60px rail. The nav items keep their accessible names via
    aria-label (app.js `applyLanguage`), which display:none would otherwise eat. */
@@ -355,11 +351,6 @@ button, input, select, textarea { font: inherit; color: inherit; }
    needs its own or it stays visible with a stray "!" next to Settings. */
 .nav-badge.hidden { display: none; }
 
-.side-foot { padding: 12px 14px 14px; border-top: 1px solid var(--side-foot-border); }
-.side-foot-note {
-  margin-top: 8px; font-size: var(--fs-micro); color: var(--side-note); font-family: var(--mono);
-  word-break: break-all; line-height: 1.4;
-}
 
 /* ---------------- topbar ---------------- */
 /* min-width:0 stops a long path in the view from widening the grid track past
@@ -1333,11 +1324,12 @@ table.tbl.static tbody tr:last-child td { border-bottom: 0; }
   margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
 }
 .upd-changelog { display: flex; flex-direction: column; gap: 8px; }
-/* One release row: identity on the left, actions on the right. `flex-wrap` so
-   a narrow card puts the buttons on their own line instead of crushing the
-   version label. */
+/* One release row, stacked: the version header on top, its notes underneath.
+   It used to be a single flex line, which put the notes BESIDE the header — a
+   wide release body squeezed into the right half while the header floated with
+   the rest of the row empty. */
 .upd-log-item {
-  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  display: flex; flex-direction: column; align-items: stretch; gap: 8px;
   padding: 10px 12px; border: 1px solid var(--border);
   border-radius: var(--radius-sm); background: var(--surface);
 }
@@ -1359,7 +1351,7 @@ table.tbl.static tbody tr:last-child td { border-bottom: 0; }
   white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: auto;
   background: var(--code-bg); border: 1px solid var(--border);
   border-radius: var(--radius-sm); padding: 10px 12px;
-  font-family: var(--mono); font-size: var(--fs-micro); line-height: 1.6; margin-top: 8px;
+  font-family: var(--mono); font-size: var(--fs-micro); line-height: 1.6;
 }
 .upd-log-empty { padding: 16px 12px; text-align: center; font-size: var(--fs-small); color: var(--text-3); }
 .update-notes { white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; font-family: var(--mono); font-size: var(--fs-micro); line-height: 1.6; margin: 8px 0 0; }
@@ -1430,8 +1422,7 @@ details > summary { cursor: pointer; user-select: none; }
   /* Forced rail: at 600px a 60px icon column plus a usable content column is
      the only split that fits, so the toggle's expanded state is overridden. */
   .app, .app.collapsed { grid-template-columns: 56px 1fr; }
-  .brand-text, .nav-text, .nav-badge,
-  .side-foot-note { display: none; }
+  .brand-text, .nav-text, .nav-badge { display: none; }
   .brand, .nav-item { justify-content: center; }
   /* Rail width (56px) is smaller than the brand row's content: 32px tile +
      10px gap + 26px collapse toggle + 12px padding = 80px. A centred row that
@@ -1442,7 +1433,6 @@ details > summary { cursor: pointer; user-select: none; }
   .brand { padding: 14px 0 10px; flex-direction: column; gap: 8px; }
   .side-toggle { margin-left: 0; }
   .nav-item { padding: 8px 0; }
-  .side-foot { padding: 12px 6px 14px; }
   .nav-group { text-indent: -999px; overflow: hidden; padding: 10px 0 4px; }
   .nav { padding: 6px; }
 

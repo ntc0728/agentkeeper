@@ -870,7 +870,6 @@ async function boot() {
   if (S.settings.lang) i18n.setLang(S.settings.lang);
   if (!S.langHooked) { i18n.onChange(applyLanguage); S.langHooked = true; }
 
-  $('#store-root').textContent = 'store: ' + S.boot.storeRoot;
   // Paint the shell (nav labels, wired buttons, localized statics) BEFORE the
   // first scan: the scan takes seconds on real machines and must not leave the
   // whole main area blank while it runs.
