@@ -1,0 +1,13 @@
+{
+  "summary": "发版说明改用仓库内的改动记录",
+  "entries": [
+    {
+      "kind": "feat",
+      "text": "changelog/next.json 改动记录与 scripts/changelog.js：打 tag 发版时把记录渲染成 Release 说明，替换 GitHub 自动生成的那一行 Full Changelog"
+    },
+    {
+      "kind": "opt",
+      "text": "发版流程：记录为空或格式不对时 tag 构建直接失败；记录发完即清空，一个发布周期一份，不累加历史"
+    }
+  ]
+}
