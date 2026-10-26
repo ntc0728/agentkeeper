@@ -2699,19 +2699,17 @@ function viewSettings() {
         installBtn));
     }
 
-    // The release notes of the single latest release stay on the card; the full
-    // history is the changelog panel below.
-    if (u.latest) {
-      body.appendChild(el('details', { class: 'upd-notes' },
-        el('summary', {}, t('settings.updateNotes')),
-        el('pre', { class: 'update-notes' }, u.notes || t('update.noNotes'))));
-      if (u.pageUrl) {
-        body.appendChild(el('div', { class: 'mt-6' },
-          el('button', {
-            class: 'btn ghost sm',
-            onclick: () => void window.ak.openReleasePage(u.pageUrl).catch(() => {})
-          }, t('settings.updateOpenPage'))));
-      }
+    // The release notes are NOT repeated here. They used to be a <details> on
+    // this card, and the changelog panel below lists every released version
+    // with the same body — so the newest release appeared twice, word for word,
+    // one card apart. One place per version: the panel owns the notes, this
+    // card owns the decision and keeps the single link to the release page.
+    if (u.pageUrl) {
+      body.appendChild(el('div', { class: 'mt-6' },
+        el('button', {
+          class: 'btn ghost sm',
+          onclick: () => void window.ak.openReleasePage(u.pageUrl).catch(() => {})
+        }, t('settings.updateOpenPage'))));
     }
 
     return el('div', { class: 'card' },

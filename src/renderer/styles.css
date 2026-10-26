@@ -1325,9 +1325,6 @@ table.tbl.static tbody tr:last-child td { border-bottom: 0; }
 .upd-progress-track { height: 6px; border-radius: var(--r-pill); background: var(--bar-bg); overflow: hidden; margin-top: 6px; }
 .upd-progress-fill { height: 100%; background: var(--accent); transition: width .25s ease; }
 .upd-ready { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.upd-notes { margin-top: 10px; }
-.upd-notes > summary { cursor: pointer; font-size: var(--fs-small); color: var(--text-2); }
-.upd-notes > summary:hover { color: var(--text); }
 /* ---- update panel ----
    `.upd-head-actions` is the button pair in the card head. It carries its own
    right margin instead of relying on `.spacer`, so a card head that has no
