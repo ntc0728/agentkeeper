@@ -1,11 +1,11 @@
 'use strict';
 /**
- * AgentKeeper renderer. Talks to the main process only through window.ak.
- * No require, no fs — the CSP in index.html enforces it.
+ * AgentKeeper 渲染层。只通过 window.ak 与主线程通信：
+ * 不用 require、不碰 fs —— index.html 里的 CSP 就是这么定的。
  */
 
-/* Engine-layer message translation (core/ + ipc errors are English; the
-   zh UI must never show them raw — no-degradation policy). */
+/* 引擎层文案翻译（core/ 与 ipc 的错误是英文；中文界面绝不能直接把原文显示出来
+   —— 不降级原则）。 */
 const { zhText, zhField, zhError, zhCode } = window.__akEngineZh;
 
 const S = {
@@ -30,23 +30,21 @@ const S = {
   discTotal: 0,
   discLoading: false,
   discError: null,
-  // --- software update ------------------------------------------------
-  // Snapshot pushed by the main process (`ak:update-status` / `ak:update-event`).
+  // --- 软件更新 --------------------------------------------------------
+  // 主线程推过来的快照（`ak:update-status` / `ak:update-event`）。
   update: null,
   updateBusy: false,
-  // Input drafts survive the full re-render that a progress poll triggers.
+  // 输入框的草稿要能扛住一次完整重渲染 —— 进度轮询就会触发重渲染。
   updateMinutesDraft: '',
   updateTokenDraft: '',
   updateTimer: null,
   updatePollTimer: null,
-  // Version we already showed the dialog for in this session ("Later" is not
-  // remembered across restarts — "skip" is, and lives in main-process state).
+  // 本次会话已经弹过对话框的版本（「稍后」不做记忆 —— 「跳过」才记，记在主线程状态里）。
   updatePrompted: '',
-  // --- boot retry bookkeeping -----------------------------------------
-  // boot() is also the retry target of the startup error panel, so every
-  // one-time wire* inside it is guarded by one of these flags. Without them a
-  // retry stacks listeners: two scans per click, two update dialogs, two
-  // language listeners on one element.
+  // --- 启动重试的记账 ---------------------------------------------------
+  // boot() 同时是启动错误面板的重试入口，所以它里面每个一次性的 wire* 都要用这里的
+  // 标志位把门。没有这些标志，重试就会叠监听：点一次扫两遍、弹两个更新窗、同一个
+  // 元素上挂两个语言监听。
   wired: false,
   langHooked: false,
   updateWired: false,
@@ -57,13 +55,12 @@ const S = {
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 /**
- * Create an element.
+ * 创建元素。
  *
- * `style` is applied through the CSSOM (element.style.setProperty) rather than
- * a style attribute. A strict CSP with `style-src 'self'` blocks inline style
- * attributes, and we do NOT want to weaken the policy with 'unsafe-inline'.
- * CSSOM writes are not subject to style-src, so dynamic values (bar widths,
- * per-agent accent colours) work under the strict policy.
+ * `style` 走 CSSOM（element.style.setProperty），而不是写 style 属性。严格的
+ * CSP（`style-src 'self'`）会拦内联 style 属性，而我们不想为了省事把策略放宽成
+ * 'unsafe-inline'。CSSOM 写入不受 style-src 约束，所以动态值（进度条宽度、每个
+ * Agent 的主题色）在严格策略下照样能用。
  */
 const el = (tag, attrs = {}, ...kids) => {
   const n = document.createElement(tag);
@@ -71,9 +68,8 @@ const el = (tag, attrs = {}, ...kids) => {
     if (k === 'class') n.className = v;
     else if (k === 'html') n.innerHTML = v;
     else if (k === 'style') {
-      // A string is `prop: value; …`; an object is the same thing without the
-      // stringly-typed round trip, which also keeps data-driven values (an
-      // adapter's accent, its matching ink) out of the i18n prose scan.
+      // 字符串是 `prop: value; …`；对象就是同一件事，省掉先拼字符串再解析这道
+      // 手续，顺带让数据驱动的值（适配器的主题色、配套的前景色）不进 i18n 文案扫描。
       if (typeof v === 'string') applyStyle(n, v);
       else for (const [prop, val] of Object.entries(v)) n.style.setProperty(prop, val);
     }
@@ -87,7 +83,7 @@ const el = (tag, attrs = {}, ...kids) => {
   return n;
 };
 
-/** Apply a `a:1; b:2` style string via the CSSOM. */
+/** 用 CSSOM 应用 `a:1; b:2` 这样的样式字符串。 */
 function applyStyle(node, css) {
   for (const decl of String(css).split(';')) {
     const i = decl.indexOf(':');
@@ -102,11 +98,10 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 /**
- * Token counts and other plain magnitudes, with the unit ladder spelled out.
+ * token 计数等纯量级数字，单位阶梯在这里一次定死。
  *
- * One formatter for every count shown in the UI. A hundreds-of-millions value
- * must render as "102.9M": dividing by 1000 and appending "k" produces
- * "102909.9k", which is not an SI form of anything.
+ * 界面上每个计数都用这一个格式化函数。上亿的值必须显示成「102.9M」：直接除以
+ * 1000 再补个「k」会得到「102909.9k」，那不是任何 SI 形式。
  */
 function count(n) {
   const v = Number(n) || 0;
@@ -116,15 +111,14 @@ function count(n) {
   return v.toLocaleString('en-US');
 }
 
-/* ------------------------------------------------- data-driven logo ink --- */
+/* ------------------------------------------------- 数据驱动的 logo 前景色 --- */
 
 /**
- * Resolve any CSS colour to [r, g, b, a] by letting the engine parse it.
+ * 把任意 CSS 颜色解析成 [r, g, b, a] —— 交给引擎自己解析，不自己猜。
  *
- * The logo tile's background comes from adapter data (accent), which is a hex
- * string today but is not ours to constrain. Reading it back through
- * getComputedStyle means named colours, rgb() and color(display-p3 …) all
- * resolve exactly as the engine will paint them.
+ * logo 方块的背景来自适配器数据（accent），现在是十六进制字符串，但那不是我们能
+ * 约束的格式。用 getComputedStyle 读回来，意味着命名颜色、rgb() 和
+ * color(display-p3 …) 都能按引擎真正上色的方式解析。
  */
 function akColor(css) {
   const probe = document.createElement('span');
@@ -139,7 +133,7 @@ function akColor(css) {
   return [Number(m[1]), Number(m[2]), Number(m[3]), isFinite(a) ? a : 1];
 }
 
-/** WCAG relative luminance of an opaque [r, g, b]. */
+/** WCAG 相对亮度，输入不透明的 [r, g, b]。 */
 function akLuminance([r, g, b]) {
   const lin = (v) => {
     const s = v / 255;
@@ -148,22 +142,20 @@ function akLuminance([r, g, b]) {
   return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
 }
 
-/** Source-over composite of top (possibly translucent) onto opaque base. */
+/** source-over 合成：把半透明的 top 叠到不透明的 base 上。 */
 function akOver(top, base) {
   const a = top[3];
   return [0, 1, 2].map((i) => Math.round(top[i] * a + base[i] * (1 - a)));
 }
 
 /**
- * Ink for the agent logo chip — chosen, not fixed.
+ * Agent 徽标的前景色 —— 算出来的，不是写死的。
  *
- * The tile painted color: var(--knob) (white) over whatever accent the
- * adapter declared. #c9c9c9 is in the shipped adapter table and measured
- * 1.63:1, so the two-letter label was unreadable. Picking the better of black
- * and white cannot fail: the worst case for max(C_white, C_black) is 4.53:1,
- * already above AA (4.5:1) for 11 px bold text. A translucent accent is
- * composited over the surface it sits on first, so the pair measured is the pair
- * painted.
+ * 方块用旋钮色（白）上字，底色是适配器声明的任意 accent。随包发布的适配器表里有
+ * #c9c9c9，实测对比度 1.63:1，两个字母根本看不清。在黑白里挑较好的那个不会失手：
+ * max(C_white, C_black) 的最差情况是 4.53:1，对 11px 粗体已经
+ * 高于 AA 要求的 4.5:1。半透明的 accent 会先与它所在的底色合成，所以量到的这对
+ * 颜色就是真正画出来的那对。
  */
 function akLogoInk(accent) {
   const surface = akColor('var(--surface)') || [255, 255, 255, 1];
@@ -175,8 +167,8 @@ function akLogoInk(accent) {
   const white = 1.05 / (L + 0.05);
   const black = (L + 0.05) / 0.05;
   const ink = white >= black ? '#ffffff' : '#000000';
-  // hex, not rgb(): the lint gate cannot tell a CSS function call from an
-  // untranslated sentence, and a hex string is what an accent already is.
+  // 用 hex 而不是 rgb()：lint 关卡分不清一个 CSS 函数调用和一句没翻译的英文，而
+  // accent 本来就是 hex 字符串。
   const hex = '#' + bg.map(function (v) { return v.toString(16).padStart(2, '0'); }).join('');
   return {
     background: hex,
@@ -196,9 +188,9 @@ function bytes(n) {
 function ago(iso) {
   if (!iso) return '—';
   const s = (Date.now() - new Date(iso).getTime()) / 1000;
-  // Relative time is user-visible prose, so it goes through t() like everything
-  // else: a Chinese UI with "1h ago" in a column is the exact defect the i18n
-  // rule exists for. Units are not translated in bytes() — KB/MB are SI symbols.
+  // 相对时间是给用户看的文案，所以跟其他东西一样走 t()：中文界面里出现一列
+  // 「1h ago」，正是 i18n 规则要防的缺陷。bytes() 里的单位不翻译 —— KB/MB 是
+  // SI 符号。
   if (s < 60) return t('common.agoSeconds', { n: Math.floor(s) });
   if (s < 3600) return t('common.agoMinutes', { n: Math.floor(s / 60) });
   if (s < 86400) return t('common.agoHours', { n: Math.floor(s / 3600) });
@@ -212,31 +204,28 @@ function clock(iso) {
 }
 
 /* ------------------------------------------------------------------ */
-/* error reporting                                                     */
+/* 错误上报                                                             */
 /* ------------------------------------------------------------------ */
 
 /**
- * Renderer exceptions → the main process log (`<storeRoot>/ui-errors.jsonl`).
+ * 渲染层异常 → 主线程日志（`<storeRoot>/ui-errors.jsonl`）。
  *
- * Why: before this, an exception in this window left a trace only in the
- * WebView2 devtools, which nobody sees once the app is packaged. The shell
- * appends one JSON line per report (it keeps the newest 200 and never panics).
+ * 为什么要有：以前这个窗口里抛的异常只在 WebView2 的 devtools 里留痕，一旦打包
+ * 就没人看得见。外壳每条上报追加一行 JSON（只保留最新 200 条，永不 panic）。
  *
- * The report shape is fixed by the Rust command:
+ * 上报的字段结构是 Rust 命令定死的：
  *   { kind, message, stack, view, at }
  *
- * Three rules, all of them about not making the failure worse than the bug:
- *   1. Never assume the command exists — the bridge of an older build has no
- *      `uiError`, so the call is guarded and its rejection swallowed.
- *   2. Never block — nothing here is awaited by a caller, and every field is
- *      truncated before it crosses IPC (a 2 MB stack would stall the call).
- *   3. Never storm — one report per distinct message per session, at most 20
- *      per session, and conditions that are normal operation (a cancelled
- *      dialog, a failed update fetch) are filtered out before they count.
+ * 三条规则，都是为了让故障不要比 bug 本身更糟：
+ *   1. 绝不假设命令存在 —— 旧版本的 bridge 没有 `uiError`，所以调用要加守卫，
+ *      rejection 要吞掉。
+ *   2. 绝不阻塞 —— 这里没有任何东西被调用方 await，每个字段过 IPC 前都会截断
+ *      （2 MB 的栈会把调用卡死）。
+ *   3. 绝不刷屏 —— 同一条消息每次会话只报一次，每次会话最多 20 条；属于正常
+ *      运行的条件（用户取消对话框、更新抓取失败）在计数前就被过滤掉。
  */
 const UI_ERROR = {
-  // Keyed by the truncated message: the same exception re-thrown in a loop is
-  // one line in the log, not thousands.
+  // 按截断后的消息去重：同一个异常在循环里反复抛，在日志里是一行，不是几千行。
   seen: new Set(),
   sent: 0,
   cap: 20,
@@ -245,12 +234,11 @@ const UI_ERROR = {
 };
 
 /**
- * Conditions that are part of normal operation, not bugs.
+ * 属于正常运行、而不是 bug 的那些条件。
  *
- * `abort`/`cancel` covers a dialog the user dismissed; the fetch/socket words
- * cover the update check failing because the machine is offline. IPC itself is
- * in the list because a torn-down window rejects every in-flight invoke, and
- * reporting that on quit would write noise on every exit.
+ * `abort`/`cancel` 覆盖用户关掉的对话框；fetch/socket 那几个词覆盖因为机器离线
+ * 而失败的更新检查。IPC 本身也在列表里，因为窗口已经拆掉时每个在途 invoke 都会
+ * reject，退出时上报它等于每次退出都写一堆噪音。
  */
 const UI_ERROR_EXPECTED = /(?:abort|cancel|network|failed to fetch|offline|timed? ?out|ipc)/i;
 
@@ -259,15 +247,14 @@ function safeJson(v) {
 }
 
 /**
- * Send one report. Synchronous and total: it returns before any IPC work
- * happens, and it cannot throw (a throw inside `error` would recurse).
+ * 发一条上报。同步且全函数：它在任何 IPC 工作开始前就返回，并且不可能抛
+ * （在 `error` 里抛会导致递归）。
  */
 function reportUiError(kind, err) {
   try {
     const message = String((err && err.message) || err || '').slice(0, UI_ERROR.maxMessage);
     if (!message) return;
-    // A call site may mark an expected failure explicitly; the regex is the
-    // fallback for the ones that come from the platform.
+    // 调用点可以显式标记一个「预期内」的失败；正则只是兜底，用来接住平台抛来的那些。
     if (err && err.akExpected === true) return;
     if (UI_ERROR_EXPECTED.test(message)) return;
     if (UI_ERROR.seen.has(message)) return;
@@ -283,26 +270,25 @@ function reportUiError(kind, err) {
       view: S.view || '',
       at: new Date().toISOString()
     });
-    // A rejected report must never surface as an unhandled rejection (which
-    // would report itself, and so on).
+    // 被拒绝的上报绝不能变成 unhandled rejection（那会自己上报自己，如此往复）。
     if (p && typeof p.catch === 'function') p.catch(() => {});
   } catch (_e) { /* reporting is best-effort by definition */ }
 }
 
 /**
- * Catch what the renderer does not.
+ * 兜住渲染层自己没接住的东西。
  *
- * Registered once, at the end of the file, before the first boot(): `error`
- * covers throws from event handlers and timers, `unhandledrejection` covers
- * async paths that forgot a catch. Both handlers stay cheap and synchronous.
+ * 只注册一次，在文件末尾、第一次 boot() 之前：`error` 覆盖事件处理和定时器里的
+ * 抛出，`unhandledrejection` 覆盖忘了 catch 的异步路径。两个处理函数都保持廉价
+ * 且同步。
  */
 function wireErrorReporting() {
   window.addEventListener('error', (ev) => {
-    // A failed <img>/<script> load reports an Event with no Error attached;
-    // the load target is the only useful information in it.
+    // 加载失败的 <img>/<script> 报上来的是不带 Error 的 Event；里面唯一有用的
+    // 信息就是加载目标本身。
     const target = ev.target;
     if (!ev.error && target && target !== window && target.tagName) {
-      // Log-only text (never rendered), so it is not a t() key.
+      // 纯日志文本（不会渲染出来），所以它不是 t() 的 key。
       reportUiError('error', 'resource load failed: ' + (target.src || target.href || target.tagName));
       return;
     }
@@ -316,21 +302,20 @@ function wireErrorReporting() {
 }
 
 /* ------------------------------------------------------------------ */
-/* retry panel                                                         */
+/* 重试面板                                                             */
 /* ------------------------------------------------------------------ */
 
 /**
- * An error message with a way out.
+ * 一条错误信息，外加一条出路。
  *
- * A failed boot or a failed repaint must not leave a restart as the only
- * recovery. The panel keeps the message and adds one button that re-runs
- * exactly the step that failed (boot → bootstrap+scan, scan → scan, view →
- * its data load).
+ * 启动失败或重绘失败之后，不能只剩「重启」这一条恢复路径。面板保留消息，再加
+ * 一个按钮，重跑的正是失败的那一步（boot → bootstrap+scan，scan → scan，
+ * view → 它自己的数据加载）。
  */
 function errorPanel(message, retry) {
   const btn = el('button', { class: 'btn sm', type: 'button' }, t('common.retry'));
-  // A disabled button already swallows the second click of a double click;
-  // runRetry re-checks too, so a synthetic .click() cannot queue a second call.
+  // 禁用的按钮已经能吞掉双击的第二次点击；runRetry 里也再查一次，这样合成的
+  // .click() 也排不进第二次调用。
   btn.addEventListener('click', () => { void runRetry(btn, retry); });
   return el('div', { class: 'alert err', role: 'alert' },
     el('div', { class: 'alert-msg' }, message),
@@ -339,11 +324,10 @@ function errorPanel(message, retry) {
 }
 
 /**
- * Compact "this panel could not load its own data" + retry.
+ * 紧凑版「这个面板自己没把数据加载出来」+ 重试。
  *
- * The view-level error panel is too heavy for a single row inside a card (the
- * local-stats line, the baseline body). A bare "—" or an endless "loading…"
- * leaves no way out; the retry re-renders the view, which re-runs the load.
+ * 视图级的错误面板放在卡片里的一行上太重了（本地统计那行、基线正文）。光给一个
+ * 「—」或者没完没了的「加载中…」就没有出路了；重试会重渲染视图，也就重跑了加载。
  */
 function inlineRetry(box, retry) {
   box.textContent = '';
@@ -354,11 +338,10 @@ function inlineRetry(box, retry) {
 }
 
 /**
- * Run one retry, with the button locked for the duration.
+ * 跑一次重试，期间把按钮锁住。
  *
- * `disabled` + the text swap are the visible half ("retrying…"); the early
- * return is the correctness half — the step may take seconds, and the user
- * will click again.
+ * `disabled` 加上文案替换是看得见的那一半（「重试中…」）；提前 return 是正确性
+ * 的那一半 —— 这一步可能要几秒，而用户会再点一次。
  */
 async function runRetry(btn, retry) {
   if (!btn || btn.disabled) return;
@@ -368,11 +351,11 @@ async function runRetry(btn, retry) {
   try {
     await retry();
   } catch (_e) {
-    // The retried step reports and paints its own failure; swallowing here
-    // keeps the promise from becoming an unhandled rejection.
+    // 被重试的那一步自己会上报并画出失败；在这里吞掉，是为了不让它变成
+    // unhandled rejection。
   } finally {
-    // A successful retry normally replaces #view-root, so the button may be
-    // detached by now — re-enabling it then is harmless but pointless.
+    // 成功的重试通常会换掉 #view-root，此时按钮可能已经脱离文档了 —— 再去恢复
+    // 它无害但也没意义。
     if (document.contains(btn)) {
       btn.disabled = false;
       btn.classList.remove('loading');
@@ -386,12 +369,12 @@ async function runRetry(btn, retry) {
 /* ------------------------------------------------------------------ */
 
 function toast(msg, kind = '') {
-  // Engine errors arrive in English; the zh UI never shows them raw.
+  // 引擎的错误是英文过来的；中文界面绝不能直接把原文显示出来。
   msg = zhError(msg);
-  // Named `node`, not `t` — `t` is the module-scope i18n translator.
+  // 叫 `node` 而不是 `t` —— `t` 是模块作用域里的 i18n 翻译函数。
   const node = el('div', { class: `toast ${kind}` }, msg);
-  // #toasts is role=status aria-live=polite, so appending is enough to have it
-  // announced; the timeout only removes the visual bubble afterwards.
+  // #toasts 是 role=status aria-live=polite，所以 append 就足以让它被朗读出来；
+  // 超时只是事后把那个视觉气泡摘掉。
   $('#toasts').appendChild(node);
   setTimeout(() => {
     node.style.transition = 'opacity .2s';
@@ -400,31 +383,29 @@ function toast(msg, kind = '') {
   }, kind === 'err' ? 5200 : 2600);
 }
 
-/* --- dialog focus bookkeeping ---------------------------------------
- * Both overlays are modal surfaces: while open, Tab must cycle inside them and
- * on close focus must come back to whatever opened them. Without this a
- * keyboard user tabs into the page underneath the scrim and loses the focus
- * ring entirely. */
+/* --- 对话框的焦点记账 -----------------------------------------------
+ * 两个浮层都是模态表面：打开时 Tab 必须在里面循环，关闭时焦点必须回到打开它的
+ * 那个东西上。少了这套，键盘用户会 Tab 到遮罩下面的页面里，焦点环彻底丢失。 */
 
-/** Element focused before the dialog opened; focus returns there on close. */
+/** 对话框打开前获得焦点的元素；关闭时焦点回到它身上。 */
 let modalReturnFocus = null;
 let drawerReturnFocus = null;
 
 const FOCUSABLE_SEL =
   'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
-/** Focusable descendants of `root` that are actually rendered. */
+/** `root` 下真正被渲染出来的、可聚焦的后代。 */
 function focusables(root) {
   return $$(FOCUSABLE_SEL, root)
     .filter((n) => !n.disabled && n.getClientRects().length > 0);
 }
 
-/** Move focus to the first actionable element of a freshly opened dialog. */
+/** 刚打开的对话框：把焦点移到第一个可操作的元素上。 */
 function focusInto(root) {
   (focusables(root)[0] || root).focus();
 }
 
-/** Keep Tab inside an open dialog instead of letting it walk into the page. */
+/** 对话框打开时把 Tab 关在里面，而不是让它走进页面。 */
 function trapTab(e, root) {
   if (e.key !== 'Tab') return;
   const list = focusables(root);
@@ -438,12 +419,11 @@ function trapTab(e, root) {
 }
 
 /**
- * Put focus back on the trigger of a closed dialog.
+ * 对话框关闭后把焦点还给当初触发它的东西。
  *
- * A drawer opened from a table row has no focusable trigger (rows are not in
- * the tab order), so the fallback is the active nav item — a stable, visible
- * place rather than `document.body`, where the next Tab would restart from the
- * top of the page.
+ * 从表格行打开的抽屉没有可聚焦的触发元素（行不在 tab 序里），所以兜底选当前
+ * 激活的导航项 —— 那是稳定且看得见的位置，总好过还给 document.body，那样下一
+ * 次 Tab 会从头页顶重新开始。
  */
 function returnFocus(node) {
   if (node && document.contains(node) && typeof node.focus === 'function') {
@@ -455,31 +435,25 @@ function returnFocus(node) {
 }
 
 /**
- * Report a failed write, and distinguish the three failures that are not the
- * same thing to the user.
+ * 上报一次失败的写入，并把三种对用户来说完全不同的失败区分开。
  *
- * 1. The write was refused before it started (`store.snapshotTooLarge`): the
- *    asset is bigger than the undo budget, so *nothing* was written and the
- *    tree is exactly as it was. A sentence is the whole story.
- * 2. The write ran and the undo put everything back: nothing on disk changed.
- *    Again a sentence is the whole story.
- * 3. The write ran and the undo could NOT put everything back
- *    (`store.restoreIncomplete` + `restoreErrors`): the tree is now in a state
- *    nobody chose. That is a data problem the user has to see in full, with
- *    every path named, because they are the only ones who can fix it by hand.
- *    A one-line toast was the reason a half-restored directory could sit there
- *    unnoticed.
+ * 1. 写在开始前就被拒绝了（`store.snapshotTooLarge`）：资源比撤销预算还大，所以
+ *    *什么都没写*，目录树跟原来一模一样。一句话就是事情的全部。
+ * 2. 写跑过了，撤销把一切都放回去了：磁盘上没变。同样，一句话就是全部。
+ * 3. 写跑过了，但撤销*没能*把一切放回去（`store.restoreIncomplete` +
+ *    `restoreErrors`）：目录树现在处于一个谁都没选过的状态。这是用户必须完整看到
+ *    的数据问题，每一个路径都要点名，因为只有他们能手动把它修好。当初只弹一行
+ *    toast，正是「半个目录恢复了一半却没人发现」的原因。
  *
- * `restoreErrors` is an array of entries carrying a path, a code and a
- * detail; `restoreError` is the joined legacy string. The codes are stable,
- * so the wording is chosen by looking at them rather than at parsing an
- * English sentence.
+ * `restoreErrors` 是一个数组，每项带一个路径、一个 code 和一个 detail；
+ * `restoreError` 是拼起来的旧字符串。code 是稳定的，所以文案靠看 code 来选，
+ * 而不是去解析一句英文。
  */
 function reportWriteFailure(r, fallbackKey) {
   if (!r || r.ok !== false) return toast((r && r.error) || t(fallbackKey), 'err');
   const code = r.errorCode || '';
 
-  // Case 1 — refused before any write.
+  // 情况 1 —— 在任何写入之前就被拒绝。
   if (code === STORE_SNAPSHOT_TOO_LARGE) {
     return toast(t('restore.toast.tooLarge'), 'err');
   }
@@ -487,14 +461,13 @@ function reportWriteFailure(r, fallbackKey) {
   const restores = Array.isArray(r.restoreErrors)
     ? r.restoreErrors
     : (r.restoreError ? [{ path: '', code: '', detail: String(r.restoreError) }] : []);
-  // Case 2 — failed, but the undo was clean.
+  // 情况 2 —— 写失败，但撤销是干净的。
   if (!restores.length) {
     return toast(r.error || t(fallbackKey), 'err');
   }
 
-  // Case 3 — partially restored. A symlink is only one way this happens, so
-  // the advice line is chosen by what actually failed rather than by a single
-  // global guess.
+  // 情况 3 —— 恢复了一半。符号链接只是成因之一，所以建议那一行是按「实际失败的
+  // 是什么」来选的，而不是拍一个全局的猜测。
   const symlink = restores.some((e) => e && e.code === STORE_SYMLINK_RESTORE_FAILED);
   const body = el('div', {},
     el('div', { class: 'alert err' }, t(symlink ? 'restore.headline.symlink' : 'restore.headline.partial')),
@@ -502,11 +475,9 @@ function reportWriteFailure(r, fallbackKey) {
     el('ul', { class: 'restore-list' },
       ...restores.map((e) => {
         const path = e && e.path ? String(e.path) : t('restore.unknownPath');
-        // The engine sends a path / code / detail triple; zhError reads
-        // code + params. The path is passed as the single parameter so a
-        // sentence with a `§1` placeholder resolves against it, and the
-        // detail string is the fallback when the code is unknown to the
-        // dictionary (then zhText maps the English sentence).
+        // 引擎发的是 path / code / detail 三元组；zhError 读的是 code + params。
+        // 路径作为唯一参数传进去，这样带 `§1` 占位符的句子就能对着它解析；code
+        // 不在词典里时（那就由 zhText 映射那句英文），detail 字符串是兜底。
         const detail = e && e.code && typeof e === 'object'
           ? (zhCode(e.code, [e.path]) || zhError(e.detail))
           : zhError(String((e && e.detail) || e));
@@ -521,11 +492,10 @@ function reportWriteFailure(r, fallbackKey) {
   toast(t(symlink ? 'restore.toast.symlink' : 'restore.toast.partial'), 'err');
 }
 
-/* Error codes the main process emits on a failed transaction (store.rs). Kept
- * as literals here on purpose: the bridge crosses a string boundary, and a
- * typo in one file would otherwise surface as a generic fallback rather than as
- * a missing translation. `scripts/check.js bridge` does not cover values, only
- * call shapes, so this list is checked against store.rs by hand. */
+/* 主线程在一次失败的事务上抛出的错误码（store.rs）。这里故意写成字面量：bridge
+ * 跨的是字符串边界，一个文件里打错字的话，表现会是「落到通用兜底」而不是「缺了
+ * 一条翻译」。`scripts/check.js bridge` 只校验调用形状、不校验取值，所以这份清单
+ * 是人工对着 store.rs 核对的。 */
 const STORE_SNAPSHOT_TOO_LARGE = 'store.snapshotTooLarge';
 const STORE_RESTORE_INCOMPLETE = 'store.restoreIncomplete';
 const STORE_SYMLINK_RESTORE_FAILED = 'store.symlinkRestoreFailed';
@@ -545,13 +515,12 @@ function openModal(title, bodyNode, footNodes = []) {
 }
 
 /**
- * The confirm promise that is currently waiting for an answer.
+ * 当前正在等一个答复的 confirm 承诺。
  *
- * A dialog can go away through paths its own buttons do not control: Escape,
- * the scrim, ✕. Before this, the promise stayed pending forever — which was
- * invisible for a delete (nothing happened, correctly) but is not for
- * `confirmWrite`, whose caller has to rebuild the editor it covered. One
- * registry, because there is exactly one #modal.
+ * 对话框可能从它自己的按钮管不到的路径消失：Esc、遮罩、✕。以前这个承诺会永远
+ * pending —— 对删除来说那看不出来（什么都没发生，正好），但对 `confirmWrite`
+ * 不行，它的调用方得重建被它盖住的那个编辑器。只用一个注册表，因为 #modal
+ * 只有一个。
  */
 let pendingConfirm = null;
 
@@ -560,8 +529,8 @@ function closeModal() {
   if (!scrim.classList.contains('on')) return;
   scrim.classList.remove('on');
   scrim.setAttribute('aria-hidden', 'true');
-  // Dismissing a confirmation is an answer: "no". Resolving after the visual
-  // close lets a caller restore whatever the dialog was covering.
+  // 关掉一个确认框本身就是一种答复：「否」。在视觉关闭之后再 resolve，调用方
+  // 就能把对话框盖住的东西恢复回去。
   if (pendingConfirm) pendingConfirm.settle(false);
   const back = modalReturnFocus;
   modalReturnFocus = null;
@@ -582,8 +551,8 @@ function confirmDialog({ title, message, confirmLabel = t('common.confirm'), dan
     pendingConfirm = entry;
     const body = el('div', {}, el('div', { class: 'pre-wrap' }, message));
     if (extra) body.appendChild(extra);
-    // Settle BEFORE closing: closeModal() answers any still-pending confirm with
-    // false, and that would beat this true.
+    // 先 settle 再关闭：closeModal() 会把任何仍 pending 的确认答成 false，
+    // 那样会盖掉这里的 true。
     const ok = el('button', { class: `btn ${danger ? 'danger' : 'primary'}`, onclick: () => { entry.settle(true); closeModal(); } }, confirmLabel);
     const cancel = el('button', { class: 'btn', onclick: () => { entry.settle(false); closeModal(); } }, t('common.cancel'));
     openModal(title, body, [cancel, ok]);
@@ -591,12 +560,11 @@ function confirmDialog({ title, message, confirmLabel = t('common.confirm'), dan
 }
 
 /**
- * Snapshot the dialog on screen, so a stacked confirmation can put it back.
+ * 给屏幕上的对话框拍个快照，好让叠上来的确认框能把它放回去。
  *
- * The shell has exactly one #modal, so opening the write check while an editor
- * is up replaces that editor's DOM. The nodes are moved (appendChild), not
- * cloned, so keeping references restores the *same* inputs — every keystroke
- * the user already typed survives cancelling the confirmation.
+ * 外壳只有一个 #modal，所以在编辑器开着的时候打开写入检查，会替换掉那个编辑器
+ * 的 DOM。节点是*移动*（appendChild）而不是克隆的，所以留住这些引用恢复的是
+ * *同一批*输入框 —— 用户已经敲进去的每次按键在取消确认之后都还在。
  */
 function snapshotModal() {
   const scrim = $('#modal-scrim');
@@ -610,11 +578,11 @@ function snapshotModal() {
 }
 
 /**
- * Put a snapshot back on screen.
+ * 把一个快照放回屏幕上。
  *
- * Called from two places for two reasons: a cancelled write check (the editor
- * must look untouched) and a write that failed after its check (the caller
- * only toasts, so the form has to come back or the user loses it).
+ * 两个地方会调它，原因各不同：取消了的写入检查（编辑器必须看起来没被动过），
+ * 以及检查通过之后写却失败了（调用方只弹 toast，所以表单必须回来，否则用户就
+ * 把它弄丢了）。
  */
 function restoreModal(snap) {
   if (!snap) return;
@@ -632,12 +600,11 @@ function restoreModal(snap) {
 }
 
 /**
- * Destination directories for a set of distribution targets.
+ * 一组分发目标各自的目的目录。
  *
- * A target is (agent × scope × project) and the adapter declares the relative
- * directory per kind, so the real path is only knowable here. `withLabel`
- * prefixes the agent name: two agents can declare the same relative dir under
- * different homes, and the path alone would not tell them apart in the dialog.
+ * 目标是（agent × scope × project），适配器按 kind 声明的是相对目录，所以真正
+ * 的路径只有在这里才能算出来。`withLabel` 会加上 agent 名字前缀：两个 agent 可能
+ * 在不同的根目录下声明同一个相对目录，光看路径在对话框里分不清是谁。
  */
 function targetPaths(picks, key, withLabel = false) {
   const out = [];
@@ -659,23 +626,22 @@ function targetPaths(picks, key, withLabel = false) {
 }
 
 /**
- * Every mutation of a real agent file goes through this: one dialog, listing
- * what is about to change, before a byte is written. Settings are excluded —
- * they live in the app's own store, not in an agent directory.
+ * 对真实 agent 文件的每一次写操作都要过这里：一个对话框，在一个字节落盘之前
+ * 列出即将变化的东西。设置被排除在外 —— 它们存在应用自己的存储里，不在 agent
+ * 目录下。
  *
- * Built on confirmDialog rather than a second modal implementation: this shell
- * grants no dialog-plugin ACL, so `window.confirm` rejects instead of asking,
- * and two modal paths would drift apart on focus handling.
+ * 它架在 confirmDialog 之上，而不是再写第二套模态实现：这个外壳没有授予任何
+ * dialog 插件的 ACL，所以 `window.confirm` 是直接拒绝而不是提问，而两套模态路径
+ * 在焦点处理上迟早会走偏。
  *
- * Covering dialog: the shell has one #modal, so when this check is layered over
- * an editor its nodes are moved aside. They are put back when the answer is
- * "no" — and a write that then fails puts them back through reopenCovered(),
- * because the caller's failure branch only toasts and the user's typed form
- * must not disappear with the error.
+ * 关于遮罩：外壳只有一个 #modal，所以当这个检查叠在编辑器上面时，编辑器的节点
+ * 会被挪到一边。答复是「否」时会把它们放回来 —— 而检查通过之后写却失败时，会
+ * 通过 reopenCovered() 把它们放回来，因为调用方的失败分支只弹 toast，用户敲好的
+ * 表单不能跟着错误一起消失。
  */
 let coveredSnap = null;
 
-/** Put the dialog the last check covered back on screen (after a failed write). */
+/** 把上一次检查遮住的那个对话框放回屏幕上（写入失败之后）。 */
 function reopenCovered() {
   const snap = coveredSnap;
   coveredSnap = null;
@@ -685,8 +651,8 @@ function reopenCovered() {
 async function confirmWrite({ title, action, targets, detail, danger = false }) {
   const list = (Array.isArray(targets) ? targets : [targets]).filter(Boolean).map(String);
   const MAX = 10;
-  // A path list, not a sentence: joined paths wrap mid-segment and stop being
-  // readable exactly where the user needs to compare them.
+  // 用路径列表而不是一句话：拼起来的路径会在路径段中间换行，恰好在用户需要
+  // 对比它们的地方变得没法读。
   const extra = el('div', {},
     list.length
       ? el('ul', { class: 'write-targets mono fs-11' },
@@ -694,8 +660,8 @@ async function confirmWrite({ title, action, targets, detail, danger = false }) 
           list.length > MAX ? el('li', { class: 'muted' }, t('confirm.moreTargets', { n: list.length - MAX })) : null)
       : null,
     el('div', { class: 'alert info mt-12' }, t('confirm.writeBackupNote')));
-  // Null when nothing was covered (a drawer or a table row triggered this), so
-  // every caller gets the same behaviour without a flag of its own.
+  // 什么都没被遮住时为 null（是抽屉或表格行触发的），这样每个调用方都不用自己
+  // 再带一个开关。
   const snap = snapshotModal();
   coveredSnap = snap;
   const ok = await confirmDialog({
@@ -705,35 +671,32 @@ async function confirmWrite({ title, action, targets, detail, danger = false }) 
     danger,
     extra
   });
-  // Restored eagerly on cancel: the editor has to look untouched the moment the
-  // check closes. On success it stays hidden, so the form cannot blink up behind
-  // the dialog during the IPC round-trip; closeModal() dismisses it as before.
+  // 取消时立刻恢复：检查一关，编辑器就必须看起来没被动过。成功时它保持隐藏，
+  // 这样表单不会在 IPC 往返期间闪现在对话框背后；之后照旧由 closeModal() 关掉。
   if (!ok) { reopenCovered(); return false; }
   return true;
 }
 
 /* ------------------------------------------------------------------ */
-/* drawer                                                              */
+/* 抽屉                                                                */
 /* ------------------------------------------------------------------ */
 
 /**
- * Can the closed drawer rely on the native `inert` attribute?
+ * 关着的抽屉能不能依赖原生的 `inert` 属性？
  *
- * `inert` shipped in Chromium 102; an older WebView2 (or an embedder that
- * never enabled it) ignores the property silently, and the closed drawer
- * keeps its ✕ in the tab order — a keyboard user tabs into an off-screen
- * panel. Feature-detected once: the prototype does not change at runtime.
+ * `inert` 是 Chromium 102 才有的；更老的 WebView2（或者压根没启用它的宿主）会
+ * 静默忽略这个属性，于是关着的抽屉里那个 ✕ 还留在 tab 序里 —— 键盘用户会 Tab
+ * 进一个屏幕外的面板。只做一次特性检测：原型在运行时不会变。
  */
 const INERT_NATIVE = typeof HTMLElement !== 'undefined' && 'inert' in HTMLElement.prototype;
 
 /**
- * Which mechanism emulates inertness *right now*.
+ * 此刻是*哪一种*机制在模拟 inert。
  *
- * The ak.forceInertFallback localStorage stamp (value '1') is a FORENSICS-ONLY
- * switch: it lets a probe drive the fallback branch on a WebView2 that does
- * support `inert` (a CDP session cannot downgrade the engine). Normal users
- * never set it; it is read on every open/close so a probe can toggle it
- * without a reload.
+ * localStorage 里的 ak.forceInertFallback 戳（值 '1'）是一个**仅供取证**的开关：
+ * 它让探针能在一个本来支持 `inert` 的 WebView2 上驱动 fallback 分支（CDP 会话
+ * 没法把引擎降级）。普通用户永远不会设它；每次开关都读一次，所以探针不用重载
+ * 就能切换。
  */
 function inertMode() {
   let forced = false;
@@ -741,20 +704,19 @@ function inertMode() {
   return (!INERT_NATIVE || forced) ? 'fallback' : 'native';
 }
 
-/** tabindex values the fallback overwrote, restored on the next open. */
+/** fallback 覆盖掉的那些 tabindex 值，下次打开时恢复。 */
 let drawerTabindexSaved = null;
 
-/** Everything that would sit in the tab order inside the drawer. */
+/** 抽屉里面所有会进入 tab 序的东西。 */
 const DRAWER_FOCUSABLE =
   'a[href], area[href], button, input, select, textarea, iframe, object, embed, [tabindex], [contenteditable="true"]';
 
 /**
- * Make the drawer inert (closed) or interactive, either natively or by
- * emulation. One place, because open/close and the boot-time state all have
- * to agree — a half-applied mode is exactly the "✕ is still tabbable" bug.
+ * 让抽屉变惰性（关闭）或可交互，要么原生要么模拟。只放一处，因为打开/关闭和
+ * 启动时的状态必须一致 —— 模式只应用一半，正好就是「✕ 还能 Tab 到」那个 bug。
  *
- * `data-ak-inert-mode` is the probe hook: it states which branch ran, so an
- * external assertion (CDP) does not have to infer it from behaviour.
+ * `data-ak-inert-mode` 是探针的钩子：它写明跑的是哪个分支，这样外部断言（CDP）
+ * 不用再从行为去反推。
  */
 function setDrawerInert(inert) {
   const d = $('#drawer');
@@ -766,19 +728,17 @@ function setDrawerInert(inert) {
     d.setAttribute('aria-hidden', inert ? 'true' : 'false');
     return;
   }
-  // Fallback: `inert` may be missing or ignored, so it cannot be the mechanism.
-  // Clear it anyway — the markup ships `inert` on the drawer, and an engine
-  // that *does* support it would leave the fallback branch untestable.
+  // 兜底分支：`inert` 可能不存在或被忽略，所以它不能作为机制。但还是清一下 ——
+  // 抽屉的标记里本来就带着 `inert`，一个*确实*支持它的引擎会让兜底分支没法测。
   if ('inert' in d) d.inert = false;
   d.setAttribute('aria-hidden', inert ? 'true' : 'false');
   if (inert) {
-    // Idempotent: the boot stamp, a failed-then-retried boot and closeDrawer()
-    // can all ask for "closed". Re-scanning after the first pass would record
-    // tabindex="-1" as the "original" value and lose the real one.
+    // 幂等：启动时的那一次、失败后重试的那次启动，以及 closeDrawer()，都会要求
+    // 「关闭」。第一轮之后再重新扫描，会把 tabindex="-1" 记成「原始值」，真正的
+    // 值就丢了。
     if (drawerTabindexSaved) return;
-    // aria-hidden alone is not enough: it hides the subtree from screen
-    // readers but leaves the focus stops in place. Remember each element's
-    // original tabindex (usually absent) so opening restores the markup.
+    // 光有 aria-hidden 不够：它把子树从屏幕阅读器里藏掉了，但焦点停靠点还在。
+    // 记住每个元素原本的 tabindex（通常是没有），这样打开时能还原标记。
     const saved = new Map();
     for (const n of $$(DRAWER_FOCUSABLE, d)) saved.set(n, n.getAttribute('tabindex'));
     drawerTabindexSaved = saved;
@@ -797,15 +757,15 @@ function setDrawerInert(inert) {
 function openDrawer(title, node) {
   drawerReturnFocus = document.activeElement;
   $('#drawer-title').textContent = title;
-  // The heading ellipsizes; the tooltip is the only way back to the full name.
+  // 标题会做省略号截断；tooltip 是回到完整名字的唯一途径。
   $('#drawer-title').setAttribute('title', title);
   const b = $('#drawer-body');
   b.innerHTML = '';
   b.appendChild(node);
   b.scrollTop = 0;
   const d = $('#drawer');
-  // Restore tabbability first: focusInto() picks the first *focusable*
-  // descendant, and the fallback left them all at tabindex="-1".
+  // 先恢复可 Tab 性：focusInto() 取的是第一个*可聚焦*的后代，而兜底分支把它们
+  // 全留在了 tabindex="-1" 上。
   setDrawerInert(false);
   d.classList.add('on');
   $('#scrim').classList.add('on');
@@ -813,23 +773,21 @@ function openDrawer(title, node) {
 }
 
 /**
- * The one and only exit for the drawer.
+ * 抽屉唯一的那一个出口。
  *
- * X, the scrim and Escape all come through here, so the unsaved-edit guard
- * cannot be bypassed by one of the three. The confirm runs BEFORE the drawer
- * is hidden: refusing it leaves the editor exactly where the user left it.
+ * ✕、遮罩和 Esc 全都走这里，所以「有未保存改动」的守卫不会被三者之一绕过。
+ * 确认框在抽屉隐藏**之前**就跑：拒绝它，编辑器就停在用户离开时的样子。
  */
 async function closeDrawer() {
   const d = $('#drawer');
   if (!d.classList.contains('on')) return;
   if (S.dirty) {
-    // The guard must be this app's own dialog. `window.confirm()` is routed to
-    // the Tauri dialog plugin, which this shell does not grant
-    // (`Command plugin:dialog|message not allowed by ACL`): the call rejected
-    // and the drawer closed anyway, so the user's edits were discarded with no
-    // prompt at all. One async path keeps ✕ / scrim / Escape identical.
-    // A dialog already on screen owns the next answer — opening a second one
-    // would stack scrims and strand the first promise.
+    // 这个守卫必须是本应用自己的对话框。`window.confirm()` 会被路由到 Tauri 的
+    // dialog 插件，而这个外壳没有授予它（`Command plugin:dialog|message not
+    // allowed by ACL`）：调用被拒绝，抽屉照旧关掉，于是用户的编辑在没有任何提示
+    // 的情况下被丢弃。一条异步路径，保证 ✕ / 遮罩 / Esc 三者完全一致。
+    // 屏幕上已经有的对话框拥有下一个答复 —— 再开一个会叠两层遮罩并把第一个
+    // 承诺晾在那里。
     if ($('#modal-scrim').classList.contains('on')) return;
     const ok = await confirmDialog({
       title: t('drawer.unsavedTitle'),
@@ -842,11 +800,10 @@ async function closeDrawer() {
   S.dirty = false;
   S.selected = null;
   d.classList.remove('on');
-  // inert (not just aria-hidden): the drawer is off-screen, not display:none,
-  // so its ✕ would otherwise stay in the tab order — and aria-hidden around a
-  // focusable element is itself an accessibility error. setDrawerInert() keeps
-  // that promise on engines without `inert`, where it adds tabindex="-1" to
-  // every focusable descendant and restores it on the next open.
+  // inert（不只是 aria-hidden）：抽屉是移出屏幕，不是 display:none，所以它的 ✕
+  // 否则会留在 tab 序里 —— 而把焦点能到的元素包在 aria-hidden 里本身就是一种
+  // 无障碍错误。在没有 `inert` 的引擎上，setDrawerInert() 会兑现这个承诺：给每个
+  // 可聚焦的后代加上 tabindex="-1"，下次打开时恢复。
   setDrawerInert(true);
   $('#scrim').classList.remove('on');
   render();
@@ -856,42 +813,39 @@ async function closeDrawer() {
 }
 
 /* ------------------------------------------------------------------ */
-/* bootstrap                                                           */
+/* 启动                                                               */
 /* ------------------------------------------------------------------ */
 
 async function boot() {
   restoreUiState();
-  // The sidebar collapse state is a pure view preference: restore it before
-  // the first paint so the rail does not jump from 248px to 60px on boot.
+  // 侧栏折叠状态是个纯视觉偏好：在首帧之前恢复，免得启动时侧栏从 248px 跳到
+  // 60px。
   if (localStorage.getItem('ak.side') === 'collapsed') $('#app').classList.add('collapsed');
   S.boot = await window.ak.bootstrap();
-  // Settings drive language and theme, so load them before the first paint
-  // decision — theme-init.js already handled the attribute, we just sync it.
+  // 设置决定语言和主题，所以要在决定首帧之前加载 —— theme-init.js 已经处理过
+  // 那个属性，这里只是同步一下。
   try { S.settings = (await window.ak.getSettings()) || {}; } catch (e) { S.settings = {}; }
   if (S.settings.theme) applyTheme(S.settings.theme);
   if (S.settings.lang) i18n.setLang(S.settings.lang);
   if (!S.langHooked) { i18n.onChange(applyLanguage); S.langHooked = true; }
 
-  // Paint the shell (nav labels, wired buttons, localized statics) BEFORE the
-  // first scan: the scan takes seconds on real machines and must not leave the
-  // whole main area blank while it runs.
+  // 先把外壳画出来（导航文案、接线按钮、静态文案的本地化），**然后**才做第一次
+  // 扫描：扫描在真实机器上要几秒，不能让它把整个主区域留白。
   //
-  // boot() is also the retry target of the startup error panel, so every wire*
-  // below runs at most once: a second pass would stack a second scan listener,
-  // a second update dialog and a second language listener.
+  // boot() 同时也是启动错误面板的重试入口，所以下面每个 wire* 最多跑一次：跑第二
+  // 遍会叠上第二个扫描监听、第二个更新对话框和第二个语言监听。
   if (!S.wired) { wireGlobal(); S.wired = true; }
   applyLanguage(i18n.lang);
-  // The closed drawer ships off-screen but focusable; the boot pass applies
-  // inert before the user could ever Tab into it (openDrawer/closeDrawer keep
-  // it in sync afterwards).
+  // 关着的抽屉出厂就在屏幕外但可聚焦；启动这一遍会在用户有机会 Tab 进去之前
+  // 就加上 inert（之后由 openDrawer/closeDrawer 保持一致）。
   setDrawerInert(true);
   await rescan(true);
 
-  // --- keep the settings promises -----------------------------------
+  // --- 受理那几个 settings 承诺 --------------------------------------
   if (!S.updateWired) { wireUpdateBanner(); S.updateWired = true; }
   await initUpdates();
-  // scan-complete notifications only fire when the window is hidden, so the
-  // user learns about attention-needing assets without watching the app.
+  // 「扫描完成」的通知只在窗口隐藏时才发，这样用户不必盯着应用，也能知道有哪些
+  // 资源需要处理。
   if (S.settings.notifications !== false && !S.notifyWired) {
     S.notifyWired = true;
     document.addEventListener('visibilitychange', () => {
@@ -901,19 +855,18 @@ async function boot() {
 }
 
 /* ------------------------------------------------------------------ */
-/* software update                                                     */
+/* 软件更新                                                             */
 /* ------------------------------------------------------------------ */
 
 /**
- * The main process owns the update schedule; the renderer only renders what
- * it is given. That split is what makes an automatic check able to raise the
- * dialog while the user is on another page, and what keeps the "check on
- * start" promise from turning into one GitHub request per page reload.
+ * 主线程拥有更新日程；渲染层只负责把拿到的东西画出来。正是这个分工让自动检查
+ * 能在用户翻到别的页面时弹出对话框，也正是它让「启动时检查」这个承诺不会变成
+ * 每次刷新页面就打一次 GitHub 请求。
  */
 async function initUpdates() {
   try { S.update = await window.ak.updateStatus(); } catch (e) { S.update = null; }
-  // Guarded: initUpdates() also runs on a boot retry, and a second subscription
-  // would raise the update dialog twice per event.
+  // 加了守卫：initUpdates() 也会在启动重试时跑一遍，订阅两次会让每个事件弹出
+  // 两次更新对话框。
   if (typeof window.ak.onUpdateEvent === 'function' && !S.updateEventHooked) {
     S.updateEventHooked = true;
     window.ak.onUpdateEvent((status) => {
@@ -927,24 +880,24 @@ async function initUpdates() {
   syncUpdateBanner(S.update);
   syncUpdateBadge(S.update);
   promptUpdate(S.update);
-  // If the app opened straight onto Settings, the page was painted from the
-  // bootstrap placeholder (no `repo`, no `checkedAt`) and would otherwise keep
-  // showing "github.com/" until the user navigated away and back.
+  // 如果应用一打开就直接落在设置页，那这一页是用 bootstrap 的占位数据画的（没有
+  // `repo`，也没有 `checkedAt`），否则会一直显示「github.com/」，直到用户切走再
+  // 切回来。
   if (S.view === 'settings') render();
-  // The badge has to survive the window being open for hours: this reads the
-  // main-process snapshot only (no network, no check), so polling it is free.
+  // 徽标得扛住窗口开着好几个小时：这里只读主线程的快照（不发网络、不做检查），
+  // 所以轮询它是免费的。
   if (!S.updatePollTimer) {
     S.updatePollTimer = setInterval(() => {
       window.ak.updateStatus().then((status) => {
         S.update = status;
         syncUpdateBadge(status);
         syncUpdateBanner(status);
-      }).catch(() => { /* transient IPC failure: keep the last badge */ });
+      }).catch(() => { /* 一次性的 IPC 失败：保留上一个徽标 */ });
     }, 60000);
   }
 }
 
-/** Sidebar dot: an update is waiting and the user has not dismissed it. */
+/** 侧栏上的小圆点：有更新在等，而且用户还没关掉它。 */
 function syncUpdateBadge(status) {
   const badge = $('#nav-update-badge');
   if (!badge) return;
@@ -954,17 +907,16 @@ function syncUpdateBadge(status) {
 }
 
 /**
- * Version whose banner the user dismissed.
+ * 用户关掉过它横幅的那个版本。
  *
- * Remembering it in-memory only was not enough: the 60 s status poll calls
- * `syncUpdateBanner()` again and re-showed the banner the user had just closed.
- * A *newer* version no longer matches, so it still gets announced.
+ * 只记在内存里不够：那个 60 秒的状态轮询会再调一次 `syncUpdateBanner()`，把用户
+ * 刚关掉的横幅又显示出来。*更新*的版本号就不再匹配了，所以它照样会被通知。
  */
 let updateDismissed = (function () {
   try { return localStorage.getItem('ak.updateDismissed') || null; } catch (_e) { return null; }
 })();
 
-/** One-time wiring for the top banner (rebinding on every boot would stack). */
+/** 顶部横幅的一次性接线（每次启动都重新绑会叠加）。 */
 function wireUpdateBanner() {
   const open = $('#update-open');
   const dismiss = $('#update-dismiss');
@@ -990,16 +942,15 @@ function syncUpdateBanner(status) {
 }
 
 /**
- * Show the "update available" dialog at most once per version per session.
+ * 每个版本、每次会话最多弹一次「有更新」对话框。
  *
- * "Later" deliberately remembers nothing — the scheduler will find the same
- * release again, so a session-level guard is what stops it from re-prompting
- * every interval. "Skip this version" is persisted in main-process state by
- * version number, so the next release prompts normally.
+ * 「稍后」故意什么都不记 —— 调度器还会再找到同一个发布版本，所以真正阻止它每
+ * 个周期重复弹的，是会话级的守卫。「跳过此版本」按版本号持久化在主线程状态里，
+ * 所以下一个发布版本照样会正常提示。
  */
 function promptUpdate(status) {
   if (!status || status.hasUpdate !== true || status.skipped) return;
-  if (S.view === 'settings') return;            // the panel is already on screen
+  if (S.view === 'settings') return;            // 那个面板已经在屏幕上了
   const latest = String(status.latest || '');
   if (!latest || latest === S.updatePrompted) return;
   S.updatePrompted = latest;
@@ -1027,7 +978,7 @@ function showUpdateDialog(status) {
   openModal(t('update.dialogTitle'), body, [skip, later, goBtn]);
 }
 
-/** Start the installer download for the cached release and poll its progress. */
+/** 开始下载缓存好的那个发布版本的安装包，并轮询它的进度。 */
 async function startUpdateDownload(status) {
   const asset = status && status.asset;
   if (!asset || !asset.url) { toast(t('update.badAsset'), 'err'); return; }
@@ -1042,9 +993,8 @@ async function startUpdateDownload(status) {
 }
 
 /**
- * Progress polling. The task object lives in the main process (downloads keep
- * running when the user navigates), so this poll is the only way the UI sees
- * bytes arrive — the panel keeps the last N lines.
+ * 进度轮询。任务对象活在主线程里（用户切页面时下载还在跑），所以这个轮询是 UI
+ * 看到字节到达的唯一途径 —— 面板保留最后 N 行。
  */
 function pollUpdateTask() {
   if (S.updateTimer) return;
@@ -1056,7 +1006,7 @@ function pollUpdateTask() {
     if (!task || !task.active) {
       clearInterval(S.updateTimer);
       S.updateTimer = null;
-      try { S.update = await window.ak.updateStatus(); } catch (e) { /* keep last */ }
+      try { S.update = await window.ak.updateStatus(); } catch (e) { /* 保留上一次的 */ }
       if (S.view === 'settings') render();
       if (task && task.done && task.path) promptInstall(task);
       else if (task && task.error) toast(t('update.downloadFailed', { error: task.error }), 'err');
@@ -1066,8 +1016,8 @@ function pollUpdateTask() {
 }
 
 /**
- * Installing closes the app, so it always takes an explicit confirmation —
- * the download finishing is not the same thing as the user asking to quit.
+ * 安装会关掉应用，所以它总是要一次显式确认 —— 下载完成和用户请求退出不是
+ * 一回事。
  */
 function promptInstall(task) {
   const version = (S.update && S.update.latest) || '';
@@ -1087,9 +1037,8 @@ function promptInstall(task) {
 }
 
 /**
- * Desktop notification, gated by the notifications setting AND window
- * visibility — a toast inside the visible app is enough when the user is
- * already looking at it.
+ * 桌面通知，同时受「通知」这项设置和窗口可见性两道闸门约束 —— 用户已经盯着应用
+ * 看的时候，应用内部弹一个 toast 就够了。
  */
 function maybeNotify(key, vars) {
   if (S.settings.notifications === false) return;
@@ -1101,38 +1050,36 @@ function maybeNotify(key, vars) {
     } else if (Notification.permission !== 'denied') {
       Notification.requestPermission().then((p) => { if (p === 'granted') new Notification(t(key, vars)); });
     }
-  } catch (e) { /* notifications are best-effort */ }
+  } catch (e) { /* 通知本身是尽力而为的 */ }
 }
 
 async function rescan(silent = false) {
-  // Scan-in-flight feedback: a slim progress strip under the banner plus a
-  // disabled scan button, so a slow scan never reads as "clicked, nothing
-  // happened". Silent rescans (side effects of other actions) skip the strip.
+  // 「扫描进行中」的反馈：横幅下面一条细进度条，加上禁用的扫描按钮，这样慢扫描
+  // 不会被读成「点了，没反应」。静默重扫（其他操作的副作用）不显示这条。
   const scanbar = $('#scanbar');
   const scanBtn = $('#btn-scan');
-  // First scan of a session is shown even when "silent": the user is staring
-  // at a skeleton and needs to know why data has not landed yet.
+  // 本次会话的第一次扫描即使「静默」也要显示：用户正对着骨架屏，需要知道为什么
+  // 数据还没落下来。
   const firstScan = !S.data;
   if (!silent || firstScan) {
     if (scanbar) { $('#scanbar-text').textContent = t('scan.scanning'); scanbar.classList.remove('hidden'); }
     if (scanBtn) { scanBtn.classList.add('loading'); scanBtn.disabled = true; }
   }
   try {
-    // Writes land in the real agent directories, so the scan is the only state
-    // this view needs — there is no staged layer left to fetch.
+    // 写入落在真实的 agent 目录里，所以扫描就是这个视图需要的唯一状态 —— 没有
+    // 什么暂存层还需要去取。
     const d = await window.ak.scan();
     S.data = d;
-    // Drop checked ids that no longer exist (deleted elsewhere / rescan changed
-    // ids) — otherwise the batch bar counts ghosts.
+    // 丢掉已经不存在的勾选 id（在别处被删了 / 重扫换了 id）—— 否则批量操作条会
+    // 把幽灵行算进去。
     if (S.checked.size) {
       const alive = new Set((d.assets || []).map((a) => a.id));
       for (const id of [...S.checked]) if (!alive.has(id)) S.checked.delete(id);
     }
     $('#nav-asset-count').textContent = d.summary.total;
-    // One number for all three surfaces. `summary.issues` counts error-level
-    // format problems only, so a warning-level finding left the sidebar badge on
-    // "0" and the dashboard card on "0" while the Health page listed
-    // "1 asset needs attention". issueAssets() is the Health page's predicate.
+    // 三个表面共用同一个数字。`summary.issues` 只统计 error 级别的格式问题，所以
+    // 一个 warning 级别的发现会让侧栏徽标停在「0」、仪表盘卡片停在「0」，而健康
+    // 页却列着「1 个资源需要处理」。issueAssets() 就是健康页的那个判据。
     const issueCount = issueAssets(d).length;
     const issueEl = $('#nav-issue-count');
     issueEl.textContent = issueCount;
@@ -1145,9 +1092,8 @@ async function rescan(silent = false) {
         errs ? 'warn' : 'ok');
     }
   } catch (e) {
-    // A failed scan must not hide behind a toast: the table would keep the
-    // previous data and a first scan would leave a blank main area with no way
-    // to retry. Paint the retryable panel instead; its retry re-runs the scan.
+    // 扫描失败不能只藏在 toast 后面：表格会留着上一次的数据，而首次扫描会让主
+    // 区域一片空白且无从重试。改为画出可重试的面板；它的重试就是重跑扫描。
     reportUiError('error', e);
     const root = $('#view-root');
     if (root) {
@@ -1165,7 +1111,7 @@ function wireGlobal() {
   $('#btn-import').addEventListener('click', doImportProject);
   $('#btn-new-skill').addEventListener('click', () => openSkillEditor(null));
   $('#drawer-close').addEventListener('click', closeDrawer);
-  // Scrim click is the same exit as X: one closeDrawer, one confirm.
+  // 点遮罩和点 ✕ 是同一个出口：一个 closeDrawer，一次确认。
   $('#scrim').addEventListener('click', closeDrawer);
   $('#modal-close').addEventListener('click', closeModal);
   $('#modal-scrim').addEventListener('click', (e) => { if (e.target.id === 'modal-scrim') closeModal(); });
@@ -1179,7 +1125,7 @@ function wireGlobal() {
 
   $$('.nav-item').forEach((b) => b.addEventListener('click', () => go(b.dataset.view)));
 
-  // Close the context menu on any click outside it.
+  // 在它外面点任何地方都关掉右键菜单。
   document.addEventListener('click', (e) => {
     const m = $('#ctxmenu');
     if (m && m.classList.contains('on') && !m.contains(e.target)) hideCtxMenu();
@@ -1191,10 +1137,9 @@ function wireGlobal() {
     const v = e.target.value;
     debounce = setTimeout(() => {
       S.filter = v.trim().toLowerCase();
-      // A new query redefines the visible set exactly like a filter select, so
-      // it has to reset the page and the checked set: otherwise page 3 of the
-      // old result stays selected and the batch bar offers to delete rows the
-      // query hides.
+      // 一个新的查询词会像换了筛选条件一样重新定义可见集合，所以它必须重置页码
+      // 和勾选集合：否则旧结果的第 3 页还是选中的，批量操作条会提出删除那些被
+      // 查询词藏起来的行。
       S.page = 1;
       S.checked.clear();
       render();
@@ -1202,8 +1147,8 @@ function wireGlobal() {
   });
 
   document.addEventListener('keydown', (e) => {
-    // Dialog first: while one is open it owns Tab and Escape. Otherwise focus
-    // stays behind the scrim and Escape drops unsaved edits.
+    // 对话框优先：只要有一个开着，Tab 和 Esc 就归它。否则焦点会留在遮罩后面，
+    // 而 Esc 会丢掉未保存的编辑。
     const modalOpen = $('#modal-scrim').classList.contains('on');
     const drawerOpen = $('#drawer').classList.contains('on');
     if (e.key === 'Tab') {
@@ -1224,7 +1169,7 @@ function wireGlobal() {
 }
 
 /* ------------------------------------------------------------------ */
-/* render dispatch                                                     */
+/* 渲染分发                                                             */
 /* ------------------------------------------------------------------ */
 
 const VIEWS = {
@@ -1238,7 +1183,7 @@ const VIEWS = {
   settings: { titleKey: 'nav.settings', subKey: 'settings.subtitle', render: viewSettings }
 };
 
-/** The element that should keep focus if this render replaces the DOM. */
+/** 如果这次渲染会替换掉 DOM，那个该留住焦点的元素。 */
 function focusKeyNow() {
   const n = document.activeElement;
   if (!n || !n.closest) return null;

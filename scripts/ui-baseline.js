@@ -46,6 +46,62 @@ const VIEWS = [['overview', 'overview'], ['assets', 'assets'], ['settings', 'set
 const PIXEL_TOLERANCE = 12;
 /** 变化像素占比超过它，就认为这一页漂移了。 */
 const DEFAULT_THRESHOLD = 0.02;
+/**
+ * 易变区域：截图前先隐藏。
+ *
+ * 页面里全是活数据 —— 资产总数、统计数字、发布日期、机器相关的路径 —— 不遮掉它们，
+ * 换台机器或本机资产一变，基线就报漂移，而那种漂移没有任何信息量。选择器按语义列，
+ * 不按坐标：坐标随布局走，改一次样式就失效。用 `visibility` 而不是 `display`，
+ * 是为了保住占位 —— 元素一消失布局就重排，反而看不出真正的破版。
+ */
+const VOLATILE_SELECTORS = [
+  '.nav-badge',        // 资产 · 904、健康检查 · 2
+  '.num',              // 表格里的计数列
+  '.upd-log-date',     // 发布说明的发布日期
+  '.kv dd'             // 存储策略里的绝对路径
+];
+/**
+ * 兜底：按文本盖。选择器会漏 —— 同一个数字在这页是 `.num`，在另一页只是表格里一个
+ * `<td>`。凡是**叶子节点**且整段文本就是「数」（计数 `904`、体积 `1.5 KB`、
+ * `103.1M`）、日期（`2026-10-26`）或相对时间（`3 分钟前`）的，都算活数据。
+ * 仍然只盖叶子，布局照旧 —— 这也是为什么用 `visibility` 而不是 `display`。
+ */
+const VOLATILE_PATTERNS = [
+  '^[\\d.,\\s]*\\d[\\d.,\\s]*(?:[A-Za-z%]+)?$', // 904 / 1.5 KB / 103.1M
+  '\\d{4}-\\d{1,2}-\\d{1,2}',                   // 2026-10-26
+  '\\d+\\s*(?:秒|分钟|小时|天)前'                // 3 分钟前
+];
+
+async function hideVolatile(evaluate) {
+  // `AK_BASELINE_NO_MASK=1` 只用于自检：把「遮罩后」与「遮罩前」各截一次做对比，
+  // 用像素差证明遮罩真的盖住了这些区域。正常跑 capture/compare 时不要开。
+  if (process.env.AK_BASELINE_NO_MASK) return 'masking disabled by AK_BASELINE_NO_MASK';
+  const selectors = JSON.stringify(VOLATILE_SELECTORS);
+  const patterns = JSON.stringify(VOLATILE_PATTERNS);
+  return evaluate(`(() => {
+    const patterns = ${patterns}.map((p) => new RegExp(p, 'u'));
+    const isVolatileText = (text) => {
+      for (const re of patterns) if (re.test(text)) return true;
+      return false;
+    };
+    let hidden = 0;
+    for (const selector of ${selectors}) {
+      for (const node of document.querySelectorAll(selector)) {
+        if (node.children.length) continue;
+        node.style.setProperty('visibility', 'hidden');
+        hidden++;
+      }
+    }
+    for (const node of document.querySelectorAll('*')) {
+      if (node.children.length) continue;
+      const text = (node.textContent || '').trim();
+      if (!text || !isVolatileText(text)) continue;
+      node.style.setProperty('visibility', 'hidden');
+      hidden++;
+    }
+    return hidden + ' node(s) hidden';
+  })()`);
+}
 
 /* -------------------------------------------------------------- PNG 解码 */
 
@@ -183,11 +239,13 @@ async function captureViews(dir) {
   for (const [name, view] of VIEWS) {
     await evaluate(`document.querySelector('[data-view="${view}"]').click()`);
     await wait(1400);
+    // 每次渲染后重新隐藏：换个页面 DOM 就是新的，之前设的 visibility 早就没了。
+    await hideVolatile(evaluate);
     const shot = await send('Page.captureScreenshot', { format: 'png' });
     const file = path.join(dir, `${name}-${VIEWPORT.width}x${VIEWPORT.height}.png`);
     fs.writeFileSync(file, Buffer.from(shot.result.data, 'base64'));
     written.push(file);
-    console.log(`  captured ${path.relative(ROOT, file)}`);
+    console.log(`  已截图 ${path.relative(ROOT, file)}`);
   }
   await send('Emulation.clearDeviceMetricsOverride');
   close();
@@ -203,6 +261,37 @@ async function main(argv) {
     await captureViews(BASELINE);
     console.log('[ui-baseline] baseline written — commit it with the change it belongs to');
     return 0;
+  }
+  /**
+   * `mask-check` —— 证明遮罩真的盖住了活数据。
+   *
+   * 拿「遮罩后」的基线和「不遮罩」的一次新截图比像素。这个差值就是被遮罩覆盖的
+   * 面积：数字越大，说明越多活数据不会误报漂移。反过来，如果这里是 0%，说明
+   * VOLATILE_SELECTORS 一个都没命中，遮罩是摆设。
+   */
+  if (command === 'mask-check') {
+    if (!fs.existsSync(BASELINE)) {
+      console.error('[ui-baseline] 还没有基线 —— 先跑 capture');
+      return 2;
+    }
+    const masked = TMP;
+    const unmasked = TMP + '-nomask';
+    await captureViews(masked);
+    process.env.AK_BASELINE_NO_MASK = '1';
+    await captureViews(unmasked);
+    let worst = 0;
+    for (const [name] of VIEWS) {
+      const file = `${name}-${VIEWPORT.width}x${VIEWPORT.height}.png`;
+      const a = decodePng(fs.readFileSync(path.join(masked, file)));
+      const b = decodePng(fs.readFileSync(path.join(unmasked, file)));
+      const ratio = diffRatio(a, b);
+      worst = Math.max(worst, ratio);
+      console.log(`  遮罩覆盖 ${file}  ${(ratio * 100).toFixed(2)}%`);
+    }
+    fs.rmSync(masked, { recursive: true, force: true });
+    fs.rmSync(unmasked, { recursive: true, force: true });
+    console.log(`[ui-baseline] 遮罩面积最大 ${(worst * 100).toFixed(2)}%`);
+    return worst > 0 ? 0 : 1;
   }
   if (command === 'compare') {
     const strict = argv.includes('--strict');
