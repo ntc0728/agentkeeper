@@ -2532,6 +2532,34 @@ function viewSettings() {
     ));
 
   /**
+   * The GitHub mark, inline (Octicons `mark-github`, 16×16).
+   *
+   * Inline SVG rather than an <img>: the CSP allows `img-src 'self' data:`, so
+   * an icon would have to become a packaged asset that `copy-frontend.js` ships
+   * and the dist gate keeps in sync — for one glyph. `fill: currentColor` lets
+   * the surrounding button own the colour, including hover.
+   */
+  const GITHUB_MARK = 'M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z';
+
+  const MARK_SIZE = 16;
+
+  function githubMark() {
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', `0 0 ${MARK_SIZE} ${MARK_SIZE}`);
+    svg.setAttribute('width', String(MARK_SIZE));
+    svg.setAttribute('height', String(MARK_SIZE));
+    svg.setAttribute('class', 'upd-source-mark');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('fill', 'currentColor');
+    path.setAttribute('d', GITHUB_MARK);
+    svg.appendChild(path);
+    return svg;
+  }
+
+  /**
    * Software update card.
    *
    * Reads `S.update` — the snapshot the main process pushes. Every control
@@ -2582,9 +2610,16 @@ function viewSettings() {
       if (u.hasUpdate === true) return t('settings.updateAvailable');
       if (u.hasUpdate === false) return t('settings.updateUpToDate');
       if (u.comparison === 'older') return t('settings.updateOlder');
-      // checked but no release at all — a real state before the first tag;
-      // saying nothing here reads like the check silently failed.
-      if (u.checked && !u.latest) return t('settings.updateNoRelease');
+      // Checked but no release came back. GitHub answers 404 both for "no
+      // release published yet" and for "this repository is private and you are
+      // anonymous" — it cannot tell the two apart on purpose. With no token
+      // saved, the second cause is the one worth naming: the panel used to say
+      // "no release yet" on a repository that had one, which reads as a bug.
+      if (u.checked && !u.latest) {
+        return u.token && u.token.filled === false
+          ? t('settings.updateNoReleaseToken')
+          : t('settings.updateNoRelease');
+      }
       return u.checked ? '' : t('settings.updateNotChecked');
     };
 
@@ -2611,7 +2646,9 @@ function viewSettings() {
       el('div', { class: 'upd-arrow' }, '→'),
       el('div', { class: 'upd-version-cell' },
         el('div', { class: 'set-hint' }, t('settings.updateLatest')),
-        el('div', { class: `upd-version-num mono${u.hasUpdate === true ? ' is-new' : ''}` }, u.latest || '—')),
+        // A dash reads as "this field is empty"; the honest state is "the last
+        // check could not name a version", so say that instead.
+        el('div', { class: `upd-version-num mono${u.hasUpdate === true ? ' is-new' : ''}` }, u.latest || t('settings.updateUnknown'))),
       el('div', { class: 'spacer' }),
       el('button', { class: 'btn sm', onclick: openUpdateSettings }, t('settings.updateSettingsBtn')),
       checkBtn);
@@ -2732,8 +2769,21 @@ function viewSettings() {
       return b;
     };
 
+    // The source is a link, not a sentence: the repository is the one thing in
+    // this dialog a user may need to open — to read a release, or to check
+    // whether the repository is private before hunting for a token. Rendered as
+    // the GitHub mark + `owner/repo`, opening through the same command the
+    // release-page links use (so the URL allow-list stays in Rust).
+    const repoUrl = u.repo ? `https://github.com/${u.repo}` : '';
+    const repoLabel = u.repo || t('settings.updateUnknown');
     body.appendChild(row(t('settings.updateSource'),
-      el('span', { class: 'mono fs-11 muted' }, `github.com/${u.repo || ''}`),
+      el('button', {
+        class: 'btn ghost sm upd-source',
+        type: 'button',
+        title: repoUrl || null,
+        'aria-label': repoUrl ? t('settings.updateOpenRepo', { repo: repoLabel }) : null,
+        onclick: () => { if (repoUrl) void window.ak.openReleasePage(repoUrl).catch(() => {}); }
+      }, githubMark(), el('span', { class: 'mono fs-11' }, repoLabel)),
       t('settings.updateSourceHint')));
 
     body.appendChild(row(t('settings.updateAuto'),

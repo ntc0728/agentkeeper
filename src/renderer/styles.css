@@ -1316,6 +1316,11 @@ table.tbl.static tbody tr:last-child td { border-bottom: 0; }
 .upd-version-num { font-size: var(--fs-title); font-weight: 600; letter-spacing: .2px; }
 .upd-version-num.is-new { color: var(--accent); }
 .upd-arrow { color: var(--text-3); padding-bottom: 5px; }
+/* The update source: GitHub mark + owner/repo, one clickable control. It sits in
+   a `.set-control` cell, which is right-aligned on wide rows — the gap is what
+   keeps the mark from touching the owner text. */
+.upd-source { display: inline-flex; align-items: center; gap: 6px; padding-left: 8px; padding-right: 10px; }
+.upd-source-mark { flex: none; display: block; }
 .upd-progress-line { margin-top: 10px; }
 .upd-progress-track { height: 6px; border-radius: var(--r-pill); background: var(--bar-bg); overflow: hidden; margin-top: 6px; }
 .upd-progress-fill { height: 100%; background: var(--accent); transition: width .25s ease; }
