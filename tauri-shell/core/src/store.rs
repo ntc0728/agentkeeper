@@ -1,42 +1,36 @@
-//! The write path: validate, in-memory undo, atomic write, audit.
+//! 写入路径：校验、内存撤销、原子写入、审计。
 //!
-//! Every mutation goes through [`Store::transaction`], which guarantees, in
-//! this order:
+//! 每次变更都必须经过 [`Store::transaction`]，它按以下顺序保证：
 //!
-//! 1. validate — a malformed op is rejected before a single byte moves
-//! 2. undo snapshot — the current state of every touched path is read **into
-//!               memory**. Nothing is copied to disk anywhere: the product has
-//!               no backup tree and no by-id rollback, so the only thing the
-//!               snapshot has to serve is the failure path below.
-//! 3. atomic write — `<path>.agentkeeper-tmp-<pid>-<ms>` then `rename(2)`
-//! 4. undo on failure — a failed op puts the touched paths back from the
-//!               in-memory snapshot and answers `{ ok: false }`. The undo
-//!               attempts **every** path and reports **all** the ones it could
-//!               not put back, because a path it fails on is still a path it
-//!               left in its post-write state.
-//! 5. audit — one `audit.jsonl` line describing what changed
+//! 1. 校验 —— 格式错误的操作在任何一个字节被移动之前就会被拒绝
+//! 2. 撤销快照 —— 每个被触及路径的当前状态被读取**到内存中**。任何地方都不会
+//!               把内容拷贝到磁盘：产品没有备份树，也没有按 id 回滚，因此快照唯一
+//!               要服务的对象就是下面这条失败路径。
+//! 3. 原子写入 —— `<path>.agentkeeper-tmp-<pid>-<ms>`，然后 `rename(2)`
+//! 4. 失败时撤销 —— 失败的操作会从内存快照把被触及的路径恢复回去，并返回
+//!               `{ ok: false }`。撤销会尝试**每一个**路径，并报告**所有**它
+//!               无法恢复的路径，因为在某个路径上失败意味着那个路径仍停留在
+//!               写入之后的状态。
+//! 5. 审计 —— 一行 `audit.jsonl` 描述改动内容
 //!
-//! Writes land in the real agent directories. There is deliberately no staging
-//! layer between the user and the file: a UI that redirects writes into a
-//! mirror tree while claiming to have saved is worse than no write at all, and
-//! the previous "sandbox mode" did exactly that.
+//! 写入落在真实的 agent 目录里。用户和文件之间刻意不设暂存层：一个把写入重定向
+//! 到镜像树、却声称已经保存的 UI，比根本不写更糟糕，而之前的 "sandbox mode"
+//! 做的正是这件事。
 //!
-//! **Any caller — UI, MCP, CLI — must go through `transaction()`.** Nothing may
-//! write an agent file directly. Going through it is what makes "a failed write
-//! leaves the tree as it was" true for *every* path but one: if the undo
-//! itself cannot write a path back — permissions changed mid-flight, the volume
-//! filled up, or a symbolic link needs privileges the process does not have —
-//! that path is reported in `restoreErrors` with its own `code`, and the caller
-//! is expected to show it. It is not swallowed, and it is not rare enough to
-//! treat as unreachable.
+//! **任何调用方 —— UI、MCP、CLI —— 都必须走 `transaction()`。** 任何东西都不得
+//! 直接写 agent 文件。走这条路径，正是"一次失败的写入会原样留下目录树"对*除一个
+//! 路径之外*的每个路径都成立的原因：如果撤销本身无法把某个路径写回去 —— 飞行
+//! 中途权限变了、卷写满了，或者符号链接需要进程没有的权限 —— 该路径会带着自己的
+//! `code` 出现在 `restoreErrors` 里，调用方应当把它展示出来。它不会被吞掉，而且
+//! 它出现得并不罕见到可以当作不可达。
 //!
-//! ## Deliberate differences from the plainest reading of the spec
+//! ## 与规格最朴素读法之间的刻意差异
 //!
-//! * Snapshots hold raw bytes, not paths to a copy. A rollback-by-id would need
-//!   the copy to outlive the call; undoing a *failed* transaction does not, so
-//!   keeping the old state in RAM is enough and costs the disk nothing.
-//! * JSONC stripping is shared with the scanner ([`super::jsonc`]) instead of a
-//!   second, subtly different regex chain living in this module.
+//! * 快照保存的是原始字节，不是指向副本的路径。按 id 回滚需要副本在调用结束之后
+//!   仍然存在；而撤销一次*失败的*事务不需要，所以把旧状态留在 RAM 里就够了，
+//!   而且不花磁盘一分钱。
+//! * JSONC 剥离与扫描器共用（[`super::jsonc`]），而不是在本模块里另起一套
+//!   微妙的、略有差异的正则链。
 
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -46,8 +40,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::jsonc::strip_json_comments;
 use super::settings;
 
-/// Directories that are never captured in a snapshot and never copied. Dragging
-/// `node_modules` along turns a 40 ms save into a 4 GB one.
+/// 从不纳入快照、也从不拷贝的目录。把 `node_modules` 一起拖进来，会让一次
+/// 40 ms 的保存变成 4 GB 的保存。
 const SKIP_DIRS: [&str; 8] = [
     "node_modules",
     ".git",
@@ -59,41 +53,36 @@ const SKIP_DIRS: [&str; 8] = [
     ".venv",
 ];
 
-/// Ceiling on the bytes one transaction may hold in memory while it runs.
+/// 单个事务运行期间可在内存中持有的字节上限。
 ///
-/// The snapshot has to be complete: a directory that cannot be captured must
-/// refuse the transaction *before* the first write, never restore "mostly". So
-/// the guard is a hard failure, not a truncation.
+/// 快照必须完整：一个无法被完整捕获的目录应当在第一次写入*之前*就让事务失败，
+/// 绝不能"大致恢复"。所以这个守卫是硬失败，而不是截断。
 ///
-/// ## Where the number comes from
+/// ## 这个数字的来源
 ///
-/// This is a *product* ceiling, not a memory-pressure estimate. The undo is
-/// held for the lifetime of one transaction, on the UI thread of a desktop
-/// app that also has a WebView resident, so the only question is "how large a
-/// snapshot can we hold briefly without the app becoming unresponsive".
+/// 这是一个*产品*上限，而不是内存压力估算。撤销数据在一次事务的生命周期内一直
+/// 被持有，而且是在一个同时驻留了 WebView 的桌面应用的 UI 线程上，因此唯一的问题
+/// 是"我们可以短暂持有多大的快照而不让应用失去响应"。
 ///
-/// Measured against the assets this app actually manages on a real machine
-/// (per-directory totals after [`SKIP_DIRS`]):
+/// 针对本应用在一台真实机器上实际管理的资产实测（按 [`SKIP_DIRS`] 排除之后的
+/// 各目录合计）：
 ///
-/// | touched path                                   | bytes    |
+/// | 被触及的路径                                   | 字节数    |
 /// |------------------------------------------------|----------|
-/// | a skill directory (`~/.claude/skills/<name>`)   | ≤ 2.1 MiB |
-/// | a rules/memory file (`AGENTS.md`, `CLAUDE.md`)  | ≤ 40 KiB  |
-/// | an MCP config (`mcp.json`, `config.toml`)       | ≤ 40 KiB  |
-/// | **the whole `skills/` parent, worst case**      | ~4.4 MiB  |
+/// | 一个 skill 目录（`~/.claude/skills/<name>`）   | ≤ 2.1 MiB |
+/// | 一个 rules/memory 文件（`AGENTS.md`、`CLAUDE.md`）| ≤ 40 KiB  |
+/// | 一个 MCP 配置（`mcp.json`、`config.toml`）       | ≤ 40 KiB  |
+/// | **整个 `skills/` 父目录，最坏情况**             | ~4.4 MiB  |
 ///
-/// So 8 MiB is roughly 2× the largest *individual* managed directory
-/// (2.1 MiB) and ~2× the largest parent directory an op can name (4.4 MiB),
-/// which puts the refusal above every legitimate write and below the build
-/// trees the walk already skips. The two realistic ways to exceed it are a
-/// vendored `node_modules` committed *inside* a skill and a media-heavy
-/// plugin, and both are genuinely worth refusing: holding 100 MiB of bytes to
-/// undo a save that will not fail is a worse outcome than telling the user.
+/// 所以 8 MiB 大约是最大的*单个*受管目录（2.1 MiB）的 2 倍，也是操作所能指名的
+/// 最大父目录（4.4 MiB）的约 2 倍，这把拒绝线放在了所有合法写入之上、也放在了
+/// 遍历本来就跳过的构建树之下。真正会超出的两种现实情形是：提交在某个 skill
+/// *内部*的 vendored `node_modules`，以及媒体资源繁重的插件，而这两者都确实
+/// 值得拒绝：为了撤销一次根本不会失败的保存而持有 100 MiB 字节，比告诉用户更糟。
 ///
-/// It is deliberately **not** raised to cover pathological cases. The trade is
-/// explicit: a cap that "probably always fits" costs the user a write they
-/// could have made, and the cap exists precisely because the memory is the
-/// only undo there is.
+/// 它被刻意**不**提高到能覆盖病态情形。这笔交易是明摆着的：一个"大概总是放得下"
+/// 的上限，代价是让用户失去一次本来能做的写入，而这个上限之所以存在，恰恰因为
+/// 内存就是唯一的撤销手段。
 const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 
 fn is_skip_dir(name: &str) -> bool {
@@ -119,21 +108,20 @@ pub fn native_str(p: &Path) -> String {
 }
 
 /* ------------------------------------------------------------------ */
-/* JSON helpers                                                        */
+/* JSON 辅助函数                                                        */
 /* ------------------------------------------------------------------ */
 
-/// `readJsonOrNull()` — `Some` only if the file exists *and* parses.
+/// `readJsonOrNull()` —— 只有文件存在*且*能解析时才返回 `Some`。
 ///
-/// The distinction matters: an empty file parses to `null` in the reference
-/// implementation too, and the `json` op aborts rather than overwriting a config
-/// it could not read.
+/// 这个区分很重要：在参考实现里空文件同样解析成 `null`，而 `json` 操作应当
+/// 中止，而不是覆盖一份它读不懂的配置。
 pub fn read_json_or_null(path: &str) -> Option<Value> {
     let text = std::fs::read_to_string(path).ok()?;
     let stripped = strip_json_comments(&text);
     serde_json::from_str(&stripped).ok()
 }
 
-/// `readJsonSafe()` — a parse failure looks like an empty object.
+/// `readJsonSafe()` —— 解析失败看起来就像一个空对象。
 pub fn read_json_safe(path: &str) -> Value {
     read_json_or_null(path).unwrap_or_else(|| json!({}))
 }
@@ -182,12 +170,11 @@ fn pretty(v: &Value) -> String {
 }
 
 /* ------------------------------------------------------------------ */
-/* fs helpers                                                          */
+/* 文件系统辅助函数                                                        */
 /* ------------------------------------------------------------------ */
 
-/// `copyDir()` — recursive copy that refuses to drag build trees along and
-/// reproduces symlinks (falling back to the target's bytes when the link
-/// cannot be created, e.g. an unprivileged Windows process).
+/// `copyDir()` —— 递归拷贝，拒绝顺带拖走构建树，并复现符号链接（当链接无法
+/// 创建时退回目标的内容，例如没有特权的 Windows 进程）。
 pub fn copy_dir(src: &Path, dest: &Path) {
     if std::fs::create_dir_all(dest).is_err() {
         return;
@@ -215,8 +202,7 @@ pub fn copy_dir(src: &Path, dest: &Path) {
                 }
             });
             if !matches!(link_ok, Some(Ok(()))) {
-                // A dangling link cannot be recreated; copying whatever the
-                // target points at is better than silently dropping the entry.
+                // 悬空链接无法被重建；把目标指向的内容拷贝过来，总好过悄悄丢掉这个条目。
                 let _ = std::fs::copy(&from, &to);
             }
         } else if ft.is_dir() {
@@ -247,20 +233,19 @@ fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
 
-/// Read a file as UTF-8 text, lossy on invalid sequences.
+/// 以 UTF-8 文本读取文件，遇到非法序列则宽松处理。
 ///
-/// `readAll()` in the reference wrapper returns `''` for a missing or unreadable file
-/// and the asset drawer renders that as "empty", so a failure here must not be
-/// an error. Every read of asset content goes through this one function.
+/// 参考封装里的 `readAll()` 对缺失或不可读的文件返回 `''`，而资产抽屉会把它
+/// 渲染成"空"，因此这里的失败绝不能算作错误。所有资产内容的读取都走这一个函数。
 pub fn read_text(p: &Path) -> String {
     std::fs::read(p)
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default()
 }
 
-/// `rmrf()` — a link is unlinked, never followed.
+/// `rmrf()` —— 链接是被解除的，绝不跟随。
 pub fn rmrf(p: &Path) {
-    // `fs.existsSync()` follows links: a dangling symlink is left alone.
+    // `fs.existsSync()` 会跟随链接：悬空的符号链接会被原样留下。
     if !p.exists() {
         return;
     }
@@ -281,8 +266,8 @@ pub fn rmrf(p: &Path) {
     }
 }
 
-/// `listFiles()` — relative paths with `/`, symlinks counted as files (so a
-/// link cycle cannot recurse forever even before the `seen` guard).
+/// `listFiles()` —— 相对路径用 `/`，符号链接按文件计数（这样即使在 `seen`
+/// 守卫之前，链接环也无法无限递归）。
 pub fn list_files(dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -318,12 +303,11 @@ fn walk_files(dir: &Path, base: &str, seen: &mut HashSet<PathBuf>, out: &mut Vec
     }
 }
 
-/// Recursively read one directory into an in-memory [`DirSnap`] list.
+/// 把一个目录递归读进内存中的 [`DirSnap`] 列表。
 ///
-/// `seen` guards a link cycle exactly like [`walk_files`] does: without it a
-/// directory pointing at its own parent would recurse until the budget ran out,
-/// and the resulting error message would blame the user's asset rather than the
-/// loop. [`SKIP_DIRS`] are skipped for the same reason [`copy_dir`] skips them.
+/// `seen` 对链接环的防护与 [`walk_files`] 完全一致：没有它，一个指向自身父目录
+/// 的目录会一直递归到预算耗尽，而由此产生的报错会归咎于用户的资产而不是那个
+/// 环。跳过 [`SKIP_DIRS`] 的理由也同 [`copy_dir`] 跳过它们一样。
 fn collect_dir(
     dir: &Path,
     base: &str,
@@ -393,16 +377,14 @@ fn collect_dir_seen(
     Ok(())
 }
 
-/// Write a captured [`DirSnap`] list back under `dir`.
+/// 把捕获到的 [`DirSnap`] 列表写回 `dir` 之下。
 ///
-/// The directory is emptied first: the undo must produce the *captured* tree,
-/// not a merge, or a file the transaction created inside it would survive.
-/// That makes every failure *after* the `rmrf` destructive, so the walk
-/// collects failures and finishes the remaining entries instead of bailing at
-/// the first one — a bail would leave the tree holding only the entries it
-/// happened to reach, which is the half-restored state this function exists to
-/// prevent. Before destroying anything, a probe write proves the directory can
-/// be written back at all: refused here, the captured tree is still intact.
+/// 目录会先被清空：撤销必须产出*捕获到的*那棵树，而不是合并，否则事务在其中
+/// 创建的文件会残留下来。这使得 `rmrf` 之后的每一次失败都具有破坏性，所以遍历
+/// 会收集失败并把剩下的条目处理完，而不是在第一个失败处直接退出 —— 直接退出会
+/// 让目录树只剩下恰好走到的那部分条目，那正是本函数要防止的"恢复了一半"的
+/// 状态。在销毁任何东西之前，一次探针写入会证明该目录究竟能不能被写回：在这里
+/// 被拒绝的话，捕获到的树仍然完好。
 fn restore_dir(dir: &Path, entries: &[DirSnap]) -> Vec<RestoreFailure> {
     let mut out = Vec::new();
     if let Err(e) = std::fs::create_dir_all(dir) {
@@ -415,7 +397,7 @@ fn restore_dir(dir: &Path, entries: &[DirSnap]) -> Vec<RestoreFailure> {
     }
     let probe = dir.join(".agentkeeper-restore-probe");
     if let Err(e) = std::fs::write(&probe, b"") {
-        // Refused before the `rmrf` below, so nothing has been destroyed yet.
+        // 在下面的 `rmrf` 之前就被拒绝，因此此刻还没有任何东西被销毁。
         out.push(RestoreFailure::new(
             &native_str(dir),
             RESTORE_PATH_FAILED,
@@ -475,11 +457,10 @@ fn restore_dir(dir: &Path, entries: &[DirSnap]) -> Vec<RestoreFailure> {
                     symlink_file(Path::new(target), &to)
                 };
                 if let Err(e) = created {
-                    // An unprivileged Windows process cannot create a link, and
-                    // an unlinked target has no bytes to fall back to. The rest
-                    // of the tree is still restored, and this entry is reported
-                    // with what the user has to do about it — a silently missing
-                    // entry is the half-restored tree this must never produce.
+                    // 没有特权的 Windows 进程无法创建链接，而未链接的目标也没有
+                    // 字节可以退回。目录树的其余部分仍然被恢复了，而该条目会带着
+                    // 用户需要做什么一起被报告 —— 悄悄缺失一个条目，正是这里
+                    // 绝不能产出的"恢复了一半"的目录树。
                     out.push(RestoreFailure::new(
                         &native_str(&to),
                         RESTORE_SYMLINK_FAILED,
@@ -501,8 +482,8 @@ fn entry_name(entry: &DirSnap) -> String {
     }
 }
 
-/// `pruneEmptyParents()` — remove directories that existed only to hold the
-/// file we just deleted, stopping at `stop_at` or the volume root.
+/// `pruneEmptyParents()` —— 移除那些仅仅为了存放我们刚删掉的文件而存在的
+/// 目录，遇到 `stop_at` 或卷根就停下。
 fn prune_empty_parents(dir: &str, stop_at: &str) {
     let boundary = normalize_path(stop_at);
     let mut cur = normalize_path(dir);
@@ -528,7 +509,7 @@ fn prune_empty_parents(dir: &str, stop_at: &str) {
     }
 }
 
-/// `path.resolve()` for an already-absolute path: collapse `.` and `..`.
+/// 对已经是绝对路径的路径做 `path.resolve()`：折叠 `.` 和 `..`。
 pub fn normalize_path(p: &str) -> String {
     let path = Path::new(p);
     let mut out = PathBuf::new();
@@ -551,14 +532,12 @@ fn volume_root(p: &str) -> String {
     }
 }
 
-/// One path the undo could not put back, with a machine-readable reason.
+/// 撤销没能放回去的一个路径，带着机器可读的原因。
 ///
-/// A failure here is not an exception: the other paths are still attempted, so
-/// the type exists to make "one bad path" and "several bad paths" the same
-/// shape. [`code`](Self::code) is what the renderer keys its wording off —
-/// a caller that had to parse the English sentence would break the moment the
-/// wording was reworded, which is exactly what happened when the symlink
-/// message gained its "run as administrator" sentence.
+/// 这里的失败不是异常：其他路径仍会被尝试，所以这个类型的存在是为了让"一个坏
+/// 路径"和"几个坏路径"具有相同的形状。[`code`](Self::code) 正是渲染层措辞的
+/// 依据 —— 一个不得不去解析英文句子的调用方，会在措辞被改写的瞬间就崩掉，而这正是
+/// 符号链接消息加上"以管理员身份运行"那句时发生过的事。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RestoreFailure {
     path: String,
@@ -575,15 +554,15 @@ impl RestoreFailure {
         }
     }
 
-    /// An I/O failure with no code of its own — the disk simply said no. Its
-    /// `detail` is the raw `io::Error`, so the sentence a caller builds from it
-    /// keeps the `write failed for §1: §2` shape the dictionary already maps.
+    /// 一个自身不带 code 的 I/O 失败 —— 磁盘只是说了"不"。它的 `detail` 是原始的
+    /// `io::Error`，所以调用方据此拼出的句子仍保持字典里已映射的
+    /// `write failed for §1: §2` 形状。
     fn plain(path: &str, e: impl std::fmt::Display) -> RestoreFailure {
         RestoreFailure::new(path, RESTORE_PATH_FAILED, e.to_string())
     }
 
-    /// Stable identifier — never the sentence. See [`STORE_SNAPSHOT_TOO_LARGE`]
-    /// and [`RESTORE_SYMLINK_FAILED`].
+    /// 稳定标识 —— 绝不是那个句子。见 [`STORE_SNAPSHOT_TOO_LARGE`] 和
+    /// [`RESTORE_SYMLINK_FAILED`]。
     pub fn code(&self) -> &'static str {
         self.code
     }
@@ -596,8 +575,8 @@ impl RestoreFailure {
         &self.detail
     }
 
-    /// The `restoreErrors` entry shape. Building it here means the renderer's
-    /// field names cannot drift from the ones the engine emits.
+    /// `restoreErrors` 的条目形状。在这里构造它，意味着渲染层的字段名不会与引擎
+    /// 实际发出的字段名发生漂移。
     fn to_json(&self) -> Value {
         json!({
             "path": self.path,
@@ -606,20 +585,19 @@ impl RestoreFailure {
         })
     }
 
-    /// One sentence for callers that read a single string. With more than one
-    /// failure the caller joins them, so no failure is dropped — dropping them
-    /// is what made the old `restoreError` under-report the state of the tree.
+    /// 给读取单个字符串的调用方的一句话。失败多于一条时由调用方把它们拼接起来，
+    /// 因此没有哪条失败会被丢掉 —— 正是丢掉它们让旧的 `restoreError` 低估了
+    /// 目录树的真实状态。
     ///
-    /// The path is rendered first and on its own, because it is the one part
-    /// that must survive any re-wording of `detail`: a user acts on *which*
-    /// asset is wrong, and only afterwards on why.
+    /// 路径排在最前面且独占一行，因为它是唯一必须在 `detail` 被改写时依然存活的
+    /// 部分：用户是基于*哪个*资产出了问题采取行动，其次才是为什么。
     fn sentence(&self) -> String {
         format!("{}: {}", self.path, self.detail)
     }
 }
 
-/// One sentence per failure, joined. Empty in, empty out — so the caller can
-/// test "was the undo clean?" against the string alone.
+/// 每条失败一句话，拼接在一起。空进空出 —— 这样调用方就可以仅凭这个字符串来
+/// 判断"撤销是否干净"。
 fn restore_sentence(failures: &[RestoreFailure]) -> String {
     failures
         .iter()
@@ -628,25 +606,21 @@ fn restore_sentence(failures: &[RestoreFailure]) -> String {
         .join("; ")
 }
 
-/// `errorCode` for a transaction refused because a touched path is larger than
-/// the in-memory undo can hold. Nothing was written, so this is a refusal and
-/// not a restore problem — but the caller still needs to say it apart from an
-/// ordinary I/O failure, because the fix is "use a smaller asset", not "retry".
+/// 当某个被触及的路径比内存撤销能容纳的还大时，事务被拒绝所对应的 `errorCode`。
+/// 什么都没有写入，因此这是"拒绝"而不是"恢复"问题 —— 但调用方仍需要把它与普通的
+/// I/O 失败区分开，因为解决办法是"换一个更小的资产"，而不是"重试"。
 pub const STORE_SNAPSHOT_TOO_LARGE: &str = "store.snapshotTooLarge";
 
-/// `errorCode` for "the undo put the files back but a symbolic link inside a
-/// directory could not be recreated" — the partial-success case. The files are
-/// there and the link is not, and only a privileged run can fix that.
+/// 针对"撤销把文件放了回去，但目录里的某个符号链接没能重建"这一半成功情形的
+/// `errorCode`。文件都在、链接不在，而只有带特权的运行才能修复它。
 pub const RESTORE_SYMLINK_FAILED: &str = "store.symlinkRestoreFailed";
 
-/// A restore failed for a reason the codes above do not name: the path could
-/// not be written back at all (permissions changed, the path is locked, the
-/// volume filled up mid-restore).
+/// 因上述 code 没有涵盖的原因而失败的恢复：该路径根本写不回去（权限变了、路径被
+/// 锁住、恢复途中卷被写满）。
 const RESTORE_PATH_FAILED: &str = "store.restorePathFailed";
 
-/// `errorCode` for "the undo could not put every path back". Emitted
-/// whenever `restoreErrors` is non-empty, so the renderer can tell "nothing was
-/// written" apart from "written, then partly undone" without reading prose.
+/// 针对"撤销没能把每一条路径都放回去"的 `errorCode`。只要 `restoreErrors` 非空
+/// 就会发出，好让渲染层不必读散文就能区分"什么都没写"和"写了，然后部分撤销"。
 pub const STORE_RESTORE_INCOMPLETE: &str = "store.restoreIncomplete";
 
 fn to_base36(mut n: u64) -> String {
@@ -663,17 +637,14 @@ fn to_base36(mut n: u64) -> String {
     String::from_utf8(buf).unwrap_or_default()
 }
 
-/// The refusal a caller sees when a touched path will not fit the undo budget.
+/// 调用方在某个被触及的路径装不进撤销预算时看到的拒绝信息。
 ///
-/// It has to answer three questions on its own, because it is the only thing the
-/// user sees: what the limit is, how big the offending thing is, and what to do
-/// about it. "the in-memory undo limit is 8388608 bytes" answers none of them,
-/// and the raw byte count in particular reads like a number the user cannot
-/// change is in their way.
+/// 它必须自己回答三个问题，因为它是用户唯一能看到的东西：上限是多少、越界的那个
+/// 东西有多大、该怎么办。"the in-memory undo limit is 8388608 bytes" 三个都没回答，
+/// 尤其是原始字节数，读起来像是一个用户改不了的数字挡在路上。
 ///
-/// The literal is kept on **one source line** on purpose: `scripts/tauri-i18n.js`
-/// files any literal that still contains a `\` under "not prose", so a sentence
-/// wrapped with `\` across lines would never be asked for a translation.
+/// 字面量刻意保持在**一行源码**上：`scripts/tauri-i18n.js` 会把仍含 `\` 的
+/// 字面量归到"不是散文"一类，所以一个用 `\` 折行的句子永远不会被要求翻译。
 fn over_budget_message(who: &str, size: usize) -> String {
     format!(
         "undo snapshot limit reached: {} needs {} but a single write may only hold {} of undo data, so nothing was written; split this asset into smaller writes, or drop files that are not part of it (dependency folders and build output are skipped automatically)",
@@ -683,10 +654,9 @@ fn over_budget_message(who: &str, size: usize) -> String {
     )
 }
 
-/// Round *up* to one decimal, so a size never renders below the limit it
-/// exceeds: "needs 8.0 MB but may only hold 8.0 MB" reads as a rounding
-/// artefact and leaves the reader unable to tell how far over the line they
-/// are. `8.0` here means "8.0 and some more".
+/// *向上*取整到一位小数，这样一个尺寸永远不会显示得比它超出的上限更低：
+/// "needs 8.0 MB but may only hold 8.0 MB" 读起来像取整的假象，让读者无法判断
+/// 自己超了多少。这里的 `8.0` 意味着"8.0 还多一点"。
 fn human_size(bytes: usize) -> String {
     const MB: f64 = 1024.0 * 1024.0;
     let b = bytes as f64;
@@ -699,11 +669,10 @@ fn human_size(bytes: usize) -> String {
     }
 }
 
-/// A transaction failure that carries its own `errorCode`.
+/// 携带自身 `errorCode` 的事务失败。
 ///
-/// The code is attached at the point where the cause is *known*, because the
-/// renderer keys its wording off the code; recovering the code from the English
-/// sentence later is what made the two drift apart before.
+/// code 是在原因*已知*的地方挂上去的，因为渲染层的措辞就是以 code 为依据的；
+/// 之后再从英文句子里去反推 code，正是此前两者产生漂移的原因。
 #[derive(Debug)]
 struct TxError {
     message: String,
@@ -711,8 +680,8 @@ struct TxError {
 }
 
 impl TxError {
-    /// A failure whose code is not one the renderer special-cases: an ordinary
-    /// op error, answered as `ok:false` with whatever message the op built.
+    /// 一个 code 不属于渲染层特例处理的失败：普通的操作错误，以 `ok:false` 应答，
+    /// 消息就是该操作构造出来的那条。
     fn plain(message: impl Into<String>) -> TxError {
         TxError {
             message: message.into(),
@@ -720,9 +689,8 @@ impl TxError {
         }
     }
 
-    /// The size cap. It is the one code the renderer must not fall back to
-    /// generic wording for: the user's next move is to shrink the asset, and
-    /// that advice is in the sentence rather than in the code's parameters.
+    /// 尺寸上限。它是渲染层唯一不许退回通用措辞的 code：用户的下一步是把资产
+    /// 缩小，而这条建议写在句子里，而不是放在 code 的参数里。
     fn snapshot(message: impl Into<String>) -> TxError {
         TxError {
             message: message.into(),
@@ -730,14 +698,13 @@ impl TxError {
         }
     }
 
-    /// Add the path the transaction was about to touch.
+    /// 补上事务即将触及的路径。
     ///
-    /// Only op errors get the `write failed for <path>: …` stem. That pattern is
-    /// translated as a prefix with `§2` passed through untouched — the tail of
-    /// those messages is an `io::Error`, which is as far as the dictionary goes
-    /// — so a *refusal* that carries advice ("split this asset into smaller
-    /// writes") must not be hung off it, or the advice reaches a Chinese user in
-    /// English. Refusals keep their own stem and get their own entry.
+    /// 只有操作错误会带上 `write failed for <path>: …` 这个前缀骨架。该模式是作为
+    /// 带 `§2` 原样透传的前缀被翻译的 —— 那些消息的尾部是一个 `io::Error`，
+    /// 字典能覆盖的也就到此为止 —— 所以一条携带建议的*拒绝*（"把这个资产拆成
+    /// 更小的写入"）绝不能挂在它下面，否则建议会以英文抵达中文用户。拒绝有自己的
+    /// 骨架，也有自己的词条。
     fn naming(self, path: &str) -> TxError {
         if self.code == STORE_SNAPSHOT_TOO_LARGE {
             return self;
@@ -749,7 +716,7 @@ impl TxError {
     }
 }
 
-/// `errorCode` for any transaction failure with no more specific code.
+/// 针对没有更具体 code 的任何事务失败的 `errorCode`。
 const TX_FAILED: &str = "write.failed";
 
 /// `tx-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,7)}`
@@ -761,7 +728,7 @@ fn gen_tx_id() -> String {
     let mut state = nanos ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     let mut tail = String::with_capacity(5);
     for _ in 0..5 {
-        // xorshift64 — the id only has to be unique, not unguessable.
+        // xorshift64 —— 这个 id 只需要唯一，不需要不可猜测。
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;
@@ -771,7 +738,7 @@ fn gen_tx_id() -> String {
 }
 
 /* ------------------------------------------------------------------ */
-/* ops                                                                 */
+/* 操作                                                                 */
 /* ------------------------------------------------------------------ */
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -795,17 +762,17 @@ impl OpKind {
     }
 }
 
-/// One mutation. Built through the constructors so a missing field is a
-/// compile error rather than a runtime `op[i] is missing a "from"`.
+/// 一次变更。通过这些构造函数来构造，这样漏掉某个字段就是编译错误，而不是运行时的
+/// `op[i] is missing a "from"`。
 pub struct Op {
     pub kind: OpKind,
-    /// The path written. Absolute, as the scanner reported it.
+    /// 被写入的路径。绝对路径，与扫描器报告的一致。
     pub path: String,
     pub from: Option<String>,
     pub content: Option<String>,
-    /// `json` op: shallow merge source.
+    /// `json` 操作：浅合并的来源。
     pub patch: Option<Value>,
-    /// `json` op: full control. Returning `None` aborts the transaction.
+    /// `json` 操作：完全控制。返回 `None` 会中止事务。
     pub mutate: Option<Box<dyn Fn(Value) -> Option<Value>>>,
 }
 

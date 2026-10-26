@@ -1,15 +1,14 @@
-//! Update-specific transport policy.
+//! 更新专用的传输策略。
 //!
-//! The egress policy (`auto` → direct then the local Clash mixed port, a
-//! pinned proxy URL) lives in [`crate::http`]; this module takes no
-//! proxy setting of its own, so only the direct route exists here.
+//! 出口策略（`auto` → 先直连、再走本机 Clash mixed port，或固定的代理 URL）
+//! 位于 [`crate::http`]；本模块不持有自己的代理设置，因此这里只有直连路由。
 //!
-//! What this module implements:
+//! 本模块实现：
 //!
-//! * the GitHub header set;
-//! * redirects with the same five-hop budget;
-//! * the 4 MiB JSON body ceiling (`MAX_JSON_BYTES`, `readBody`);
-//! * `describeError`'s transport messages, because the UI shows them verbatim.
+//! * GitHub 请求头集合；
+//! * 重定向，同样是五跳预算；
+//! * 4 MiB JSON body 上限（`MAX_JSON_BYTES`、`readBody`）；
+//! * `describeError` 的传输层消息，因为 UI 会原样显示它们。
 
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -25,24 +24,22 @@ pub const MAX_JSON_BYTES: u64 = 4 * 1024 * 1024;
 /// `USER_AGENT` — 固定的字符串。
 const USER_AGENT: &str = "AgentKeeper-updater";
 
-/// One response from the API, before the manager's interpretation.
+/// 来自 API 的一次响应，在 manager 解读之前。
 ///
 /// `getJson` 返回 `{ status, headers, json }`，manager 三者都要看
-/// branches on all three (404 = no release, 403/429 = rate limit with a
-/// deadline read from the headers). A body-only return value cannot express
-/// those states.
+/// —— 三条分支都要用到（404 = 没有发布，403/429 = 触发限流，
+/// 截止时间从响应头读出）。只返回 body 无法表达这些状态。
 #[derive(Debug, Clone)]
 pub struct ReleaseFetch {
     pub status: u16,
-    /// Lowercased header names.
+    /// 小写的响应头名。
     pub headers: BTreeMap<String, String>,
-    /// `None` for a non-2xx response, mirroring `json = null`.
+    /// 非 2xx 响应时为 `None`，与 `json = null` 一致。
     pub json: Option<Value>,
 }
 
-/// `githubHeaders` 的头部集合。`authorization` is present
-/// only when a token exists — an empty string is falsy, so it is
-/// skipped here too.
+/// `githubHeaders` 的头部集合。`authorization` 仅在
+/// 存在令牌时才出现 —— 空字符串是假值，因此这里也会跳过它。
 fn github_headers(token: Option<&str>) -> Vec<(&'static str, String)> {
     let mut headers = vec![
         ("accept", "application/vnd.github+json".to_string()),
@@ -58,8 +55,7 @@ fn github_headers(token: Option<&str>) -> Vec<(&'static str, String)> {
 }
 
 fn read_body_capped(reader: &mut dyn Read) -> Result<Vec<u8>, UpdateError> {
-    // `readBody`：accumulate, fail as soon as the
-    // running total passes the limit.
+    // `readBody`：累积读取，一旦累计总量超过上限就失败。
     let mut body = Vec::new();
     let mut buffer = [0u8; 16 * 1024];
     let mut size: u64 = 0;
@@ -87,16 +83,15 @@ fn read_body_capped(reader: &mut dyn Read) -> Result<Vec<u8>, UpdateError> {
     Ok(body)
 }
 
-/// `getJson`，in the shape the manager needs:
-/// `(status, headers, json)`.
+/// `getJson`，采用 manager 需要的形状：
+/// `(status, headers, json)`。
 ///
-/// * `Ok` for **any** HTTP status, because 404 ("no release yet") and 403/429
-///   ("rate limited") are answers, not transport failures — the manager reads
-///   the status and the rate-limit headers to decide.
-/// * `Err` only for transport failures and an unparseable 2xx body.
-/// * `json` is `Value::Null` for a non-2xx response (`json = null`).
-/// * Headers are lowercased, one value per name, like `res.headers`
-///   (the manager reads `retry-after` and `x-ratelimit-*`).
+/// * 任何 HTTP 状态都返回 `Ok`，因为 404（"还没有发布"）和 403/429
+///   （"被限流"）是答案而非传输失败 —— manager 读取状态码与限流响应头来决策。
+/// * 只有传输失败和无法解析的 2xx body 才返回 `Err`。
+/// * 非 2xx 响应时 `json` 为 `Value::Null`（`json = null`）。
+/// * 响应头一律小写，每个名字一个值，与 `res.headers` 一致
+///   （manager 会读 `retry-after` 和 `x-ratelimit-*`）。
 pub fn fetch_release(
     url: &str,
     token: Option<&str>,
@@ -106,7 +101,7 @@ pub fn fetch_release(
     let response =
         request_with_redirects(url, timeout_ms, USER_AGENT, &headers).map_err(|text| {
             // `throw new UpdateError('无法连接服务器：' + describeError(...))`
-            // default status 502.
+            // 默认状态码 502。
             UpdateError::new(format!("cannot reach the server: {}", text), 502)
         })?;
 
@@ -119,7 +114,7 @@ pub fn fetch_release(
     }
 
     if !(200..300).contains(&status) {
-        // `response.res.resume()` — the body is dropped.
+        // `response.res.resume()` —— body 被丢弃。
         return Ok(ReleaseFetch {
             status,
             headers: response_headers,
@@ -141,20 +136,20 @@ pub fn fetch_release(
     })
 }
 
-/// The narrow convenience wrapper: a 2xx body, or an `UpdateError`.
+/// 窄包装：2xx 的 body，或一个 `UpdateError`。
 ///
-/// Because the three branches are collapsed into
-/// `Result<Value>`, the mapping is:
+/// 因为三条分支被折叠进
+/// `Result<Value>`，映射关系是：
 ///
-/// * 2xx → the parsed body;
-/// * 404 → `Ok(Value::Null)` — "no release", not a
-///   failed check;
-/// * 403 / 429 → the rate-limit message;
-/// * any other non-2xx → `` GitHub 返回 HTTP {status} ``;
-/// * transport failures → `` 无法连接服务器：… ``.
+/// * 2xx → 解析后的 body；
+/// * 404 → `Ok(Value::Null)` —— "没有发布"，不是
+///   检查失败；
+/// * 403 / 429 → 限流消息；
+/// * 其他任何非 2xx → `` GitHub 返回 HTTP {status} ``；
+/// * 传输失败 → `` 无法连接服务器：… ``。
 ///
-/// The `UpdateError` status is 502 in every case, which is the reference
-/// default; the HTTP status itself stays available through [`fetch_release`].
+/// 各种情况下 `UpdateError` 的状态码都是 502，这是参考实现的
+/// 默认值；HTTP 状态码本身仍可通过 [`fetch_release`] 取得。
 pub fn fetch_release_json(
     url: &str,
     token: Option<&str>,
@@ -180,13 +175,12 @@ mod tests {
     use std::net::TcpListener;
     use std::time::Duration;
 
-    /// Serve `responses` in order, one per accepted connection. Detached.
+    /// 按顺序供应 `responses`，每次接受的连接一个。独立线程运行。
     ///
-    /// Reads once, replies, half-closes, then drains — see the long note on
-    /// `core::http::tests::serve`. Closing a Windows socket that still has
-    /// unread inbound bytes sends RST and discards the unread reply, which is
-    /// what made these tests fail ~1 run in 20 under a parallel `cargo test`
-    /// and never in isolation.
+    /// 读一次、回复、半关闭，然后排空 —— 见 `core::http::tests::serve` 中的
+    /// 长注记。关闭一个仍有未读入站字节的 Windows socket 会发 RST 并丢弃
+    /// 未读的回复，这正是并行 `cargo test` 下这些测试约每 20 次失败 1 次、
+    /// 而单独运行时从不超过的原因。
     fn serve(responses: Vec<String>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -197,21 +191,19 @@ mod tests {
             while index < responses.len() && std::time::Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        // Accepted sockets inherit the listener's nonblocking
-                        // mode on Windows, where SO_RCVTIMEO is then ignored and
-                        // `read` returns WouldBlock immediately — the stub used
-                        // to answer (and close) before the descheduled client had
-                        // even written its request, which Windows turns into an
-                        // RST and the client sees as `os error 10053`. Blocking +
-                        // a real timeout is what makes this stub wait for the
-                        // request. See the longer note in `core::http::tests::serve`.
+                        // 在 Windows 上被接受的 socket 会继承监听器的非阻塞
+                        // 模式，此时 SO_RCVTIMEO 被忽略，`read` 立刻返回
+                        // WouldBlock —— 过去使用的桩会在被调度出去的客户端
+                        // 甚至还没写出请求时就回复（并关闭），Windows 会把这
+                        // 变成 RST，客户端看到的就是 `os error 10053`。改为阻塞
+                        // 加真实超时，才让这个桩等到请求。详见
+                        // `core::http::tests::serve` 中更长的注记。
                         stream.set_nonblocking(false).ok();
                         stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
-                        // Read until the request head is complete — see the
-                        // note in `core::http::tests::serve`. A single read can
-                        // return just the request line; replying then leaves
-                        // inbound bytes unread, and closing such a socket on
-                        // Windows sends RST and discards the reply.
+                        // 一直读到请求头完整 —— 见
+                        // `core::http::tests::serve` 中的注记。单次 read 可能
+                        // 只返回请求行；此时回复会让入站字节未被读取，而在
+                        // Windows 上关闭这类 socket 会发 RST 并丢弃回复。
                         let mut request = Vec::new();
                         let mut buf = [0u8; 1024];
                         while !request.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -224,8 +216,8 @@ mod tests {
                         let _ = std::io::Write::write_all(&mut stream, responses[index].as_bytes());
                         let _ = std::io::Write::flush(&mut stream);
                         let _ = stream.shutdown(std::net::Shutdown::Write);
-                        // Absorb whatever is still inbound so the close is a FIN.
-                        // One short pass only: the client already has its reply.
+                        // 吸收掉剩余的入站数据，使关闭变成 FIN。
+                        // 只做一次短暂的读取：客户端已经拿到回复了。
                         stream
                             .set_read_timeout(Some(Duration::from_millis(50)))
                             .ok();
@@ -274,7 +266,7 @@ mod tests {
         assert!(with_token.iter().any(
             |(name, value)| *name == "authorization" && value.as_str() == "Bearer ghp_example"
         ));
-        // An empty token is falsy and must not produce a header.
+        // 空令牌是假值，不应产生该请求头。
         assert!(!github_headers(Some(""))
             .iter()
             .any(|(name, _)| *name == "authorization"));
@@ -301,9 +293,9 @@ mod tests {
 
     #[test]
     fn non_2xx_is_a_response_not_an_error() {
-        // Two requests below, so the mock listener needs two responses: `serve`
-        // stops accepting once its queue is drained, and a later connect is
-        // refused (a real transport failure, not a non-2xx answer).
+        // 下面两次请求，所以 mock 监听器需要两个响应：`serve`
+        // 在队列排空后不再接受连接，之后的连接会被拒绝（那是真实的传输失败，
+        // 而不是非 2xx 的答案）。
         let answer = http_response(404, &[("Retry-After", "0")], "{}");
         let url = serve(vec![answer.clone(), answer]);
         let response = fetch_release(&url, None, 5000).unwrap();
@@ -311,7 +303,7 @@ mod tests {
         assert!(response.json.is_none());
         assert!(response.headers.contains_key("retry-after"));
 
-        // The narrow wrapper maps 404 to "no release".
+        // 窄包装把 404 映射为"没有发布"。
         assert_eq!(fetch_release_json(&url, None, 5000).unwrap(), Value::Null);
     }
 
@@ -337,8 +329,8 @@ mod tests {
         assert_eq!(response.status, 200);
         assert_eq!(response.json.unwrap()["ok"], true);
 
-        // Six redirects: five are followed, the sixth response is returned, so
-        // the caller sees a 3xx（口径同 `depth < 5`）。
+        // 六次重定向：跟随其中五次，第六个响应被返回，因此
+        // 调用方看到的是 3xx（口径同 `depth < 5`）。
         let mut responses = Vec::new();
         for location in ["/a", "/b", "/c", "/d", "/e", "/f"] {
             responses.push(http_response(302, &[("Location", location)], ""));
