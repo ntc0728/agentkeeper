@@ -1,7 +1,7 @@
 'use strict';
 /**
- * Full UI audit: untranslated strings, dead interactive elements, theme
- * violations. Findings are actionable lists — fix the code, don't file plans.
+ * 完整的 UI 审计：未翻译的字符串、失效的交互元素、主题
+ * 违规。发现项都是可以直接动手的清单——去改代码，别写计划。
  *
  *   node scripts/ui-audit.js
  */
@@ -16,7 +16,7 @@ const i18n = fs.readFileSync(path.join(ROOT, 'src/renderer/i18n.js'), 'utf8');
 
 const problems = { i18n: [], interaction: [], theme: [], ux: [] };
 
-/* ---------- 1. untranslated strings ---------- */
+/* ---------- 1. 未翻译的字符串 ---------- */
 
 // index.html static text nodes. Text that the runtime replaces on boot is
 // fine to keep in English in the markup: #nav-group-* is rewritten by

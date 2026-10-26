@@ -1,84 +1,84 @@
-//! The update state machine.
+//! 更新状态机。
 //!
-//! Check → download → install, with the schedule and the last result persisted
-//! under `<store>/update-state.json`. Every response keeps its shape because the
-//! IPC layer hands these values to the renderer verbatim and
-//! `src/renderer/app.js` reads named fields off them:
+//! 检查 → 下载 → 安装，计划与上次的结果持久化在
+//! `<store>/update-state.json` 下。每个响应的形状都保持不变，因为
+//! IPC 层会把这些值原样交给渲染层，
+//! 而 `src/renderer/app.js` 会从中读取具名字段：
 //!
-//! | method | response |
+//! | 方法 | 响应 |
 //! |---|---|
-//! | [`UpdateManager::status`] | the persisted status snapshot |
-//! | [`UpdateManager::check`] | that status, `ok:false` + `reason` on failure |
-//! | [`UpdateManager::save_settings`] | status |
-//! | [`UpdateManager::set_token`] | status + `saved` + `changed` |
-//! | [`UpdateManager::start_download`] | the task snapshot |
-//! | [`UpdateManager::progress`] | task or `null` |
+//! | [`UpdateManager::status`] | 持久化的状态快照 |
+//! | [`UpdateManager::check`] | 该状态；失败时为 `ok:false` + `reason` |
+//! | [`UpdateManager::save_settings`] | 状态 |
+//! | [`UpdateManager::set_token`] | 状态 + `saved` + `changed` |
+//! | [`UpdateManager::start_download`] | 任务快照 |
+//! | [`UpdateManager::progress`] | 任务或 `null` |
 //! | [`UpdateManager::cancel`] | `{ canceled: bool }` |
 //! | [`UpdateManager::install`] | `{ ok, restarted, path, mode }` |
-//! | [`UpdateManager::skip`] / [`UpdateManager::unskip`] | status |
+//! | [`UpdateManager::skip`] / [`UpdateManager::unskip`] | 状态 |
 //!
-//! The IPC layer wraps download/install failures as `{ ok: false, error }`; the
-//! methods here return `Result` and the `lib.rs` command converts
-//! [`UpdateError`] the same way.
+//! IPC 层把下载/安装失败包装为 `{ ok: false, error }`；这里的方法
+//! 返回 `Result`，`lib.rs` 的命令也以同样方式转换
+//! [`UpdateError`]。
 //!
-//! ## Fidelity
+//! ## 保真度
 //!
-//! Behaviour, field names, defaults and *when* state is written follow the
-//! earlier build. Where it has a quirk, the quirk is reproduced and
-//! marked `// 解析口径:`.
+//! 行为、字段名、默认值以及状态*何时*写入都沿用
+//! 之前的构建。哪里有 quirk，就复现该 quirk 并
+//! 标注 `// 解析口径:`。
 //!
-//! * `check` writes `lastAttemptAt` **before** the network call and
-//!   `lastSuccessAt`/`nextCheckAt`/`release` after it. A 404 counts as a
-//!   successful check (the repo simply has no release yet).
-//! * The 60 s manual throttle needs a previous *success* and compares against
-//!   `lastAttemptAt`, so two manual checks after a failure both go to the
-//!   network.
-//! * A cooldown hit, or the throttle, never touches the state file.
-//! * `state` is a flat object in `update-state.json`; skipped versions live in
-//!   the same file (`skippedVersion`), not in settings. Unknown keys already in
-//!   the file are preserved on the next write, exactly like the reference spread.
-//! * A **cancelled** download returns out of the `try` block before the `catch`
-//!   that deletes the partial file, so the partial installer stays on disk
-//!   (task `path` is nulled and the next download of the same name unlinks it).
-//!   Only a failed download deletes. See `run_download`.
-//! * `install` verifies the path *before* checking whether a download is
-//!   active, so an invalid path reports the path error even mid-download.
-//! * `status()` is pure apart from reading settings/state and decrypting the
-//!   token status; every field is present on every call, including before the
-//!   first check.
+//! * `check` 在网络调用*之前*写入 `lastAttemptAt`，
+//!   在其*之后*写入 `lastSuccessAt`/`nextCheckAt`/`release`。404 被算作
+//!   一次成功的检查（仓库只是还没有发布而已）。
+//! * 60 秒的手动节流需要此前有一次*成功*，并且是拿
+//!   `lastAttemptAt` 来比较，所以失败之后的两次手动检查都会
+//!   真的走网络。
+//! * 命中冷却期或节流时，绝不触碰状态文件。
+//! * `state` 在 `update-state.json` 中是一个扁平对象；被跳过的版本也放在
+//!   同一个文件里（`skippedVersion`），而不是设置里。文件中已存在的未知键
+//!   在下次写入时会被保留，与参考实现的展开写法完全一致。
+//! * **已取消**的下载会在删除半成品的 `catch` 之前就从 `try`
+//!   块返回，因此半成品安装器留在磁盘上
+//!   （任务的 `path` 被置空，下次下载同名文件时会 unlink 它）。
+//!   只有失败的下载才删除。见 `run_download`。
+//! * `install` 是先校验路径，*然后*才检查是否有下载
+//!   正在进行，因此即使在下载中途，无效路径也会报路径错误。
+//! * `status()` 除了读取设置/状态并解密
+//!   令牌状态之外是纯函数；每次调用的每个字段都存在，包括第一次
+//!   检查之前。
 //!
-//! Deliberate, documented differences (each is a "Rust cannot do that" or an
-//! internal-only detail):
+//! 刻意保留并有文档说明的差异（每一项要么是"Rust 做不到"，要么是
+//! 仅内部可见的细节）：
 //!
-//! * `appVersion` comes from `env!("CARGO_PKG_VERSION")`. `Cargo.toml` and
-//!   `package.json` both say `0.2.0`; they must be bumped together, otherwise
-//!   the app compares against a different "current" than the release does.
-//! * The built-in repository is the literal `ntc0728/agentkeeper` — the value
-//!   `package.json`'s `repository.url` produces. There is no runtime
-//!   `require('package.json')` to fall back from.
-//! * `Retry-After` is parsed as IMF-fixdate only (see [`parse_http_date`]);
-//!   GitHub sends `X-RateLimit-Reset`, so this is a fallback nobody hits.
-//! * A download runs on its own thread because `core::http` is blocking while
-//!   the IPC handler must return the task snapshot immediately (the renderer
-//!   polls `ak:update-progress`).
+//! * `appVersion` 来自 `env!("CARGO_PKG_VERSION")`。`Cargo.toml` 和
+//!   `package.json` 都写的是 `0.2.0`；两者必须一起升版，否则
+//!   应用会比对到一个与发布不同的"当前版本"。
+//! * 内置仓库就是字面量 `ntc0728/agentkeeper` —— 也就是
+//!   `package.json` 的 `repository.url` 产出的值。没有运行时
+//!   `require('package.json')` 可以回退。
+//! * `Retry-After` 只按 IMF-fixdate 解析（见 [`parse_http_date`]）；
+//!   GitHub 发的是 `X-RateLimit-Reset`，所以这是一个没人会走到的回退路径。
+//! * 下载跑在自己的线程上，因为 `core::http` 是阻塞的，而
+//!   IPC handler 必须立刻返回任务快照（渲染层
+//!   轮询 `ak:update-progress`）。
 //!
-//! ## Assumed interfaces (owned by other modules, not implemented here)
+//! ## 假定的接口（归其他模块所有，此处未实现）
 //!
-//! `core/update/http.rs` — implemented here:
-//! `fetch_release(url, token, timeout_ms) -> Result<ReleaseFetch, UpdateError>`,
-//! with `ReleaseFetch { status, headers, json }`. `Ok` for *any* HTTP status
-//! (404/403 included); `Err` only for transport or body-parse failures. It
-//! takes **no proxy setting** (see the limitation in `core::http`): `updateProxy`
-//! therefore affects downloads but not release checks.
+//! `core/update/http.rs` —— 在此实现：
+//! `fetch_release(url, token, timeout_ms) -> Result<ReleaseFetch, UpdateError>`，
+//! 其中 `ReleaseFetch { status, headers, json }`。对*任何* HTTP 状态都返回
+//! `Ok`（含 404/403）；只有传输或 body 解析失败才返回 `Err`。它
+//! **不接受任何代理设置**（见 `core::http` 中的限制）：因此
+//! `updateProxy` 会影响下载，但不影响发布检查。
 //!
-//! `core/http.rs` — implemented here:
+//! `core/http.rs` —— 在此实现：
 //! `download_to_file(url, dest, proxy, max_bytes, timeout_ms, on_progress)`
-//! with `on_progress: &mut dyn FnMut(u64, Option<u64>) -> bool`; `false` aborts
-//! and leaves the partial file in place (the reference cancel path).
+//! 其中 `on_progress: &mut dyn FnMut(u64, Option<u64>) -> bool`；返回 `false` 会中止
+//! 并把半成品文件留在原地（参考实现的取消路径）。
 //!
-//! `core/update/token.rs` — implemented here: `TokenStore::new(root)`,
-//! `status() -> Value`, `encryption_available() -> bool`, `effective() ->
-//! Option<String>`, `set(Option<&str>) -> Result<TokenSetResult, UpdateError>`.
+//! `core/update/token.rs` —— 在此实现：`TokenStore::new(root)`、
+//! `status() -> Value`、`encryption_available() -> bool`、`effective() ->
+//! Option<String>`、`set(Option<&str>) -> Result<TokenSetResult, UpdateError>`。
 
 use serde_json::{json, Map, Value};
 use std::cmp::Ordering;
@@ -96,43 +96,43 @@ use super::token::TokenStore;
 use super::version::{self, ReleaseOptions, UpdateError};
 
 /* ------------------------------------------------------------------ */
-/* constants                                                           */
+/* 常量                                                                */
 /* ------------------------------------------------------------------ */
 
-/// Two checks closer than this reuse the previous answer (manual included).
+/// 两次检查间隔小于此值就复用上次的答案（手动检查也算）。
 pub const MIN_CHECK_GAP_MS: i64 = 60 * 1000;
 
-/// Retry floor when GitHub answers 403/429 without usable headers.
+/// GitHub 返回 403/429 且没有可用响应头时的重试下限。
 pub const RATE_LIMIT_FLOOR_MS: i64 = 60 * 1000;
 
 pub const DEFAULT_MINUTES: i64 = 20;
 pub const MIN_MINUTES: i64 = 1;
 pub const MAX_MINUTES: i64 = 1440;
 
-/// `USER_AGENT` — the header belongs to `update/http.rs`; kept here for the
-/// tests that pin the value.
+/// `USER_AGENT` —— 该请求头属于 `update/http.rs`；放在这里是为了
+/// 那些把该值钉死的测试。
 pub const USER_AGENT: &str = "AgentKeeper-updater";
 
 const STATE_FILE: &str = "update-state.json";
 const UPDATES_DIR: &str = "updates";
 
-/// The value `package.json`'s `repository.url` resolves to. See the module
-/// docs: the reference falls back to exactly this string when the file is missing.
+/// `package.json` 的 `repository.url` 解析出的值。见模块
+/// 文档：文件缺失时参考实现恰好回退到这个字符串。
 pub const BUILT_IN_REPO: &str = "ntc0728/agentkeeper";
 
-/// Explicit deadline for one GitHub API call (connect, TLS, request, body).
+/// 一次 GitHub API 调用的明确截止时间（连接、TLS、请求、body）。
 ///
-/// `ureq` has a *default* read timeout, so a missing value here would still
-/// "work" — and then drift with a dependency bump. Naming it also documents the
-/// intent: a total deadline is right for a small JSON body (a stuck peer must
-/// fail the check, not park the scheduler thread) and wrong for the installer
-/// stream, which gets [`DOWNLOAD_TIMEOUT_MS`] per phase instead.
+/// `ureq` 有一个*默认*读超时，所以这里不写具体值也仍能
+/// "工作" —— 然后随依赖升级而漂移。把它写出来同时也是为了记录
+/// 意图：对于小 JSON body 来说总截止时间是对的（卡住的对端必须让检查
+/// 失败，而不是把调度线程挂住），而对安装器
+/// 下载流则是错的，它改为按阶段使用 [`DOWNLOAD_TIMEOUT_MS`]。
 pub const NETWORK_TIMEOUT_MS: u64 = 30_000;
 
-/// Per-phase deadline for the installer download. Larger than the API call on
-/// purpose: a 600 MB transfer is allowed to be slow, it is not allowed to be
-/// silent. `http::download_to_file` applies this per read/write/connect, never
-/// to the whole transfer (which would abort a legitimately slow download).
+/// 安装器下载的按阶段截止时间。有意大于 API 调用的
+/// 截止时间：600 MB 的传输允许慢，但不允许毫无动静。
+/// `http::download_to_file` 把它作用于每次读/写/连接，绝不
+/// 作用于整段传输（那会中止一次合理的慢速下载）。
 pub const DOWNLOAD_TIMEOUT_MS: u64 = 60_000;
 
 /* ------------------------------------------------------------------ */
@@ -157,7 +157,7 @@ fn js_to_string(value: &Value) -> String {
     }
 }
 
-/// `String(v || '')`.
+/// `String(v || '')`。
 fn js_string_or_empty(value: Option<&Value>) -> String {
     match value {
         Some(v) if js_truthy(v) => js_to_string(v),
@@ -165,8 +165,8 @@ fn js_string_or_empty(value: Option<&Value>) -> String {
     }
 }
 
-/// `Number(v)` for the scalar shapes a settings file can contain. Enough for
-/// `Math.round(Number(...))`; JSON settings are numbers in practice.
+/// 设置文件可能包含的标量形态对应的 `Number(v)`。足够支撑
+/// `Math.round(Number(...))`；实践中 JSON 设置里的值都是数字。
 fn js_number(value: Option<&Value>) -> f64 {
     match value {
         None | Some(Value::Null) => 0.0,
@@ -191,13 +191,13 @@ fn js_number(value: Option<&Value>) -> f64 {
 }
 
 /* ------------------------------------------------------------------ */
-/* repo + interval normalisation                                       */
+/* 仓库与间隔归一化                                                       */
 /* ------------------------------------------------------------------ */
 
-/// `owner/repo`, the only shape GitHub accepts as a path segment.
+/// `owner/repo`，GitHub 唯一接受作路径段的形状。
 ///
-/// The reference uses `/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/`; a manual check keeps
-/// this dependency-free and rejects `a/b/c`, empty halves and whitespace.
+/// 参考实现用 `/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/`；手动检查保持
+/// 无依赖，并拒绝 `a/b/c`、空的两半和空白。
 pub fn normalize_repo(value: &str) -> String {
     let text = ecma_trim(value);
     let mut parts = text.split('/');
@@ -216,56 +216,56 @@ pub fn normalize_repo(value: &str) -> String {
     }
 }
 
-/// `clampMinutes` — `Math.round(Number(v))`, defaulting on non-finite input and
-/// clamping to 1..=1440.
+/// `clampMinutes` —— `Math.round(Number(v))`，输入非有限时取默认值，
+/// 并夹到 1..=1440。
 pub fn clamp_minutes(value: &Value) -> i64 {
     let n = js_number(Some(value));
     if !n.is_finite() {
         return DEFAULT_MINUTES;
     }
-    // `Math.round` rounds half toward +Infinity; `f64::round` rounds away from
-    // zero. The only difference is -0.5 -> -0 vs -1, and both clamp to 1.
+    // `Math.round` 向 +Infinity 方向取半数；`f64::round` 则远离
+    // 零。唯一差别是 -0.5 -> -0 还是 -1，而两者都会被夹到 1。
     let rounded = n.round();
     (rounded as i64).clamp(MIN_MINUTES, MAX_MINUTES)
 }
 
 /* ------------------------------------------------------------------ */
-/* the `ak:update-*` payload guard                     */
+/* `ak:update-*` 载荷守卫                     */
 /* ------------------------------------------------------------------ */
 //
-// The reference validates the raw IPC payload in the *handler*, before
-// `manager.saveSettings` ever runs — `saveSettings` itself only clamps and
-// trims . These two functions are that guard, kept here so
-// the rules are one testable unit and `lib.rs` stays a thin adapter. Without
-// them a malformed repo / apiBase / proxy / interval is persisted silently and
-// surfaces later as "更新检查失败" instead of an error at the click.
+// 参考实现是在 *handler* 里校验原始 IPC 载荷，在
+// `manager.saveSettings` 真正运行之前 —— `saveSettings` 本身只做夹取和
+// 去空白。这两个函数就是那道守卫，放在这里是为了让
+// 规则成为一个可测试的整体，而 `lib.rs` 保持为一个薄适配层。没有它们，
+// 一个畸形的 repo / apiBase / proxy / interval 会被静默持久化，
+// 之后才以"更新检查失败"的形式冒出来，而不是在点击时就报错。
 
-// The Rust engine speaks English; `toast()` runs `zhError()` → `zhText()` over
-// every `{ok:false,error}` it receives, so Chinese comes from
-// `src/renderer/engine-zh.js` (EXACT), never from here. That is also why these
-// the `ipc.repoFormat` / `ipc.apiBaseFormat` / `ipc.proxyFormat` /
+// Rust 引擎讲英文；`toast()` 会对它收到的每个 `{ok:false,error}` 运行
+// `zhError()` → `zhText()`，所以中文来自
+// `src/renderer/engine-zh.js`（EXACT），绝不是来自这里。这也是这些
+// `ipc.repoFormat` / `ipc.apiBaseFormat` / `ipc.proxyFormat` /
 // `ipc.intervalRange` / `update.tokenFieldRequired` / `update.tokenType`
-// entries hold English: an English UI must never print Chinese.
+// 条目保留英文的原因：英文界面绝不能打印中文。
 //
-// `ERR_REPO_FORMAT` is deliberately the *same sentence* `discover.repoFormat`
-// uses: one rule, one string, one dictionary entry.
+// `ERR_REPO_FORMAT` 刻意与 `discover.repoFormat` 使用的
+// 是*同一句话*：一条规则，一个字符串，一个字典条目。
 
-/// `ipc.intervalRange` — `检查间隔必须是 1 ~ 1440 分钟`.
+/// `ipc.intervalRange` —— `检查间隔必须是 1 ~ 1440 分钟`。
 pub const ERR_INTERVAL_RANGE: &str = "check interval must be between 1 and 1440 minutes";
-/// `ipc.repoFormat` — `仓库必须是 owner/repo 形式`.
+/// `ipc.repoFormat` —— `仓库必须是 owner/repo 形式`。
 pub const ERR_REPO_FORMAT: &str = "repo must be owner/repo or a github.com URL";
-/// `ipc.apiBaseFormat` — `更新源必须是 http(s) 地址`.
+/// `ipc.apiBaseFormat` —— `更新源必须是 http(s) 地址`。
 pub const ERR_API_BASE_FORMAT: &str = "update source must be an http(s) URL";
-/// `ipc.proxyFormat` — `代理必须是 auto、direct 或 http(s) 地址`.
+/// `ipc.proxyFormat` —— `代理必须是 auto、direct 或 http(s) 地址`。
 pub const ERR_PROXY_FORMAT: &str = "proxy must be auto, direct or an http(s) URL";
-/// `update.tokenType` — `token 必须是字符串或 null`.
+/// `update.tokenType` —— `token 必须是字符串或 null`。
 pub const ERR_TOKEN_TYPE: &str = "token must be a string or null";
-/// `update.tokenFieldRequired` — `请求缺少 token 字段（清除请传 null）`.
+/// `update.tokenFieldRequired` —— `请求缺少 token 字段（清除请传 null）`。
 pub const ERR_TOKEN_FIELD_REQUIRED: &str =
     "request is missing the token field (pass null to clear)";
 
-/// `asString(v, max)` (reference): anything that is not a string is `""`,
-/// a string is sliced to `max` characters.
+/// `asString(v, max)`（参考实现）：非字符串一律是 `""`，
+/// 字符串按 `max` 个字符切片。
 fn js_as_string(value: &Value, max: usize) -> String {
     match value {
         Value::String(text) => text.chars().take(max).collect(),
@@ -273,16 +273,15 @@ fn js_as_string(value: &Value, max: usize) -> String {
     }
 }
 
-/// The `ak:update-settings` guard.
+/// `ak:update-settings` 的守卫。
 ///
-/// Returns the error message the IPC layer answers with, or `None` when the
-/// patch is acceptable. Keys the patch does not carry are not inspected, so a
-/// partial save (only `auto`, say) is never rejected for a field it did not
-/// send.
+/// 返回 IPC 层答复用的错误消息，补丁可接受时返回 `None`。补丁没带的键
+/// 不做检查，因此部分保存（比如只带 `auto`）绝不会因为
+/// 一个它根本没发来的字段而被拒绝。
 pub fn validate_settings_patch(patch: &Value) -> Option<&'static str> {
     if let Some(value) = patch.get("minutes") {
-        // `Math.round(Number(v))` first: 20.6 → 21 and 0.6 → 1 both pass,
-        // NaN/Infinity and anything outside 1..=1440 do not.
+        // 先 `Math.round(Number(v))`：20.6 → 21 和 0.6 → 1 都通过，
+        // NaN/Infinity 以及 1..=1440 之外的值不通过。
         let minutes = js_number(Some(value)).round();
         if !minutes.is_finite() || minutes < 1.0 || minutes > 1440.0 {
             return Some(ERR_INTERVAL_RANGE);
@@ -307,8 +306,8 @@ pub fn validate_settings_patch(patch: &Value) -> Option<&'static str> {
         } else {
             text.as_str()
         };
-        // `/^https?:\/\/\S+$/` — a pinned route must be a URL with no
-        // whitespace in it.
+        // `/^https?:\/\/\S+$/` —— 固定的路由必须是一个不含
+        // 空白字符的 URL。
         let pinned = proxy
             .strip_prefix("https://")
             .or_else(|| proxy.strip_prefix("http://"))
@@ -321,26 +320,25 @@ pub fn validate_settings_patch(patch: &Value) -> Option<&'static str> {
     None
 }
 
-/// The `ak:update-token` guard.
+/// `ak:update-token` 的守卫。
 ///
-/// `payload` is the **whole IPC body**, not the `token` field, and that is the
-/// only reason the missing-field branch works. The reference checks `'token' in p`;
-/// the obvious Rust translation — `token: Option<Value>` — cannot, because
-/// Tauri's `CommandItem::deserialize_option` (`tauri-2.12.4/src/ipc/command.rs:146`)
-/// turns a *missing* key into `visit_none()` and `Value::Null` into
-/// `visit_none()` too, so `{}` and `{token:null}` arrive identically and there
-/// is nothing left to distinguish. Taking the request body keeps the two
-/// cases apart all the way down, so:
+/// `payload` 是**整个 IPC body**，而不是 `token` 字段，这正是
+/// 缺失字段分支能工作的原因。参考实现检查 `'token' in p`；
+/// 显而易见的 Rust 翻译 —— `token: Option<Value>` —— 做不到，因为
+/// Tauri 的 `CommandItem::deserialize_option`（`tauri-2.12.4/src/ipc/command.rs:146`）
+/// 把*缺失*的键变成 `visit_none()`，把 `Value::Null` 也变成
+/// `visit_none()`，于是 `{}` 和 `{token:null}` 到达时完全一样，
+/// 已经没有东西可以用来区分了。保留请求体就能让这两种
+/// 情况一路区分下去，于是：
 ///
-/// * no `token` key (or a non-object body, which `asObject` collapses to `{}`)
-///   → `ERR_TOKEN_FIELD_REQUIRED`;
-/// * `null` → `Ok(None)`: clear;
-/// * a string → `Ok(Some(..))`: replace;
-/// * a number / bool / array / object → `ERR_TOKEN_TYPE`.
+/// * 没有 `token` 键（或 body 不是对象，`asObject` 会把它折叠成 `{}`）
+///   → `ERR_TOKEN_FIELD_REQUIRED`；
+/// * `null` → `Ok(None)`：清除；
+/// * 字符串 → `Ok(Some(..))`：替换；
+/// * 数字 / 布尔 / 数组 / 对象 → `ERR_TOKEN_TYPE`。
 ///
-/// Clearing must be explicit. A caller that forgets the field is a caller bug,
-/// and silently deleting the credential would be the worst possible way to
-/// handle it.
+/// 清除必须是显式的。忘记带字段的调用方是调用方的 bug，
+/// 而悄悄删掉凭据会是处理它最糟糕的方式。
 pub fn token_arg(payload: &Value) -> Result<Option<String>, &'static str> {
     match payload.get("token") {
         None => Err(ERR_TOKEN_FIELD_REQUIRED),
@@ -351,15 +349,15 @@ pub fn token_arg(payload: &Value) -> Result<Option<String>, &'static str> {
 }
 
 /* ------------------------------------------------------------------ */
-/* rate-limit deadline                                                 */
+/* 限流截止时间                                                          */
 /* ------------------------------------------------------------------ */
 
-/// "Earliest moment we may ask again" from GitHub's rate-limit headers.
+/// 依据 GitHub 的限流响应头算出的"最早可以再次请求的时刻"。
 ///
-/// `Retry-After` (seconds or HTTP date), `X-RateLimit-Reset` (epoch seconds,
-/// only meaningful when remaining is 0), plus the one-minute floor on 403/429.
-/// Header names are matched case-insensitively; the first value wins (the
-/// takes the first element of an array).
+/// `Retry-After`（秒数或 HTTP 日期）、`X-RateLimit-Reset`（epoch 秒，
+/// 只在剩余额度为 0 时有意义），以及 403/429 时的一分钟下限。
+/// 响应头名按大小写不敏感匹配；取第一个值（也就是
+/// 取数组的第一个元素）。
 pub fn retry_deadline(headers: &[(String, String)], status: u16, now: i64) -> i64 {
     let get = |name: &str| {
         headers
@@ -369,9 +367,9 @@ pub fn retry_deadline(headers: &[(String, String)], status: u16, now: i64) -> i6
     };
 
     let mut deadline: i64 = 0;
-    // `if (retryAfter)` — an empty string or "0"… wait: "0" is truthy, 0 is
-    // not. Strings from a header map are always truthy unless empty, and
-    // `Number('0')` is a perfectly good zero.
+    // `if (retryAfter)` —— 空字符串或 "0"……等等："0" 是真值，0 不是。
+    // 来自响应头映射的字符串除非为空否则总是真值，而
+    // `Number('0')` 是一个完全正当的零。
     if let Some(retry_after) = get("retry-after").filter(|v| !v.is_empty()) {
         let seconds = js_number(Some(&Value::String(retry_after.to_string())));
         if seconds.is_finite() {
@@ -394,11 +392,11 @@ pub fn retry_deadline(headers: &[(String, String)], status: u16, now: i64) -> i6
     deadline
 }
 
-/// IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`) → epoch milliseconds.
+/// IMF-fixdate（`Sun, 06 Nov 1994 08:49:37 GMT`）→ epoch 毫秒。
 ///
-/// `Date.parse` accepts more spellings; this is the format RFC 7231
-/// names as canonical and the one GitHub would send if it used the header.
-/// `None` where `Date.parse` would return `NaN`.
+/// `Date.parse` 接受更多写法；这是 RFC 7231
+/// 指定为规范格式的那种，也是 GitHub 若使用该响应头会发送的格式。
+/// 在 `Date.parse` 会返回 `NaN` 的地方返回 `None`。
 fn parse_http_date(text: &str) -> Option<i64> {
     let parts: Vec<&str> = text.split_whitespace().collect();
     if parts.len() != 6 {
@@ -438,7 +436,7 @@ fn parse_http_date(text: &str) -> Option<i64> {
     Some((days * 86_400 + hour * 3600 + minute * 60 + second) * 1000)
 }
 
-/// Howard Hinnant's `days_from_civil` — days since 1970-01-01.
+/// Howard Hinnant 的 `days_from_civil` —— 距 1970-01-01 的天数。
 fn days_from_civil(mut year: i64, month: i64, day: i64) -> i64 {
     if month <= 2 {
         year -= 1;
@@ -452,12 +450,12 @@ fn days_from_civil(mut year: i64, month: i64, day: i64) -> i64 {
 }
 
 /* ------------------------------------------------------------------ */
-/* platform mapping                                                    */
+/* 平台映射                                                             */
 /* ------------------------------------------------------------------ */
 
-/// `process.platform` spelled the Node way — `installerKind`,
-/// `allowedInstallerSuffixes` and the silent-install check all compare against
-/// these strings.
+/// 按 Node 方式拼写的 `process.platform` —— `installerKind`、
+/// `allowedInstallerSuffixes` 和静默安装检查都会拿这些字符串
+/// 作比较。
 pub fn node_platform() -> &'static str {
     match std::env::consts::OS {
         "windows" => "win32",
@@ -466,7 +464,7 @@ pub fn node_platform() -> &'static str {
     }
 }
 
-/// `process.arch` spelled the Node way (`x86_64` would pick the wrong asset).
+/// 按 Node 方式拼写的 `process.arch`（`x86_64` 会选错资产）。
 pub fn node_arch() -> &'static str {
     match std::env::consts::ARCH {
         "x86_64" => "x64",
@@ -477,15 +475,15 @@ pub fn node_arch() -> &'static str {
 }
 
 /* ------------------------------------------------------------------ */
-/* persisted state                                                     */
+/* 持久化状态                                                           */
 /* ------------------------------------------------------------------ */
 
-/// `update-state.json` in memory.
+/// 内存中的 `update-state.json`。
 ///
-/// Field order matters only for the file's bytes: [`State::to_value`] writes
-/// the seven base keys in the reference literal's order, then `extra` (unknown keys,
-/// `downloadedPath`/`downloadedVersion`) in the order they were read/added —
-/// the same result as `{ ...base, ...raw }`.
+/// 字段顺序只影响文件的字节：[`State::to_value`] 按参考实现字面量的顺序
+/// 写入七个基础键，然后写入 `extra`（未知键、
+/// `downloadedPath`/`downloadedVersion`），顺序与读入/加入时相同 ——
+/// 结果等同于 `{ ...base, ...raw }`。
 #[derive(Debug, Clone)]
 struct State {
     last_attempt_at: i64,
@@ -543,11 +541,11 @@ fn state_path(root: &str) -> PathBuf {
     Path::new(root).join(STATE_FILE)
 }
 
-/// `readState()` — base defaults, overridden by whatever the file has.
+/// `readState()` —— 基础默认值，被文件里的内容覆盖。
 ///
-/// The reference spreads the parsed object over the defaults; unknown keys therefore
-/// survive and are written back. A corrupt/missing file yields the defaults
-/// (a torn state file must never brick boot).
+/// 参考实现把解析出的对象展开到默认值之上；因此未知键会
+/// 存活并被写回。损坏/缺失的文件会退回默认值
+/// （损坏的状态文件绝不能把启动搞瘫）。
 fn read_state(root: &str) -> State {
     let mut state = State::default();
     let Ok(bytes) = std::fs::read(state_path(root)) else {
@@ -558,9 +556,9 @@ fn read_state(root: &str) -> State {
     };
     for (key, value) in raw {
         match key.as_str() {
-            // `Number` fields are coerced; a hand-edited string would make the
-            // strings are concatenated in the schedule
-            // math. Hardening this is intentional (see the module docs).
+            // `Number` 字段会被强制转换；被手工改成字符串的值会让
+            // 调度
+            // 计算出错。这里加固是刻意的（见模块文档）。
             "lastAttemptAt" => state.last_attempt_at = value.as_i64().unwrap_or(0),
             "lastSuccessAt" => state.last_success_at = value.as_i64().unwrap_or(0),
             "nextCheckAt" => state.next_check_at = value.as_i64().unwrap_or(0),
@@ -599,15 +597,15 @@ fn persist_state(root: &str, state: &State, log: &LogFn) {
 }
 
 /* ------------------------------------------------------------------ */
-/* manager                                                             */
+/* 管理器                                                               */
 /* ------------------------------------------------------------------ */
 
-/// Response of one release query.
+/// 一次发布查询的响应。
 ///
-/// The manager needs the status (404 = "no release yet", 403/429 = cooldown)
-/// and the headers (`Retry-After`, `X-RateLimit-*`), so it uses
-/// `http::fetch_release` and its [`ReleaseFetch`] rather than the body-only
-/// `fetch_release_json`.
+/// manager 需要状态码（404 = "还没有发布"，403/429 = 冷却期）
+/// 和响应头（`Retry-After`、`X-RateLimit-*`），所以它使用
+/// `http::fetch_release` 及其 [`ReleaseFetch`]，而不是只返回 body 的
+/// `fetch_release_json`。
 type ClockFn = Arc<dyn Fn() -> i64 + Send + Sync>;
 type FetchFn = Arc<dyn Fn(&str, Option<&str>) -> Result<ReleaseFetch, UpdateError> + Send + Sync>;
 type DownloadFn = Arc<
@@ -622,14 +620,14 @@ type DownloadFn = Arc<
         + Send
         + Sync,
 >;
-/// The launcher injection point, made public so an integration test can assert
-/// `install()` without actually executing a file. Production always passes
-/// `None` and gets [`default_launcher`].
+/// 启动器注入点，做成 public 是为了让集成测试能断言
+/// `install()` 而不真正执行文件。生产环境始终传
+/// `None`，从而得到 [`default_launcher`]。
 pub type LauncherFn = Arc<dyn Fn(&Path, bool) -> Result<String, UpdateError> + Send + Sync>;
 type LaunchFn = LauncherFn;
 type LogFn = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// The manager's settings view (`settings()`).
+/// manager 的设置视图（`settings()`）。
 #[derive(Debug, Clone)]
 struct Cfg {
     auto: bool,
@@ -641,22 +639,22 @@ struct Cfg {
     silent: bool,
 }
 
-/// Constructor knobs that are not injection points (those are fields, so the
-/// tests can replace one at a time).
+/// 非注入点的构造参数（注入点是字段，因此
+/// 测试可以一次替换一个）。
 ///
-/// `Debug` is hand-written: `LauncherFn` is a `dyn Fn`, which is not `Debug`.
+/// `Debug` 是手写的：`LauncherFn` 是 `dyn Fn`，并不实现 `Debug`。
 #[derive(Clone)]
 pub struct Options {
     pub platform: String,
     pub arch: String,
     pub app_version: String,
-    /// `options.dir` — defaults to `<root>/updates`.
+    /// `options.dir` —— 默认为 `<root>/updates`。
     pub dir: Option<PathBuf>,
-    /// `options.maxBytes`; 0 means the reference default (`|| MAX_INSTALLER_BYTES`).
+    /// `options.maxBytes`；0 表示参考实现的默认值（`|| MAX_INSTALLER_BYTES`）。
     pub max_bytes: u64,
-    /// `options.launcher`. `None` =
-    /// [`default_launcher`], which really executes the installer — tests set it
-    /// so `install()` can be asserted without spawning a process.
+    /// `options.launcher`。`None` =
+    /// [`default_launcher`]，它会真正执行安装器 —— 测试会设置它，
+    /// 这样 `install()` 就能被断言而无需派生进程。
     pub launcher: Option<LauncherFn>,
 }
 
@@ -693,12 +691,12 @@ struct Inner {
 
 struct Inflight {
     running: bool,
-    /// The value the in-flight check resolves to. A second caller waits for it
-    /// instead of starting a second request (the reference shares the promise).
+    /// 进行中的检查最终解析成的值。第二个调用者会等待它
+    /// 而不是发起第二次请求（参考实现共享同一个 promise）。
     result: Option<Value>,
 }
 
-/// The update manager: one per process, like the reference `buildContext()`.
+/// 更新管理器：每进程一个，类似参考实现的 `buildContext()`。
 pub struct UpdateManager {
     root: String,
     update_dir: PathBuf,
@@ -712,8 +710,8 @@ pub struct UpdateManager {
     inflight_cv: Condvar,
     token: TokenStore,
 
-    // Injection points, mirroring the reference constructor (`http`, `now`,
-    // `launcher`, `logger`). Tests replace them after construction.
+    // 注入点，对应参考实现的构造函数（`http`、`now`、
+    // `launcher`、`logger`）。测试在构造之后替换它们。
     now: ClockFn,
     fetch: FetchFn,
     downloader: DownloadFn,
@@ -726,7 +724,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl UpdateManager {
-    /// `createUpdateManager({ store })` — production defaults.
+    /// `createUpdateManager({ store })` —— 生产环境默认值。
     pub fn new(root: &str) -> Self {
         Self::with_options(root, Options::default())
     }
@@ -770,8 +768,8 @@ impl UpdateManager {
             downloader: Arc::new(|url, dest, proxy, max_bytes, timeout_ms, on_progress| {
                 crate::http::download_to_file(url, dest, proxy, max_bytes, timeout_ms, on_progress)
             }),
-            // The launcher never captures `silent` from construction time: the
-            // setting is read on every install, like `defaultLauncher`.
+            // 启动器绝不会捕获构造时的 `silent`：这个
+            // 设置每次安装时都重新读取，与 `defaultLauncher` 一致。
             launcher: launcher_override.unwrap_or_else(|| {
                 Arc::new(move |file, silent| default_launcher(file, &launcher_platform, silent))
             }),
@@ -789,9 +787,9 @@ impl UpdateManager {
         persist_state(&self.root, &inner.state, &self.logger);
     }
 
-    /* ---------------- settings ---------------- */
+    /* ---------------- 设置 ---------------- */
 
-    /// `settings()` — re-read from disk on every call.
+    /// `settings()` —— 每次调用都重新从磁盘读取。
     fn settings_cfg(&self) -> Cfg {
         let s = settings_store::read(&self.root);
         let text = |key: &str| s.get(key).and_then(|v| v.as_str()).unwrap_or("");
@@ -819,7 +817,7 @@ impl UpdateManager {
         }
     }
 
-    /// The `settings()` shape (also useful for tests).
+    /// `settings()` 的形状（测试也用得上）。
     pub fn settings(&self) -> Value {
         let cfg = self.settings_cfg();
         json!({
@@ -845,9 +843,9 @@ impl UpdateManager {
         self.update_dir.to_string_lossy().into_owned()
     }
 
-    /* ---------------- status ---------------- */
+    /* ---------------- 状态 ---------------- */
 
-    /// The snapshot the UI polls. Every field is present on every call.
+    /// UI 轮询的快照。每次调用的每个字段都存在。
     pub fn status(&self) -> Value {
         let cfg = self.settings_cfg();
         let (state, task) = {
@@ -856,7 +854,7 @@ impl UpdateManager {
         };
         let checking = lock(&self.inflight).running;
 
-        // `state.release || null` — anything falsy reads as "not checked yet".
+        // `state.release || null` —— 任何假值都读作"还没检查过"。
         let release = if js_truthy(&state.release) {
             Some(&state.release)
         } else {
@@ -931,24 +929,24 @@ impl UpdateManager {
         })
     }
 
-    /// `_state()` — the persisted object, for parity tests.
+    /// `_state()` —— 持久化的对象，用于保真测试。
     pub fn state_snapshot(&self) -> Value {
         lock(&self.inner).state.to_value()
     }
 
-    /// `tokenStatus()` — the token envelope's own view
-    /// (filled/origin/encryption), independent of a check.
+    /// `tokenStatus()` —— 令牌信封自己的视图
+    /// （filled/origin/encryption），与一次检查无关。
     ///
-    /// Kept public although only `tests/update_pipeline.rs` calls it today:
-    /// it is the only way to observe a stored token without a network round,
-    /// which is what makes "clear" assertable.
+    /// 虽然目前只有 `tests/update_pipeline.rs` 调用它，仍保持 public：
+    /// 它是在没有网络往返的情况下观察已存令牌的唯一途径，
+    /// 这正是"清除"可以被断言的原因。
     pub fn token_status(&self) -> Value {
         self.token.status()
     }
 
-    /* ---------------- schedule ---------------- */
+    /* ---------------- 计划 ---------------- */
 
-    /// When the scheduler should next run a check (0 = due now / not scheduled).
+    /// 调度器下次该跑检查的时刻（0 = 现在就该跑 / 未安排）。
     pub fn due_at(&self) -> i64 {
         let cfg = self.settings_cfg();
         if !cfg.auto {
@@ -968,7 +966,7 @@ impl UpdateManager {
         0
     }
 
-    /// Scheduler tick (called every 30 s). `None` = nothing to do.
+    /// 调度器的心跳（每 30 s 调用一次）。`None` = 无事可做。
     pub fn tick(&self) -> Option<Value> {
         let cfg = self.settings_cfg();
         if !cfg.auto {
@@ -984,16 +982,16 @@ impl UpdateManager {
         Some(self.check(false))
     }
 
-    /* ---------------- check ---------------- */
+    /* ---------------- 检查 ---------------- */
 
-    /// `check({ manual })`.
+    /// `check({ manual })`。
     ///
-    /// Manual and scheduled checks share this path; manual ignores
-    /// `nextCheckAt` but still respects the 60 s gap against `lastAttemptAt`.
+    /// 手动检查与计划检查走同一条路径；手动检查会忽略
+    /// `nextCheckAt`，但仍然尊重针对 `lastAttemptAt` 的 60 秒间隔。
     pub fn check(&self, manual: bool) -> Value {
-        // Concurrent callers share the in-flight result (`if (checking) return
-        // checking`). Waiting here is the blocking equivalent of awaiting the
-        // same promise.
+        // 并发调用者共享进行中的结果（`if (checking) return
+        // checking`）。在这里等待就是 await 同一个
+        // promise 的阻塞等价物。
         let mut inflight = lock(&self.inflight);
         if inflight.running {
             while inflight.result.is_none() {
@@ -1011,8 +1009,8 @@ impl UpdateManager {
 
         {
             let inner = lock(&self.inner);
-            // A cooldown answer came from GitHub; retrying early only earns
-            // another 403.
+            // 冷却期的答复来自 GitHub；提前重试只会再换来
+            // 一个 403。
             if inner.state.retry_at > started_at {
                 let retry_at = inner.state.retry_at;
                 drop(inner);
@@ -1022,7 +1020,7 @@ impl UpdateManager {
                 set_key(&mut value, "retryAt", json!(retry_at));
                 return value;
             }
-            // The 60 s gap only applies when a previous check *succeeded*.
+            // 60 秒间隔只在之前一次检查*成功*过时才生效。
             if manual
                 && inner.state.last_success_at != 0
                 && started_at - inner.state.last_attempt_at < MIN_CHECK_GAP_MS
@@ -1036,7 +1034,8 @@ impl UpdateManager {
             }
         }
 
-        // Claim the slot. A racing caller gets the result this one produces.
+        // 占下这个槽位。发生竞争的调用者会拿到这次产生的
+        // 结果。
         let mut inflight = lock(&self.inflight);
         if inflight.running {
             while inflight.result.is_none() {
@@ -1051,8 +1050,8 @@ impl UpdateManager {
         inflight.result = None;
         drop(inflight);
 
-        // `writeState({ lastAttemptAt: startedAt })` happens before the fetch:
-        // a crash mid-request still counts as an attempt for the scheduler.
+        // `writeState({ lastAttemptAt: startedAt })` 发生在 fetch 之前：
+        // 请求中途崩溃对调度器来说仍算一次尝试。
         self.mutate_state(|state| state.last_attempt_at = started_at);
 
         let result = match self.fetch_release(&cfg) {
@@ -1101,7 +1100,7 @@ impl UpdateManager {
 
     fn fetch_release(&self, cfg: &Cfg) -> Result<(Value, i64), FetchFailure> {
         let base = self.api_root(cfg);
-        let encoded_repo = cfg.repo.clone(); // normalizeRepo already restricts the charset
+        let encoded_repo = cfg.repo.clone(); // normalizeRepo 已经限制了字符集
         let only_prerelease = cfg.beta && version::is_prerelease_version(&self.app_version);
         let url = if cfg.beta {
             format!("{}/repos/{}/releases?per_page=30", base, encoded_repo)
@@ -1110,13 +1109,13 @@ impl UpdateManager {
         };
 
         let token = self.token.effective();
-        // `update/http.rs` deliberately takes no proxy setting (direct route
-        // only); `updateProxy` therefore affects downloads but not checks.
-        // Documented gap, not an oversight here.
+        // `update/http.rs` 刻意不接受任何代理设置（只走直连
+        // 路由）；因此 `updateProxy` 会影响下载，但不影响检查。
+        // 这是有文档记录的缺口，不是这里的疏忽。
         let response = (self.fetch)(&url, token.as_deref()).map_err(|error| FetchFailure {
             message: error.message().to_string(),
-            // A transport/parse failure happens before `retryDeadline`, so the
-            // 所以错误里没有 `retryAt`。
+            // 传输/解析失败发生在 `retryDeadline` 之前，所以
+            // 错误里没有 `retryAt`。
             retry_at: 0,
         })?;
 
@@ -1128,8 +1127,8 @@ impl UpdateManager {
         let deadline = retry_deadline(&headers, response.status, (self.now)());
 
         if response.status == 404 {
-            // A repo with no release yet, or a mirror that only implements
-            // `/releases/latest`. "Nothing to upgrade to", not a failure.
+            // 还没有任何发布的仓库，或者只实现了
+            // `/releases/latest` 的镜像。是"没东西可升级"，不是失败。
             return Ok((Value::Null, deadline));
         }
         if response.status == 403 || response.status == 429 {
@@ -1168,8 +1167,8 @@ impl UpdateManager {
         Ok((release, deadline))
     }
 
-    /// `clearCooldown()` — a route/credential change invalidates a cooldown
-    /// earned by another quota bucket.
+    /// `clearCooldown()` —— 换路由/换凭据会让另一个配额桶挣来的
+    /// 冷却期失效。
     pub fn clear_cooldown(&self) -> Value {
         let dirty = {
             let inner = lock(&self.inner);
@@ -1184,14 +1183,14 @@ impl UpdateManager {
         self.status()
     }
 
-    /* ---------------- download ---------------- */
+    /* ---------------- 下载 ---------------- */
 
-    /// `startDownload` — returns the initial task snapshot and transfers on a
-    /// background thread (the renderer polls `progress`).
+    /// `startDownload` —— 返回初始任务快照，传输在
+    /// 后台线程上进行（渲染层轮询 `progress`）。
     ///
-    /// A second call while a task is active returns the running snapshot
-    /// instead of starting another transfer; URL validation happens after that
-    /// check, same order as upstream.
+    /// 任务进行中时的第二次调用会返回正在运行的快照
+    /// 而不是再发起一次传输；URL 校验在这项检查
+    /// 之后，顺序与上游一致。
     pub fn start_download(&self, url: &str, name: Option<&str>) -> Result<Value, UpdateError> {
         {
             let inner = lock(&self.inner);
@@ -1208,7 +1207,7 @@ impl UpdateManager {
         let last_segment = target.pathname.rsplit('/').next().unwrap_or("");
         let fallback_name = decode_uri_component(last_segment)
             .map_err(|_| UpdateError::new("URI malformed", 500))?;
-        // `name || fallbackName` — an empty string falls through.
+        // `name || fallbackName` —— 空字符串会落到 fallback。
         let chosen = match name {
             Some(text) if !text.is_empty() => text,
             _ => &fallback_name,
@@ -1217,7 +1216,7 @@ impl UpdateManager {
 
         let _ = std::fs::create_dir_all(&self.update_dir);
         let file_path = self.update_dir.join(&filename);
-        // Same-version re-download overwrites; a stale copy otherwise lingers.
+        // 同版本重新下载会覆盖；否则会留下一份陈旧副本。
         let _ = std::fs::remove_file(&file_path);
 
         let task = json!({
@@ -1234,9 +1233,9 @@ impl UpdateManager {
 
         {
             let mut inner = lock(&self.inner);
-            // Re-check after building: two racing clicks must not spawn two
-            // transfers. (The reference would also let both through in theory; this
-            // is the one place a second transfer would be strictly worse.)
+            // 构建之后重新检查：两次竞争的点击绝不能引发两次
+            // 传输。（参考实现理论上也会让两者都通过；这里是唯一
+            // 一个第二次传输严格更糟的地方。）
             if let Some(running) = &inner.task {
                 if running.get("active") == Some(&Value::Bool(true)) {
                     return Ok(running.clone());
@@ -1270,12 +1269,12 @@ impl UpdateManager {
         Ok(task)
     }
 
-    /// `progress()` / `taskSnapshot()` — the task or `null`.
+    /// `progress()` / `taskSnapshot()` —— 任务或 `null`。
     pub fn progress(&self) -> Value {
         lock(&self.inner).task.clone().unwrap_or(Value::Null)
     }
 
-    /// `cancel()` — only an active task can be cancelled.
+    /// `cancel()` —— 只有进行中的任务能被取消。
     pub fn cancel(&self) -> Value {
         let mut inner = lock(&self.inner);
         if let Some(task) = inner.task.as_mut().and_then(Value::as_object_mut) {
@@ -1287,13 +1286,13 @@ impl UpdateManager {
         json!({ "canceled": false })
     }
 
-    /* ---------------- install ---------------- */
+    /* ---------------- 安装 ---------------- */
 
-    /// Validate a path the renderer wants to execute.
+    /// 校验渲染层想执行的路径。
     ///
-    /// Four conditions, all required: absolute, this platform's extension,
-    /// inside the managed download directory, and the product keyword from
-    /// `updateAssetKeyword` in the filename. Returns the real path.
+    /// 四个条件，缺一不可：绝对路径、本平台的扩展名、
+    /// 位于受管的下载目录之内，以及文件名里含有来自
+    /// `updateAssetKeyword` 的产品关键字。返回真实路径。
     pub fn verify_installer(&self, raw_path: &str) -> Result<PathBuf, UpdateError> {
         let text = ecma_trim(raw_path);
         if text.is_empty() {
@@ -1320,8 +1319,8 @@ impl UpdateManager {
             ));
         }
 
-        // `fs.realpathSync` + `statSync(...).isFile()`; both failures share one
-        // message. `canonicalize` follows symlinks like realpath does.
+        // `fs.realpathSync` + `statSync(...).isFile()`；两种失败共用一条
+        // 消息。`canonicalize` 像 realpath 那样跟随符号链接。
         let Ok(real) = std::fs::canonicalize(text) else {
             return Err(UpdateError::new(
                 "installer is missing or is not a file",
@@ -1336,7 +1335,7 @@ impl UpdateManager {
         }
         let real = strip_verbatim_prefix(real);
 
-        // `path.relative(rootReal, real)` starts with ".." → outside.
+        // `path.relative(rootReal, real)` 以 ".." 开头 → 在外面。
         let root_real = if self.update_dir.exists() {
             std::fs::canonicalize(&self.update_dir)
                 .map(strip_verbatim_prefix)
@@ -1351,8 +1350,8 @@ impl UpdateManager {
             ));
         }
 
-        // Not upstream's rule: a misconfigured `updateRepo` must not install
-        // *another* project's installer.
+        // 不是上游的规则：配置错误的 `updateRepo` 绝不能安装
+        // *另一个*项目的安装器。
         let settings = settings_store::read(&self.root);
         let raw_keyword = settings
             .get("updateAssetKeyword")
@@ -1380,10 +1379,10 @@ impl UpdateManager {
         Ok(real)
     }
 
-    /// Launch a downloaded installer. The caller quits the app right after.
+    /// 启动已下载的安装器。调用方紧接着就会退出应用。
     ///
-    /// Order is the reference order: verify the path, *then* refuse while a download
-    /// is active.
+    /// 顺序沿用参考实现：先校验路径，*然后*才在有下载
+    /// 进行时拒绝执行。
     pub fn install(&self, raw_path: &str) -> Result<Value, UpdateError> {
         let file = self.verify_installer(raw_path)?;
         let active = {
@@ -1414,15 +1413,15 @@ impl UpdateManager {
         }))
     }
 
-    /* ---------------- settings / token / skip ---------------- */
+    /* ---------------- 设置 / 令牌 / 跳过 ---------------- */
 
-    /// `ak:update-settings`, guard and write as one step — what `lib.rs` calls.
+    /// `ak:update-settings`，守卫与写入合成一步 —— 这就是 `lib.rs` 调用的。
     ///
-    /// The command functions are private to the crate, so a test cannot reach
-    /// `update_save_settings`; without this the ordering — guard first, write
-    /// second — is four lines nothing can turn red. It is also defence in
-    /// depth: a future Rust-side caller gets the same rules, not just the
-    /// renderer's path.
+    /// 这些命令函数对该 crate 是私有的，所以测试无法触及
+    /// `update_save_settings`；没有这一步，"先守卫、后写入"这个
+    /// 顺序就是四行谁也测不红的代码。它同时也是纵深防御：
+    /// 将来 Rust 侧的调用方也会得到同样的规则，而不只是
+    /// 渲染层那条路径。
     pub fn save_settings_checked(&self, patch: &Value) -> Result<Value, UpdateError> {
         if let Some(message) = validate_settings_patch(patch) {
             return Err(UpdateError::new(message, 400));
@@ -1430,13 +1429,13 @@ impl UpdateManager {
         self.save_settings(patch)
     }
 
-    /// `saveSettings(patch)` — clamp/trim, persist, adjust the schedule.
+    /// `saveSettings(patch)` —— 夹取/去空白、持久化、调整计划。
     ///
-    /// The IPC layer validates the raw payload first and returns
-    /// `{ ok:false, error }`; this method is the manager half. Note that it
-    /// *clamps* rather than rejects: `minutes: 0` becomes `1`, and a malformed
-    /// `repo` is stored verbatim and only reads back as the built-in one.
-    /// Rejecting is the guard's job, not this method's.
+    /// IPC 层会先校验原始载荷并返回
+    /// `{ ok:false, error }`；这个方法是 manager 那一半。注意它是
+    /// *夹取*而不是拒绝：`minutes: 0` 会变成 `1`，而畸形的
+    /// `repo` 会被原样存下，读回来时才表现为内置的那个。
+    /// 拒绝是守卫的职责，不是这个方法的。
     pub fn save_settings(&self, patch: &Value) -> Result<Value, UpdateError> {
         let mut out = Map::new();
         if let Some(value) = patch.get("auto") {
@@ -1490,8 +1489,8 @@ impl UpdateManager {
             return Err(UpdateError::new("failed to save settings", 500));
         }
 
-        // Flipping the switch clears the schedule: off → nothing runs; on with
-        // no pending deadline → the next tick queries at once.
+        // 拨动开关会清空计划：关 → 什么都不跑；开且
+        // 没有待处理的截止时间 → 下一次心跳立刻查询。
         if out.contains_key("updateCheck") {
             self.mutate_state(|state| state.next_check_at = 0);
         }
@@ -1504,7 +1503,7 @@ impl UpdateManager {
                 });
             }
         }
-        // A route change invalidates a cooldown earned by another bucket.
+        // 换路由会让另一个配额桶挣来的冷却期失效。
         if patch.get("proxy").is_some() {
             self.clear_cooldown();
         }
@@ -1512,18 +1511,18 @@ impl UpdateManager {
         Ok(self.status())
     }
 
-    /// `ak:update-token`, guard and write as one step — what `lib.rs` calls.
+    /// `ak:update-token`，守卫与写入合成一步 —— 这就是 `lib.rs` 调用的。
     ///
-    /// Same reason as [`UpdateManager::save_settings_checked`]. BUG-1 had two
-    /// halves and this is the only seam where both are assertable: the body
-    /// must survive `null`, *and* `None` must reach `set_token` untouched —
-    /// the original `set_token(Some(&token))` is what made `None` unreachable.
+    /// 理由与 [`UpdateManager::save_settings_checked`] 相同。BUG-1 有两半，
+    /// 而这是唯一一处两半都可断言的接缝：body 必须能
+    /// 挺过 `null`，*并且* `None` 必须原封不动地传到 `set_token` ——
+    /// 原来的 `set_token(Some(&token))` 正是让 `None` 够不到的原因。
     pub fn set_token_checked(&self, payload: &Value) -> Result<Value, UpdateError> {
         let token = token_arg(payload).map_err(|message| UpdateError::new(message, 400))?;
         self.set_token(token.as_deref())
     }
 
-    /// `setToken(token)` — `None` clears (`token === null`).
+    /// `setToken(token)` —— `None` 表示清除（`token === null`）。
     pub fn set_token(&self, token: Option<&str>) -> Result<Value, UpdateError> {
         let result = self.token.set(token)?;
         if result.changed {
@@ -1535,7 +1534,7 @@ impl UpdateManager {
         Ok(value)
     }
 
-    /// "Skip this version" — remembered by version in `update-state.json`.
+    /// "跳过这个版本" —— 按版本记在 `update-state.json` 里。
     pub fn skip(&self, version: Option<&str>) -> Value {
         let requested = match version {
             Some(text) if !text.is_empty() => text.to_string(),
@@ -1552,8 +1551,8 @@ impl UpdateManager {
     }
 }
 
-/// The failure a release query produces, with the cooldown the reference attaches to
-/// its `UpdateError` (which `UpdateError` itself cannot carry).
+/// 一次发布查询产生的失败，附带参考实现挂在
+/// 其 `UpdateError` 上的冷却期（`UpdateError` 本身带不了）。
 struct FetchFailure {
     message: String,
     retry_at: i64,
@@ -1570,14 +1569,13 @@ fn path_string(path: &Path) -> String {
 }
 
 /* ------------------------------------------------------------------ */
-/* download worker                                                     */
+/* 下载工作线程                                                          */
 /* ------------------------------------------------------------------ */
 
-/// The background half of `startDownload`.
+/// `startDownload` 的后台那一半。
 ///
-/// The progress callback both reports and enforces the size ceiling: the
-/// throws from inside `getStream`'s callbacks, so the ceiling is checked *here*
-/// with the exact same wording, not by the HTTP layer.
+/// 进度回调既报告进度也强制执行体积上限：上限是在*这里*
+/// 用完全相同的措辞检查的，而不是由 HTTP 层检查。
 fn run_download(
     inner: Arc<Mutex<Inner>>,
     downloader: DownloadFn,
@@ -1600,7 +1598,7 @@ fn run_download(
             if task.get("canceled") == Some(&Value::Bool(true)) {
                 return false;
             }
-            // Checked before the progress update, exactly as specified.
+            // 按规范，在更新进度之前检查。
             if received > max_bytes {
                 abort_reason = Some("installer exceeds the size cap; download aborted".to_string());
                 return false;
@@ -1619,7 +1617,7 @@ fn run_download(
                 }
             }
 
-            // `updateProgress(received, declared)`.
+            // `updateProgress(received, declared)`。
             let total = total.unwrap_or(0);
             task.insert("received".into(), json!(received));
             let current_total = task.get("total").and_then(Value::as_u64).unwrap_or(0);
@@ -1674,10 +1672,10 @@ fn run_download(
                 return;
             }
 
-            // `if (task) { active = false; done = true; ... }` then
-            // `writeState({ downloadedPath, downloadedVersion })`, then the
-            // `finally` sets active=false. The write happens before the task
-            // stops reporting `active`.
+            // 先 `if (task) { active = false; done = true; ... }`，然后
+            // `writeState({ downloadedPath, downloadedVersion })`，再由
+            // `finally` 把 active 置为 false。这次写入发生在任务
+            // 停止报告 `active` 之前。
             {
                 let mut guard = lock(&inner);
                 if let Some(task) = guard.task.as_mut().and_then(Value::as_object_mut) {
@@ -1709,10 +1707,10 @@ fn run_download(
         }
         Err(error) => {
             if task_canceled() {
-                // 解析口径: the cancel path resolves the streaming promise and
-                // returns out of the `try` before the `catch` that unlinks the
-                // partial file, so the partial installer survives. Only a
-                // failure deletes. The task still reports path=null.
+                // 解析口径: 取消路径会 resolve 流式 promise，
+                // 并在删除半成品的 `catch` 之前从 `try` 返回，
+                // 因此半成品安装器会留存。只有
+                // 失败才会删除。任务仍然报告 path=null。
                 finalize_task(&inner, true, false);
                 return;
             }
@@ -1733,7 +1731,7 @@ fn run_download(
     }
 }
 
-/// `finally` for the task: active=false, and the terminal flags.
+/// 任务的 `finally`：active=false，以及各个终态标记。
 fn finalize_task(inner: &Arc<Mutex<Inner>>, canceled: bool, success: bool) {
     let mut guard = lock(inner);
     if let Some(task) = guard.task.as_mut().and_then(Value::as_object_mut) {
@@ -1755,15 +1753,15 @@ fn set_task_error(inner: &Arc<Mutex<Inner>>, message: &str) {
 }
 
 /* ------------------------------------------------------------------ */
-/* launcher                                                            */
+/* 启动器                                                               */
 /* ------------------------------------------------------------------ */
 
-/// Hand the installer to the OS.
+/// 把安装器交给 OS。
 ///
-/// Windows + silent uses NSIS `/S /R` (silent, relaunch after install). There
-/// is no OS open-path API in `core/`, so every other case is a plain spawn and
-/// reports `mode: "spawn"` (the renderer only displays the mode, never
-/// branches on it).
+/// Windows + 静默使用 NSIS 的 `/S /R`（静默，安装后重新启动）。`core/` 里
+/// 没有 OS 的"打开路径"API，所以其他情况都是普通的 spawn，
+/// 并报告 `mode: "spawn"`（渲染层只显示这个模式，从不
+/// 据此分支）。
 fn default_launcher(file: &Path, platform: &str, silent: bool) -> Result<String, UpdateError> {
     use std::process::{Command, Stdio};
 
@@ -1808,15 +1806,15 @@ fn default_launcher(file: &Path, platform: &str, silent: bool) -> Result<String,
 }
 
 /* ------------------------------------------------------------------ */
-/* paths + URI helpers                                                 */
+/* 路径与 URI 辅助函数                                                   */
 /* ------------------------------------------------------------------ */
 
-/// `path.win32.isAbsolute` / `path.posix.isAbsolute`.
+/// `path.win32.isAbsolute` / `path.posix.isAbsolute`。
 fn is_absolute_js(text: &str) -> bool {
     let bytes = text.as_bytes();
     if cfg!(windows) {
-        // `\foo`, `/foo`, `\\server\share`, `C:\foo` — Node accepts a rooted
-        // path without a drive, which `Path::is_absolute` rejects.
+        // `\foo`、`/foo`、`\\server\share`、`C:\foo` —— Node 接受没有盘符的
+        // 根路径，而 `Path::is_absolute` 会拒绝它。
         (!bytes.is_empty() && (bytes[0] == b'/' || bytes[0] == b'\\'))
             || (bytes.len() >= 3
                 && bytes[0].is_ascii_alphabetic()
@@ -1827,9 +1825,9 @@ fn is_absolute_js(text: &str) -> bool {
     }
 }
 
-/// `fs.realpathSync` on Windows returns `C:\…`; `std::fs::canonicalize` adds
-/// the verbatim prefix. Strip it so the value handed to the renderer and to
-/// the launcher matches.
+/// Windows 上的 `fs.realpathSync` 返回 `C:\…`；`std::fs::canonicalize` 会加上
+/// verbatim 前缀。去掉它，好让交给渲染层和
+/// 启动器的值保持一致。
 fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
     let text = path.to_string_lossy().into_owned();
     if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
@@ -1841,7 +1839,7 @@ fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
     path
 }
 
-/// `path.resolve` for a path that may not exist: lexical `.`/`..` folding.
+/// `path.resolve` 用于可能不存在的路径：按词法折叠 `.`/`..`。
 fn resolve_lexical(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -1875,12 +1873,12 @@ fn comparable_components(path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// `!relative.startsWith('..') && !path.isAbsolute(relative)`.
+/// `!relative.startsWith('..') && !path.isAbsolute(relative)`。
 ///
-/// Two spellings of the same directory compare equal (component-wise, case
-/// folded on Windows). The `..`-prefixed *filename* rejection is the 解析口径:
-/// `path.relative` returns `..foo.exe` for a file literally named that, which
-/// starts with `..` and is therefore refused.
+/// 同一目录的两种写法比较结果相等（逐段比较，Windows 上
+/// 折叠大小写）。对以 `..` 开头的*文件名*的拒绝是解析口径：
+/// `path.relative` 对一个真叫这个名字的文件返回 `..foo.exe`，
+/// 它以 `..` 开头，因此被拒绝。
 fn relative_stays_inside(root: &Path, child: &Path) -> bool {
     let root_parts = comparable_components(root);
     let child_parts = comparable_components(child);
@@ -1896,8 +1894,8 @@ fn relative_stays_inside(root: &Path, child: &Path) -> bool {
     !child_parts[root_parts.len()].starts_with("..")
 }
 
-/// `decodeURIComponent` — percent-decode, then UTF-8; malformed input errors
-/// like `URIError`.
+/// `decodeURIComponent` —— 百分号解码，再按 UTF-8 解释；格式错误的输入像
+/// `URIError` 那样报错。
 fn decode_uri_component(text: &str) -> Result<String, ()> {
     let bytes = text.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -1920,20 +1918,20 @@ fn decode_uri_component(text: &str) -> Result<String, ()> {
 }
 
 /* ------------------------------------------------------------------ */
-/* process-wide singleton                                              */
+/* 进程级单例                                                            */
 /* ------------------------------------------------------------------ */
 
-/// One manager per process, mirroring `buildContext()`.
+/// 每进程一个管理器，对应参考实现的 `buildContext()`。
 ///
-/// The first root wins (production has exactly one); tests construct
-/// [`UpdateManager`] directly instead.
+/// 第一个 root 胜出（生产环境只有一个）；测试则直接构造
+/// [`UpdateManager`]。
 pub fn ensure_manager(root: &str) -> &'static UpdateManager {
     static CELL: OnceLock<UpdateManager> = OnceLock::new();
     CELL.get_or_init(|| UpdateManager::new(root))
 }
 
 /* ------------------------------------------------------------------ */
-/* tests                                                               */
+/* 测试                                                                 */
 /* ------------------------------------------------------------------ */
 
 #[cfg(test)]
@@ -2110,7 +2108,7 @@ mod tests {
         assert_eq!(s["downloadSupported"], json!(false));
         assert_eq!(s["installerKind"], json!("nsis"));
         assert_eq!(s["prerelease"], json!(false));
-        // Settings defaults from `Store.defaultSettings()`.
+        // 设置默认值来自 `Store.defaultSettings()`。
         assert_eq!(s["settings"]["auto"], json!(true));
         assert_eq!(s["settings"]["minutes"], json!(20));
         assert_eq!(s["settings"]["beta"], json!(false));
@@ -2131,7 +2129,7 @@ mod tests {
         settings_store::save(&root, &json!({ "updateRepo": "acme/keeper" }));
         assert_eq!(m.status()["repo"], json!("acme/keeper"));
 
-        // Trailing slashes are stripped from apiBase on read.
+        // 读取时会去掉 apiBase 末尾的斜杠。
         settings_store::save(
             &root,
             &json!({ "updateApiBase": " https://mirror.test/// " }),
@@ -2165,10 +2163,10 @@ mod tests {
         );
         assert_eq!(result["downloadSupported"], json!(true));
 
-        // The state file: exact keys, exact order, trailing newline. The first
-        // key is `lastAttemptAt` and it carries the *injected* clock
-        // (`writeState({ lastAttemptAt: startedAt })`, reference), not
-        // wall time.
+        // 状态文件：键精确、顺序精确、末尾有换行。第一个
+        // 键是 `lastAttemptAt`，它带的是*注入的*时钟
+        // （参考实现的 `writeState({ lastAttemptAt: startedAt })`），不是
+        // 墙上时间。
         let raw = std::fs::read_to_string(state_path(&root)).unwrap();
         assert!(raw.ends_with("}\n"));
         let first_key = raw.lines().nth(1).unwrap().trim().trim_end_matches(',');
@@ -2177,7 +2175,7 @@ mod tests {
         assert_eq!(saved["release"]["tag"], json!("9.9.9"));
         assert_eq!(saved["skippedVersion"], json!(""));
 
-        // Second manual check inside 60 s reuses the answer without a request.
+        // 60 秒内的第二次手动检查会复用答案，不发请求。
         let before = http.request_count();
         let throttled = m.check(true);
         assert_eq!(throttled["reason"], json!("throttled"));
@@ -2189,7 +2187,7 @@ mod tests {
             "throttled check must not fetch"
         );
 
-        // A scheduled check inside the gap still runs (manual-only throttle).
+        // 间隔内的计划检查仍会执行（节流只作用于手动检查）。
         http.push(ok_release("v9.9.9"));
         let scheduled = m.check(false);
         assert_eq!(scheduled["ok"], json!(true));
@@ -2201,7 +2199,7 @@ mod tests {
     #[test]
     fn check_404_is_a_successful_no_release_answer() {
         let root = temp_root("check-404");
-        let http = MockHttp::new(); // empty queue → 404
+        let http = MockHttp::new(); // 空队列 → 404
         let m = manager(&root, "1.0.0", http);
 
         let result = m.check(true);
@@ -2209,7 +2207,7 @@ mod tests {
         assert_eq!(result["latest"], Value::Null);
         assert_eq!(result["hasUpdate"], Value::Null);
         assert_eq!(result["comparison"], Value::Null);
-        // 404 writes lastSuccessAt: it is a real answer, not a failure.
+        // 404 会写入 lastSuccessAt：这是一个真实的答案，不是失败。
         assert_eq!(result["checked"], json!(true));
         assert_eq!(result["lastError"], Value::Null);
 
@@ -2220,7 +2218,7 @@ mod tests {
     fn check_403_sets_a_cooldown_from_the_reset_header() {
         let root = temp_root("check-403");
         let http = MockHttp::new();
-        let reset = (NOW / 1000) + 120; // epoch seconds
+        let reset = (NOW / 1000) + 120; // epoch 秒
         let reset_text = reset.to_string();
         http.push(Ok(fake_response(
             403,
@@ -2240,7 +2238,7 @@ mod tests {
         assert_eq!(result["retryAt"], json!(expected));
         assert_eq!(result["lastError"], result["error"]);
 
-        // The next check answers from the cooldown without a request.
+        // 下一次检查直接由冷却期作答，不发请求。
         let count = http.request_count();
         let again = m.check(true);
         assert_eq!(again["reason"], json!("cooldown"));
@@ -2253,15 +2251,15 @@ mod tests {
 
     #[test]
     fn retry_deadline_prefers_the_latest_of_headers_and_floor() {
-        // Retry-After seconds.
+        // Retry-After 秒数。
         assert_eq!(
             retry_deadline(&[("retry-after".into(), "5".into())], 500, NOW),
             NOW + 5000
         );
-        // 403 with no headers: the one-minute floor.
+        // 403 且无响应头：一分钟下限。
         assert_eq!(retry_deadline(&[], 403, NOW), NOW + 60_000);
         assert_eq!(retry_deadline(&[], 429, NOW), NOW + 60_000);
-        // X-RateLimit-Reset only counts when remaining is 0.
+        // 只有剩余额度为 0 时 X-RateLimit-Reset 才算数。
         let reset = vec![
             ("X-RateLimit-Remaining".to_string(), "0".to_string()),
             ("X-RateLimit-Reset".to_string(), "1700000100".to_string()),
@@ -2275,7 +2273,7 @@ mod tests {
             ("X-RateLimit-Reset".to_string(), "1700000100".to_string()),
         ];
         assert_eq!(retry_deadline(&not_zero, 200, NOW), 0);
-        // An HTTP date (IMF-fixdate).
+        // 一个 HTTP 日期（IMF-fixdate）。
         assert_eq!(
             retry_deadline(
                 &[("Retry-After".into(), "Sun, 06 Nov 1994 08:49:37 GMT".into())],
@@ -2284,7 +2282,7 @@ mod tests {
             ),
             784_111_777_000
         );
-        // Unparseable value contributes nothing.
+        // 无法解析的值不贡献任何东西。
         assert_eq!(
             retry_deadline(&[("retry-after".into(), "soon".into())], 200, NOW),
             0
@@ -2316,7 +2314,7 @@ mod tests {
             result["lastError"],
             json!("cannot reach the server: connection timed out")
         );
-        // `retryAt` was 0 on the error object → no cooldown.
+        // 错误对象上的 `retryAt` 是 0 → 没有冷却期。
         assert_eq!(result["retryAt"], json!(0));
         // The previous release is kept ("保留上次结果").
         assert_eq!(result["latest"], json!("9.9.9"));
@@ -2390,18 +2388,18 @@ mod tests {
         assert_eq!(skipped["skipped"], json!(true));
         assert_eq!(skipped["skippedVersion"], json!("9.9.9"));
 
-        // Survives a restart: a second manager reads the same state file.
+        // 重启后依然存在：第二个管理器读的是同一个状态文件。
         let restarted = manager(&root, "1.0.0", Arc::clone(&http));
         assert_eq!(restarted.status()["skipped"], json!(true));
         assert_eq!(restarted.status()["latest"], json!("9.9.9"));
 
         assert_eq!(restarted.unskip()["skipped"], json!(false));
-        // `m` is a separate manager with its own in-memory copy of the state
+        // `m` 是另一个管理器，它有自己那份内存状态副本
         // （每个 manager 在构造时只读一次 state），所以清空后的值
-        // value is only observable on the instance that performed `unskip`.
+        // 只在执行了 `unskip` 的那个实例上可见。
         assert_eq!(restarted.status()["skippedVersion"], json!(""));
 
-        // Skipping an explicit version (the IPC path passes `payload.version`).
+        // 跳过一个显式指定的版本（IPC 路径传 `payload.version`）。
         let skipped = m.skip(Some("9.8.0"));
         assert_eq!(skipped["skippedVersion"], json!("9.8.0"));
         assert_eq!(
@@ -2420,12 +2418,12 @@ mod tests {
         assert_eq!(clamp_minutes(&json!(20.6)), 21);
         assert_eq!(clamp_minutes(&json!(1441)), 1440);
         assert_eq!(clamp_minutes(&json!("abc")), 20);
-        // `Number(null) === 0`, so
-        // `clampMinutes(null)` is 1, not the default. Only non-finite input
-        // (NaN/Infinity, i.e. `undefined` for a missing settings key) yields
-        // DEFAULT_MINUTES — and
-        // `Store.defaultSettings()` always writes `updateCheckMinutes: 20`, so
-        // the manager never sees that case.
+        // `Number(null) === 0`，所以
+        // `clampMinutes(null)` 是 1，不是默认值。只有非有限输入
+        // （NaN/Infinity，即设置键缺失时的 `undefined`）才会得到
+        // DEFAULT_MINUTES —— 而且
+        // `Store.defaultSettings()` 总会写入 `updateCheckMinutes: 20`，所以
+        // 管理器永远碰不到那种情况。
         assert_eq!(clamp_minutes(&Value::Null), 1);
 
         assert_eq!(normalize_repo(" acme/keeper "), "acme/keeper");
@@ -2436,14 +2434,14 @@ mod tests {
         assert_eq!(normalize_repo("/keeper"), "");
     }
 
-    /// The `ak:update-settings` guard.
+    /// `ak:update-settings` 的守卫。
     ///
-    /// Without it `update_save_settings` clamps an unusable value into a
-    /// usable-looking one and persists it, so the user learns about a bad
-    /// repo/proxy only when the next check fails.
+    /// 没有它，`update_save_settings` 会把不可用的值夹成一个
+    /// 看起来可用的值再持久化，于是用户只有在下次检查失败时
+    /// 才知道自己的 repo/proxy 有问题。
     #[test]
     fn the_settings_guard_rejects_every_value_outside_the_range() {
-        // minutes: `Math.round(Number(v))` first, then 1..=1440.
+        // minutes：先 `Math.round(Number(v))`，再要求 1..=1440。
         assert_eq!(validate_settings_patch(&json!({ "minutes": 20 })), None);
         assert_eq!(
             validate_settings_patch(&json!({ "minutes": 20.6 })),
@@ -2476,8 +2474,8 @@ mod tests {
             "Number('abc') is NaN"
         );
 
-        // repo: trimmed; empty falls back to the built-in repository, so it is
-        // legal. `asString()` of a non-string is `''` — also legal.
+        // repo：去空白；空值回退到内置仓库，所以是
+        // 合法的。非字符串的 `asString()` 是 `''` —— 同样合法。
         assert_eq!(
             validate_settings_patch(&json!({ "repo": " acme/keeper " })),
             None
@@ -2493,7 +2491,7 @@ mod tests {
             Some(ERR_REPO_FORMAT)
         );
 
-        // apiBase: `^https?://` when non-empty.
+        // apiBase：非空时须满足 `^https?://`。
         assert_eq!(
             validate_settings_patch(&json!({ "apiBase": "https://mirror.test" })),
             None
@@ -2512,7 +2510,7 @@ mod tests {
             Some(ERR_API_BASE_FORMAT)
         );
 
-        // proxy: auto | direct | `^https?://\S+$`; empty degrades to auto.
+        // proxy：auto | direct | `^https?://\S+$`；空值退化为 auto。
         assert_eq!(validate_settings_patch(&json!({ "proxy": "auto" })), None);
         assert_eq!(validate_settings_patch(&json!({ "proxy": "direct" })), None);
         assert_eq!(validate_settings_patch(&json!({ "proxy": "" })), None);
@@ -2538,8 +2536,8 @@ mod tests {
             "the regex needs a host after the scheme"
         );
 
-        // A key the patch does not carry is never inspected, so a partial save
-        // (just `auto`, say) is not rejected for a field it did not send.
+        // 补丁没带的键绝不会被检查，因此部分保存
+        // （比如只带 `auto`）不会因为没发某个字段而被拒绝。
         assert_eq!(validate_settings_patch(&json!({ "auto": false })), None);
         assert_eq!(validate_settings_patch(&json!({})), None);
     }
@@ -2547,12 +2545,12 @@ mod tests {
     /// `ak:update-token` 的载荷校验 — 渲染层的"清除令牌"按钮发送 `null`，而
     /// `String` 参数连反序列化都无法接受它。
     ///
-    /// The full contract (including the missing-field branch) is asserted in
-    /// `tests/update_pipeline.rs::token_arg_turns_null_into_clear_and_rejects_other_types`;
-    /// this one is the fast unit-level tripwire next to the code.
+    /// 完整契约（包括缺失字段的分支）在
+    /// `tests/update_pipeline.rs::token_arg_turns_null_into_clear_and_rejects_other_types`
+    /// 中断言；这一个只是紧挨着代码的快速单元级绊线。
     #[test]
     fn the_token_argument_guard_turns_null_into_clear() {
-        // `null` clears — that is the whole point of BUG-1.
+        // `null` 表示清除 —— 这正是 BUG-1 的全部要点。
         assert_eq!(token_arg(&json!({ "token": null })), Ok(None));
         assert_eq!(
             token_arg(&json!({ "token": "ghp_example" })),
@@ -2560,7 +2558,7 @@ mod tests {
         );
         assert_eq!(token_arg(&json!({ "token": 5 })), Err(ERR_TOKEN_TYPE));
         assert_eq!(token_arg(&json!({ "token": true })), Err(ERR_TOKEN_TYPE));
-        // A body without the field is an error, never a silent clear.
+        // 没有该字段的 body 是错误，绝不是静默清除。
         assert_eq!(token_arg(&json!({})), Err(ERR_TOKEN_FIELD_REQUIRED));
     }
 
@@ -2697,7 +2695,7 @@ mod tests {
             for _ in 0..5000 {
                 received += 1;
                 if !on_progress(received, Some(10)) {
-                    // The manager classifies this purely by its own flag.
+                    // manager 仅凭自己的标志位来分类这种情况。
                     return Err(FetchError::Transport("aborted".to_string()));
                 }
                 std::thread::sleep(Duration::from_millis(1));
@@ -2731,10 +2729,10 @@ mod tests {
             task["received"].as_u64().unwrap() > 0,
             "progress survives cancel"
         );
-        // 解析口径: the cancel path returns before the `catch` that unlinks.
+        // 解析口径: 取消路径在 unlink 那个 `catch` 之前就返回。
         assert!(Path::new(&path).exists(), "partial file survives a cancel");
 
-        // Nothing to cancel any more.
+        // 没什么可再取消的了。
         assert_eq!(m.cancel(), json!({ "canceled": false }));
 
         std::fs::remove_dir_all(&root).ok();
@@ -2750,7 +2748,7 @@ mod tests {
         options.max_bytes = 1024;
         let mut m = UpdateManager::with_options(&root, options);
         m.downloader = Arc::new(|_url, dest, _proxy, _max, _timeout, on_progress| {
-            // 50 MB declared, but no byte is written before the callback says no.
+            // 声明 50 MB，但在回调说不行之前一个字节都没写。
             if !on_progress(0, Some(50 * 1024 * 1024)) {
                 return Err(FetchError::Transport("aborted".to_string()));
             }
@@ -2919,13 +2917,13 @@ mod tests {
         assert_eq!(status["repo"], json!("acme/keeper"));
         assert_eq!(status["apiBase"], json!("https://mirror.test"));
 
-        // The store saw the manager's key names, not the patch names.
+        // 存储层看到的是 manager 的键名，不是补丁里的键名。
         let stored = settings_store::read(&root);
         assert_eq!(stored["updateCheck"], json!(true));
         assert_eq!(stored["updateCheckMinutes"], json!(1));
         assert_eq!(stored["updateInstallSilent"], json!(false));
 
-        // A minute change with a previous attempt recomputes the deadline.
+        // 之前有过一次尝试时，改分钟数会重新计算截止时间。
         m.now = Arc::new(|| NOW);
         m.mutate_state(|state| state.last_attempt_at = NOW - 1000);
         m.save_settings(&json!({ "minutes": 30 })).unwrap();
@@ -2972,7 +2970,7 @@ mod tests {
         for _ in 0..4000 {
             let status = m.status();
             if status["checking"] == json!(true) {
-                // `lastAttemptAt` is written before the request is sent.
+                // `lastAttemptAt` 在请求发出之前就已写入。
                 assert_eq!(status["lastAttemptAt"], json!(NOW));
                 assert_eq!(status["checked"], json!(false));
                 saw_checking = true;
@@ -2984,10 +2982,10 @@ mod tests {
 
         tx.send(()).unwrap();
         let result = handle.join().unwrap();
-        // The returned snapshot is built *inside* the check, before `finally`
-        // clears the in-flight flag (reads `status()` while
-        // `checking` is still the promise), so the result carries
-        // `checking: true`. Only a later `status()` sees it cleared.
+        // 返回的快照是在检查*内部*构建的，早于 `finally`
+        // 清除进行中标志（此时读 `status()`，
+        // `checking` 仍是那个 promise），所以结果里带着
+        // `checking: true`。只有之后的 `status()` 才看到它被清掉。
         assert_eq!(result["checking"], json!(true));
         assert_eq!(m.status()["checking"], json!(false));
 
@@ -2999,13 +2997,13 @@ mod tests {
         let root = temp_root("coalesce");
         let http = MockHttp::new();
         http.push(ok_release("v9.9.9"));
-        // Any second response would be consumed only by a second request.
+        // 任何第二个响应只会被第二次请求消费。
         http.push(ok_release("v9.9.8"));
         let m = Arc::new(manager(&root, "1.0.0", Arc::clone(&http)));
 
         let a = Arc::clone(&m);
         let one = std::thread::spawn(move || a.check(true));
-        // Give the first request time to claim the slot.
+        // 给第一个请求留出占下槽位的时间。
         for _ in 0..1000 {
             if m.status()["checking"] == json!(true) {
                 break;
@@ -3031,7 +3029,7 @@ mod tests {
         http.push(ok_release("v9.9.9"));
         let m = manager(&root, "1.0.0", Arc::clone(&http));
 
-        // No history → due now, not one interval away.
+        // 没有历史 → 现在就该跑，而不是隔一个间隔。
         assert_eq!(m.due_at(), 0);
         let first = m.tick().expect("first tick checks");
         assert_eq!(first["latest"], json!("9.9.9"));

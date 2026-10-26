@@ -1,33 +1,30 @@
-//! Scanner.
+//! 扫描器。
 //!
-//! ## Why this is a port, not a redesign
+//! ## 为什么这是移植而不是重新设计
 //!
-//! The reference scanner defines the *meaning* of the data: which files become
-//! assets, what an asset's identity is, how duplicates collapse, what
-//! "effective" and "shadowed" mean. Re-deriving any of that here would
-//! silently change what the UI reports. So the rules are copied literally,
-//! including two deliberate oddities that look like bugs:
+//! 参考实现的扫描器定义了数据的*含义*：哪些文件成为资产、一个资产的身份是
+//! 什么、重复项如何折叠、"effective" 和 "shadowed" 是什么意思。在这里重新推导
+//! 其中任何一条都会悄悄改变 UI 所报告的内容。所以这些规则被逐字照搬，包括两处
+//! 看起来像 bug 的刻意怪癖：
 //!
-//!  1. `describePluginDir` checks `existsFile()` *before* `isDirectory()`, so
-//!     the nested-skill branch is unreachable and `skillCount` is always 0.
-//!     Reproducing it keeps numbers identical; fixing it would quietly
-//!     change every plugin's counters and needs its own decision.
-//!  2. `listFiles` treats a symlinked directory as a file (Dirent::isDirectory
-//!     is false for links). Skill *roots* do follow links, but a link found
-//!     deeper is counted as one file. Copied as-is.
+//!  1. `describePluginDir` 先检查 `existsFile()` *再*检查 `isDirectory()`，所以
+//!     那个嵌套 skill 的分支不可达，`skillCount` 永远是 0。复现它能让数字保持
+//!     一致；修好它则会悄悄改变每个 plugin 的计数器，而且需要单独做决定。
+//!  2. `listFiles` 把符号链接指向的目录当作文件（对链接而言 Dirent::isDirectory
+//!     为 false）。skill 的*根*确实会跟随链接，但在更深处找到的链接会被算成
+//!     一个文件。照搬原样。
 //!
-//! ## Where the speed comes from
+//! ## 速度从哪里来
 //!
-//! The reference version's cost was structural, not micro-optimisation:
-//!   49k `statSync` calls (a second pass just to sum plugin sizes) and 9.4k
-//!   `realpathSync` calls (one per directory, for a cycle guard). Both
-//!   disappear here: `DirEntry::metadata()` on Windows carries the size from
-//!   the directory scan, and the cycle guard only needs a canonicalise when
-//!   an entry is actually a link. On top of that the per-agent work runs in
-//!   parallel.
+//! 参考版本的开销是结构性的，而不是微优化：
+//!   49k 次 `statSync` 调用（只是为了累加 plugin 体积的第二遍）以及 9.4k 次
+//!   `realpathSync` 调用（每个目录一次，用作环路守卫）。两者在这里都消失了：
+//!   Windows 上的 `DirEntry::metadata()` 从目录扫描里就带出了大小，而环路守卫
+//!   只在某个条目确实是链接时才需要一次 canonicalise。除此之外，每个 agent 的
+//!   工作是并行跑的。
 //!
-//! Output is `serde_json::Value` for the same reason model.rs is: field shape
-//! is part of the contract with the renderer.
+//! 输出是 `serde_json::Value`，理由与 model.rs 相同：字段形状是它与渲染层之间
+//! 契约的一部分。
 
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -57,7 +54,7 @@ const SKIP_DIRS: [&str; 8] = [
 ];
 
 /* ------------------------------------------------------------------ */
-/* fs helpers                                                          */
+/* 文件系统辅助函数                                                        */
 /* ------------------------------------------------------------------ */
 
 fn exists_dir(p: &Path) -> bool {
@@ -74,8 +71,8 @@ fn read_all(p: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// `readHead` — the first 400KB plus the real size. Only memory entries need
-/// the text; callers that just want sizes use `walk_files` instead.
+/// `readHead` —— 头 400KB 加上真实大小。只有 memory 条目需要文本；只想要大小的
+/// 调用方应该改用 `walk_files`。
 fn read_head(p: &Path) -> (String, u64) {
     let size = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
     let take = size.min(MAX_TEXT_BYTES) as usize;
@@ -95,8 +92,8 @@ struct DirEntryInfo {
     is_symlink: bool,
 }
 
-/// `readdirSync(dir, {withFileTypes:true})`, in OS order (the reference code relies
-/// on that order for list stability, and matching it keeps diffs meaningful).
+/// `readdirSync(dir, {withFileTypes:true})`，按操作系统顺序（参考实现依赖这个
+/// 顺序来保持列表稳定，匹配它也让差异才有意义）。
 fn read_entries(dir: &Path) -> Vec<DirEntryInfo> {
     let rd = match fs::read_dir(dir) {
         Ok(r) => r,
@@ -119,9 +116,9 @@ fn read_entries(dir: &Path) -> Vec<DirEntryInfo> {
     out
 }
 
-/// `listFiles()` — recursive relative paths (forward slashes) plus the byte
-/// total, in one pass. The reference version walked to collect names and then
-/// stat'ed every file to sum sizes; that second pass was 5.3s of the 11s.
+/// `listFiles()` —— 递归的相对路径（正斜杠）加上字节总数，一次遍历完成。参考
+/// 版本先遍历收集名字，然后对每个文件 stat 一遍来累加大小；那第二遍占了 11 秒里
+/// 的 5.3 秒。
 struct Walk {
     files: Vec<String>,
     bytes: u64,
@@ -133,7 +130,7 @@ fn walk_files(root: &Path) -> Walk {
         bytes: 0,
     };
     if !exists_dir(root) {
-        // listFiles() returns [] when readdir fails (a file, or no access).
+        // readdir 失败时 listFiles() 返回 []（那是个文件，或者没有访问权限）。
         return w;
     }
     walk_into(root, "", &mut w);
@@ -162,7 +159,7 @@ fn walk_into(dir: &Path, base: &str, w: &mut Walk) {
         if ft.is_dir() {
             walk_into(&dir.join(&name), &rel, w);
         } else {
-            // A symlinked directory lands here too — see the module note.
+            // 符号链接指向的目录也会落到这里 —— 见模块说明。
             let size = e.metadata().map(|m| m.len()).unwrap_or(0);
             w.files.push(rel);
             w.bytes += size;
@@ -212,7 +209,7 @@ fn trim_preview(s: &str, n: usize) -> String {
     js_slice(s.trim(), n)
 }
 
-/// `str.replace(/\.md$/i, '')` — case-insensitive, unlike `basename_strip`.
+/// `str.replace(/\.md$/i, '')` —— 大小写不敏感，与 `basename_strip` 不同。
 fn strip_md_ci(name: &str) -> String {
     if name.len() >= 3 && name.to_lowercase().ends_with(".md") {
         name[..name.len() - 3].to_string()
@@ -222,7 +219,7 @@ fn strip_md_ci(name: &str) -> String {
 }
 
 /* ------------------------------------------------------------------ */
-/* scan context                                                        */
+/* 扫描上下文                                                             */
 /* ------------------------------------------------------------------ */
 
 #[derive(Clone)]
@@ -254,7 +251,7 @@ impl Ctx {
 }
 
 /* ------------------------------------------------------------------ */
-/* skills                                                             */
+/* skills（技能）                                                        */
 /* ------------------------------------------------------------------ */
 
 fn scan_skills(root_dir: &Path, ctx: &Ctx) -> Vec<Value> {
@@ -264,8 +261,8 @@ fn scan_skills(root_dir: &Path, ctx: &Ctx) -> Vec<Value> {
     }
     for e in read_entries(root_dir) {
         let dir = root_dir.join(&e.name);
-        // A junction/symlink entry does not report is_dir(); stat through it
-        // so a linked skill directory is still scanned.
+        // 一个 junction/符号链接条目不会报告 is_dir()；对它做一次 stat，
+        // 这样链接过来的 skill 目录仍会被扫描。
         let mut is_dir = e.is_dir;
         if !is_dir && e.is_symlink {
             is_dir = exists_dir(&dir);
@@ -374,7 +371,7 @@ fn scan_skills(root_dir: &Path, ctx: &Ctx) -> Vec<Value> {
 }
 
 /* ------------------------------------------------------------------ */
-/* rules                                                              */
+/* rules（规则）                                                         */
 /* ------------------------------------------------------------------ */
 
 fn rule_role(rel: &str) -> &'static str {
@@ -479,10 +476,10 @@ fn make_rule(file: &Path, ctx: &Ctx, rel_label: &str) -> Value {
         file: Some(norm_str(file)),
         files: vec![norm_str(file)],
         format: Some(if file_name(file).ends_with(".mdc") {
-            // `/\.mdc$/` is case-sensitive: `A.MDC` keeps `MDC`.
+            // `/\.mdc$/` 是大小写敏感的：`A.MDC` 会保留 `MDC`。
             "md".to_string()
         } else if ext.is_empty() {
-            "md".to_string() // makeAsset's `|| 'md'` default for extensionless files
+            "md".to_string() // makeAsset 中对无扩展名文件的 `|| 'md'` 默认值
         } else {
             ext.clone()
         }),
@@ -521,7 +518,7 @@ fn make_rule(file: &Path, ctx: &Ctx, rel_label: &str) -> Value {
 }
 
 /* ------------------------------------------------------------------ */
-/* memory                                                             */
+/* memory（记忆）                                                        */
 /* ------------------------------------------------------------------ */
 
 fn scan_memory(patterns: &[&str], ctx: &Ctx) -> Vec<Value> {
@@ -594,7 +591,7 @@ fn make_memory(file: &Path, ctx: &Ctx, rel_label: &str) -> Value {
 }
 
 /* ------------------------------------------------------------------ */
-/* MCP                                                                */
+/* MCP（MCP 服务器）                                                     */
 /* ------------------------------------------------------------------ */
 
 fn scan_mcp(patterns: &[&str], ctx: &Ctx) -> Vec<Value> {
@@ -620,7 +617,7 @@ fn scan_mcp(patterns: &[&str], ctx: &Ctx) -> Vec<Value> {
             }
         };
 
-        // Bucket selection mirrors the `||` chain exactly.
+        // 桶的选择精确镜像那条 `||` 链。
         let mut buckets: Vec<(String, Vec<(String, Value)>)> = Vec::new();
         let srv = ["mcpServers", "servers"]
             .iter()
@@ -636,9 +633,9 @@ fn scan_mcp(patterns: &[&str], ctx: &Ctx) -> Vec<Value> {
                 map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             ));
         }
-        // Top-level `<name>: {command|url: ...}` entries also count as servers.
-        // The reference guard tests `json.mcp` but then iterates the top level — kept
-        // verbatim so unusual configs bucket the same way.
+        // 顶层的 `<name>: {command|url: ...}` 条目也算服务器。
+        // 参考实现的守卫检查 `json.mcp` 但随后却遍历顶层 —— 逐字保留，
+        // 好让异常的 configs 以同样的方式分桶。
         if doc.get("mcp").map(|v| v.is_object()).unwrap_or(false) {
             if let Value::Object(top) = &doc {
                 for (k, v) in top.iter() {
@@ -718,7 +715,7 @@ fn scan_mcp_structured(file: &Path, ctx: &Ctx, rel: &str) -> Vec<Value> {
                         continue;
                     }
                     let mut cfg = cfg.clone();
-                    // goose-style keys: `cmd` means `command`.
+                    // goose 风格的键：`cmd` 意味着 `command`。
                     if cfg.get("cmd").map(js_truthy).unwrap_or(false)
                         && !cfg.get("command").map(js_truthy).unwrap_or(false)
                     {
@@ -824,8 +821,8 @@ fn make_mcp(
     };
 
     let disabled = matches!(cfg.get("disabled"), Some(Value::Bool(true)));
-    // `Object.keys(cfg.env)` — arrays and strings
-    // yield index keys.
+    // `Object.keys(cfg.env)` —— 数组和字符串
+    // 会产生下标键。
     let env = cfg.get("env");
     let env_keys: Vec<String> = match env {
         Some(Value::Object(m)) => m.keys().cloned().collect(),
@@ -905,18 +902,18 @@ fn make_mcp(
     })
 }
 
-/// Issue order matters — the UI shows them in the order returned.
-/// Delegates to [`super::validate::validate_mcp_server`] — one rule set, not two.
+/// 问题的顺序很重要 —— UI 按返回的顺序展示它们。
+/// 委托给 [`super::validate::validate_mcp_server`] —— 是一套规则，不是两套。
 ///
-/// A non-object config is not special-cased: an array yields the stdio/http
-/// error and then indexed unknown-key warnings. Real manifests are always
-/// objects, so only a malformed file reaches that branch.
+/// 非对象的配置不会被特殊对待：一个数组会先产生 stdio/http 错误，然后是带下标
+/// 的未知键警告。真实的 manifest 总是对象，所以只有格式错误的文件才会走到那个
+/// 分支。
 fn validate_mcp_server(id: &str, cfg: &Value) -> Vec<Value> {
     super::validate::validate_mcp_server(id, cfg)
 }
 
 /* ------------------------------------------------------------------ */
-/* plugins                                                            */
+/* plugins（插件）                                                       */
 /* ------------------------------------------------------------------ */
 
 fn manifest_candidates(dir: &Path) -> Vec<PathBuf> {
@@ -937,9 +934,8 @@ fn entry_named<'a>(entries: &'a [DirEntryInfo], name: &str) -> Option<&'a DirEnt
     entries.iter().find(|e| e.name == name)
 }
 
-/// `existsFile` / `existsDir` for a direct child, answered from the already
-/// read directory listing. A symlink still needs one stat because the
-/// listing does not say what it points at.
+/// 一个直接子项的 `existsFile` / `existsDir`，由已经读到的目录列表回答。符号链接
+/// 仍需要一次 stat，因为列表并不说明它指向什么。
 fn child_is_dir(dir: &Path, entries: &[DirEntryInfo], name: &str) -> bool {
     match entry_named(entries, name) {
         Some(e) if e.is_dir => true,
@@ -956,10 +952,9 @@ fn child_is_file(dir: &Path, entries: &[DirEntryInfo], name: &str) -> bool {
     }
 }
 
-/// `manifestCandidates(dir)` from a listing: the nested `plugin.json` still
-/// costs one stat, but the five unconditional probes done per
-/// directory collapse into name lookups. Order is preserved because
-/// `manifests[0]` decides which manifest wins.
+/// 由一个列表得出 `manifestCandidates(dir)`：嵌套的 `plugin.json` 仍要一次
+/// stat，但每个目录无条件做的那五次探测则塌缩成名字查找。顺序被保留，因为
+/// `manifests[0]` 决定哪个 manifest 胜出。
 fn manifest_candidates_in(dir: &Path, entries: &[DirEntryInfo]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for container in [
@@ -1004,7 +999,7 @@ fn collect_plugin_targets(
     if depth > MAX_PLUGIN_DEPTH {
         return;
     }
-    // One listing per directory; every decision below is answered from it.
+    // 每个目录一次列表；下面每个判断都由它回答。
     let entries = read_entries(dir);
     if is_marketplace_in(dir, &entries) {
         for e in entries.iter() {
@@ -1054,9 +1049,8 @@ fn scan_plugins(patterns: &[&str], ctx: &Ctx) -> Vec<Value> {
         return Vec::new();
     }
 
-    // The expensive half: one recursive walk per plugin directory. Parallel,
-    // order-preserving (collect on an IndexedParallelIterator keeps input
-    // order, which dedupe depends on).
+    // 昂贵的那一半：每个 plugin 目录一次递归遍历。并行、且保持顺序（在
+    // IndexedParallelIterator 上 collect 会保留输入顺序，而去重依赖这一点）。
     let described: Vec<Vec<Value>> = targets
         .par_iter()
         .map(|(dir, label, entries)| describe_plugin_dir(dir, ctx, label, entries))
@@ -1157,8 +1151,8 @@ fn describe_plugin_dir(
         let size = walk.bytes;
         let mtime = mtime_of(&t.dir);
 
-        // Nested components. The `exists_file` guard mirrors the reference code,
-        // which means directories never reach the isDirectory branch.
+        // 嵌套组件。那个 `exists_file` 守卫镜像了参考实现的代码，
+        // 这意味着目录永远到不了 isDirectory 分支。
         let mut nested: Vec<Value> = Vec::new();
         for sd in ["skills", "agents"] {
             let sp = t.dir.join(sd);

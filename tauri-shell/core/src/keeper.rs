@@ -1,30 +1,27 @@
-//! The mutating service.
+//! 变更服务。
 //!
-//! Every CRUD action lands here, so validation, audit and the write path's
-//! failure-undo are impossible to bypass from the UI, the MCP server or a
-//! future CLI. Each write goes through
-//! [`super::store::Store::transaction`]; **nothing in this module may touch the
-//! filesystem to change a file**. That single rule is what makes "a failed
-//! write leaves the tree exactly as it was" a true statement.
+//! 每一个 CRUD 动作都落在这里，所以校验、审计和写入路径的失败撤销都无法从 UI、
+//! MCP 服务器或将来的 CLI 绕过去。每次写入都走
+//! [`super::store::Store::transaction`]；**本模块中任何东西都不得为了改动文件
+//! 而去碰文件系统**。正是这一条规则让"一次失败的写入让目录树原封不动"成为
+//! 一句真话。
 //!
-//! ## Resolution order
+//! ## 解析顺序
 //!
-//! An asset id resolved from the last scan decides *which file* to mutate; the
-//! adapter table decides *where* a new one goes. Two consequences worth stating:
+//! 从上一次扫描中解析出的资产 id 决定改动*哪个*文件；适配器表决定一个新文件
+//! 去*哪里*。有两个值得说明的结果：
 //!
-//! * An id the last scan never produced is `asset not found` — never a guessed
-//!   path. On a cold cache one scan is run first.
-//! * A whole-file read never throws; a missing file reads as `""`. The only place that
-//!   treats "cannot read" as fatal is a config that exists but does not parse:
-//!   `upsert_mcp` / `delete_mcp` refuse to overwrite it, because proceeding
-//!   would silently drop every sibling server in the file.
+//! * 上一次扫描从未产出过的 id 就是 `asset not found` —— 绝不猜一条路径。
+//!   缓存冷的时候会先跑一次扫描。
+//! * 整文件读取绝不抛出；缺失的文件读作 `""`。唯一把"读不了"当作致命错误的
+//!   地方，是一个存在但解析不了的配置：`upsert_mcp` / `delete_mcp` 拒绝覆盖它，
+//!   因为继续下去会悄悄丢掉文件里所有兄弟服务器。
 //!
-//! ## yaml / toml
+//! ## yaml / toml（YAML 与 TOML）
 //!
-//! YAML and TOML MCP configs are rewritten field-by-field, not byte-spliced:
-//! `yaml` re-emits the whole document (comments are lost — the parser drops
-//! them), `toml` re-emits only the one section and
-//! splices it back so comments *outside* the server survive.
+//! YAML 和 TOML 的 MCP 配置是逐字段重写的，而不是按字节拼接：`yaml` 重新输出
+//! 整个文档（注释会丢失 —— 解析器把它们丢掉了），`toml` 只重新输出那一个
+//! 段落再拼回去，所以*在*该服务器*之外*的注释得以存活。
 
 use serde_json::{json, Map, Value};
 use std::path::Path;
@@ -42,7 +39,7 @@ use super::validate;
 use super::yaml;
 
 /* ------------------------------------------------------------------ */
-/* small coercion helpers                                              */
+/* 小型的强制转换辅助函数                                                    */
 /* ------------------------------------------------------------------ */
 
 fn prop(v: &Value, key: &str) -> String {
@@ -69,7 +66,7 @@ fn exists_dir(p: &str) -> bool {
     Path::new(p).is_dir()
 }
 
-/// Join `base` with `parts`.
+/// 把 `base` 与 `parts` 连接起来。
 fn join(base: &str, parts: &[&str]) -> String {
     let mut p = std::path::PathBuf::from(base);
     for part in parts {
@@ -78,7 +75,7 @@ fn join(base: &str, parts: &[&str]) -> String {
     store::native_str(&p)
 }
 
-/// Absolute join with `.`/`..` collapsed.
+/// 绝对路径连接，`.`/`..` 被折叠。
 fn resolve(base: &str, rel: &str) -> String {
     if Path::new(rel).is_absolute() {
         return store::normalize_path(rel);
@@ -88,7 +85,7 @@ fn resolve(base: &str, rel: &str) -> String {
     ))
 }
 
-/// Object spread `{ ...v }` for an object; index keys for an array or string.
+/// 对象展开 `{ ...v }`；数组或字符串则用下标键。
 fn spread_map(v: &Value) -> Map<String, Value> {
     let mut out = Map::new();
     match v {
@@ -112,7 +109,7 @@ fn spread_map(v: &Value) -> Map<String, Value> {
     out
 }
 
-/// Shallow merge of `patch` over `base`; absent base means an empty object.
+/// 把 `patch` 浅合并到 `base` 之上；base 缺失即为空对象。
 fn overlay(base: Option<&Value>, patch: &Value) -> Map<String, Value> {
     let mut out = base.map(spread_map).unwrap_or_default();
     for (k, v) in spread_map(patch) {
@@ -121,20 +118,20 @@ fn overlay(base: Option<&Value>, patch: &Value) -> Map<String, Value> {
     out
 }
 
-/// The bucket a server list lives in; absent base means an empty map.
+/// 服务器列表所在的桶；base 缺失即为空映射。
 fn map_of(base: Option<&Value>) -> Map<String, Value> {
     base.map(spread_map).unwrap_or_default()
 }
 
-/// Set one key in a copy of `base`; absent base means an empty object.
+/// 在 `base` 的一份副本里设置一个键；base 缺失即为空对象。
 fn with_entry(base: Option<&Value>, key: &str, value: Value) -> Map<String, Value> {
     let mut out = map_of(base);
     out.insert(key.to_string(), value);
     out
 }
 
-/// The one error an unparseable config may produce. Refusing is the point: a
-/// write that proceeded would drop every sibling server in the file.
+/// 解析不了的配置可能产生的唯一一个错误。拒绝正是要点：一个继续下去的写入会
+/// 丢掉文件里所有兄弟服务器。
 fn corrupt(file: &str, issues: Option<&Value>) -> Value {
     let error = format!("config file is corrupt, refusing to overwrite: {}", file);
     match issues {
@@ -143,8 +140,8 @@ fn corrupt(file: &str, issues: Option<&Value>) -> Value {
     }
 }
 
-/// Recursive copy for the bundle exporter — deliberately *without* the
-/// store's skip list: an exported skill must be complete.
+/// 供 bundle 导出器使用的递归拷贝 —— 刻意*不*带 store 的跳过列表：导出的
+/// skill 必须是完整的。
 fn copy_tree(src: &str, dest: &str) {
     if std::fs::create_dir_all(dest).is_err() {
         return;
@@ -180,7 +177,7 @@ fn is_json_path(file: &str) -> bool {
 }
 
 /* ------------------------------------------------------------------ */
-/* Keeper                                                              */
+/* Keeper（保管器）                                                     */
 /* ------------------------------------------------------------------ */
 
 pub struct Keeper {
@@ -196,23 +193,22 @@ impl Keeper {
         }
     }
 
-    /// `~` resolved against the *current* user, not baked in.
+    /// `~` 按*当前*用户解析，而不是写死在代码里。
     fn home_of(&self, agent: &Agent) -> String {
         resolve_home(agent.home, &self.user_home).unwrap_or_else(|| agent.home.to_string())
     }
 
-    /// Drop the scan cache: it must not outlive a write.
+    /// 丢掉扫描缓存：它的寿命不能超过一次写入。
     pub fn invalidate(&self) {
         assets::invalidate();
     }
 
-    /// Cached lookup, with the one-scan cold-cache fallback.
+    /// 带一次扫描冷缓存兜底的缓存查找。
     ///
-    /// The fallback scan is deliberately the UNCACHED variant: it answers this
-    /// one lookup and must not publish to the global read cache. Publishing
-    /// made an id lookup clobber the index every other caller was using, which
-    /// is what made `cached_index_operations` pass when run alone and fail
-    /// under a full `cargo test` depending on interleaving.
+    /// 兜底那次扫描刻意用**不缓存**的变体：它只回答这一次查找，绝不能发布到
+    /// 全局读缓存。发布会让一次 id 查找覆盖掉其它每个调用方正在使用的索引，而这
+    /// 正是让 `cached_index_operations` 单独跑时通过、在完整 `cargo test` 下却
+    /// 取决于交错顺序而失败的原因。
     fn index_get(&self, id: &str) -> Option<Value> {
         if let Some(a) = assets::get(id) {
             return Some(a);
@@ -227,16 +223,15 @@ impl Keeper {
                 return Some(a.clone());
             }
         }
-        // Still fall back to the cache: another thread may have published the
-        // id while this scan ran.
+        // 仍然退回缓存：这次扫描运行期间，另一个线程可能已经发布了这个 id。
         assets::get(id)
     }
 
     /* -------------------------------------------------------------- */
-    /* render                                                          */
+    /* 渲染                                                             */
     /* -------------------------------------------------------------- */
 
-    /// Skill rendering: frontmatter in the author's field order, then the body.
+    /// skill 渲染：按作者给出的字段顺序写 frontmatter，然后是正文。
     pub fn render_skill(&self, data: &Value, body: &str, order: Option<&[&str]>) -> String {
         const DEFAULT_ORDER: [&str; 7] = [
             "name",
@@ -251,12 +246,12 @@ impl Keeper {
     }
 
     /* -------------------------------------------------------------- */
-    /* skills                                                          */
+    /* skills（技能）                                                    */
     /* -------------------------------------------------------------- */
 
-    /// Create or update a skill — one write per target, one transaction total.
+    /// 创建或更新一个 skill —— 每个目标一次写入，总共一个事务。
     ///
-    /// `input`: `{ data, body, targets: [{agentId, scope, projectId}], skillId }`
+    /// `input`：`{ data, body, targets: [{agentId, scope, projectId}], skillId }`
     pub fn save_skill(&self, input: &Value) -> Value {
         let data = input.get("data").cloned().unwrap_or_else(|| json!({}));
         let body = match input.get("body") {
@@ -284,8 +279,8 @@ impl Keeper {
             return json!({ "ok": false, "blocked": true, "issues": issues });
         }
 
-        // `slug` coerces like `String(name || 'unnamed')`: an
-        // absent, null, empty or 0 name all become the literal "unnamed".
+        // `slug` 的强制转换与 `String(name || 'unnamed')` 一样：缺失、null、空
+        // 或 0 的 name 都变成字面量 "unnamed"。
         let raw_name = data
             .get("name")
             .filter(|v| js_truthy(v))
@@ -314,7 +309,7 @@ impl Keeper {
             let file = join(&folder, &["SKILL.md"]);
             let global = t.get("scope").and_then(|v| v.as_str()) == Some("global");
             if global && exists_dir(&folder) {
-                // Update in place so extra bundled files beside SKILL.md stay.
+                // 就地更新，这样 SKILL.md 旁边额外打包的文件能保留。
                 ops.push(Op::write(&file, &rendered));
             } else {
                 ops.push(Op::mkdir(&folder));
@@ -394,7 +389,7 @@ impl Keeper {
         tx
     }
 
-    /// The directory a skill folder lives in, for one target.
+    /// 某个目标的 skill 文件夹所在的目录。
     pub fn skill_dir_for(&self, t: &Value) -> Option<String> {
         let agent = by_id(&prop(t, "agentId"))?;
         if t.get("scope").and_then(|v| v.as_str()) == Some("global") {
@@ -413,7 +408,7 @@ impl Keeper {
         Some(resolve(&dir, rel))
     }
 
-    /// Update an existing md asset in place (rule / memory / skill file).
+    /// 就地更新一个已有的 md 资产（rule / memory / skill 文件）。
     pub fn save_markdown(&self, asset_id: &str, content: &str) -> Value {
         let Some(a) = self.index_get(asset_id) else {
             return json!({ "ok": false, "error": "asset not found" });
@@ -441,8 +436,8 @@ impl Keeper {
             if validate::is_blocking(&issues) {
                 return json!({ "ok": false, "blocked": true, "issues": issues });
             }
-            // Renaming means moving the directory; refuse rather than write a
-            // SKILL.md whose folder no longer matches its name.
+            // 改名意味着要移动目录；与其写出一个文件夹不再与名字匹配的
+            // SKILL.md，不如拒绝。
             let new_name = fm.data.get("name").filter(|v| js_truthy(v)).map(js_string);
             if let Some(name) = new_name {
                 if slug(&name) != dir_name {
@@ -488,15 +483,15 @@ impl Keeper {
     }
 
     /* -------------------------------------------------------------- */
-    /* MCP                                                             */
+    /* MCP（MCP 服务器）                                                 */
     /* -------------------------------------------------------------- */
 
-    /// Which file an MCP server belongs in.
+    /// 某个 MCP 服务器该属于哪个文件。
     ///
-    /// The global list is searched, not just indexed: `workbuddy` declares
-    /// `mcp.json, mcp-approvals.json, mcp-tool-list.json`, and writing a server
-    /// into an approvals file would produce a config the agent reads as a
-    /// decision record. The filter below is exactly that.
+    /// 这里搜索的是全局列表，而不只是取第一项：`workbuddy` 声明了
+    /// `mcp.json, mcp-approvals.json, mcp-tool-list.json`，而把一个服务器写进
+    /// approvals 文件会产出一份 agent 会当成决策记录来读的 配置。下面的过滤器
+    /// 正是为此。
     pub fn mcp_target_for(
         &self,
         agent_id: &str,
@@ -522,7 +517,7 @@ impl Keeper {
         Some(resolve(&dir, rel))
     }
 
-    /// The MCP bucket: copilot nests its servers under `servers`.
+    /// MCP 所在的桶：copilot 把它的服务器嵌在 `servers` 之下。
     pub fn mcp_bucket_for(&self, agent_id: &str) -> &'static str {
         match family(agent_id) {
             "copilot" => "servers",
@@ -530,7 +525,7 @@ impl Keeper {
         }
     }
 
-    /// Create or update one MCP server in whatever format the agent reads.
+    /// 以 agent 所读的那种格式创建或更新一个 MCP 服务器。
     pub fn upsert_mcp(&self, input: &Value) -> Value {
         let name = input.get("name").map(js_string).unwrap_or_default();
         let config = input.get("config").cloned().unwrap_or_else(|| json!({}));
@@ -607,7 +602,7 @@ impl Keeper {
             if let Value::Object(m) = &mut doc {
                 m.insert(bucket, Value::Object(servers));
             }
-            // This emitter does not add a trailing newline.
+            // 这个输出器不会追加结尾的换行。
             let mut body = yaml::stringify(&doc);
             if !body.ends_with('\n') {
                 body.push('\n');
@@ -676,7 +671,7 @@ impl Keeper {
         tx
     }
 
-    /// Delete one MCP server, leaving its siblings alone.
+    /// 删除一个 MCP 服务器，不动它的兄弟们。
     pub fn delete_mcp(&self, asset_id: &str) -> Value {
         let Some(a) = self.index_get(asset_id) else {
             return json!({ "ok": false, "error": "asset not found" });
@@ -777,7 +772,7 @@ impl Keeper {
     }
 
     /* -------------------------------------------------------------- */
-    /* delete / distribute                                             */
+    /* 删除 / 分发                                                         */
     /* -------------------------------------------------------------- */
 
     pub fn delete_asset(&self, asset_id: &str) -> Value {
@@ -791,9 +786,9 @@ impl Keeper {
             });
         }
         let kind = a.get("kind").map(js_string).unwrap_or_default();
-        // Defence in depth: an MCP asset's `file` is the *shared* config — a
-        // plain delete would wipe every server that agent has. Callers may
-        // forget to dispatch (the MCP tool did); the core never may.
+        // 纵深防御：一个 MCP 资产的 `file` 是那个*共享*配置 —— 一次普通删除会抹掉
+        // 那个 agent 的所有服务器。调用方可能会忘记分发（MCP 工具就曾如此）；
+        // 但核心层绝不允许。
         if kind == "mcp" {
             return self.delete_mcp(asset_id);
         }
@@ -824,11 +819,10 @@ impl Keeper {
         tx
     }
 
-    /// Copy an asset to other agents/scopes.
+    /// 把一个资产拷贝到其它 agent / scope。
     ///
-    /// Skill and markdown copies are batched into one transaction at the end;
-    /// MCP copies run one transaction each, because they merge into a config
-    /// file whose current content is only known at write time.
+    /// skill 和 markdown 的拷贝在最后被批成一个事务；MCP 的拷贝各自一个事务，
+    /// 因为它们要合并进一个配置文件，而那个文件的当前内容只有在写入时才知道。
     pub fn distribute(&self, asset_id: &str, targets: &[Value]) -> Value {
         let Some(a) = self.index_get(asset_id) else {
             return json!({ "ok": false, "error": "asset not found" });
@@ -1000,7 +994,7 @@ impl Keeper {
         tx
     }
 
-    /// Line diff for the preview panel.
+    /// 供预览面板使用的逐行差异。
     pub fn diff(&self, asset_id: &str, new_content: &str) -> Value {
         let Some(a) = self.index_get(asset_id) else {
             return json!({ "ok": false, "error": "asset not found" });
@@ -1017,10 +1011,10 @@ impl Keeper {
     }
 
     /* -------------------------------------------------------------- */
-    /* bundles                                                         */
+    /* bundles（打包导出导入）                                            */
     /* -------------------------------------------------------------- */
 
-    /// Export assets into a portable folder (no zip dependency):
+    /// 把资产导出到一个可移植的文件夹里（不依赖 zip）：
     ///
     /// ```text
     /// agentkeeper-bundle/
@@ -1028,8 +1022,7 @@ impl Keeper {
     ///   files/<n>/...   exact file/dir copies
     /// ```
     ///
-    /// Only user-writable assets export; a vendor cache is not the user's to
-    /// hand on.
+    /// 只有用户可写的资产会被导出；厂商缓存不是用户可以转手的东西。
     pub fn export_bundle(&self, asset_ids: &[Value], dir: &str) -> Value {
         if asset_ids.is_empty() {
             return json!({ "ok": false, "error": "no assets selected" });
@@ -1135,8 +1128,8 @@ impl Keeper {
         json!({ "ok": true, "out": out, "count": count })
     }
 
-    /// Import a bundle folder back into the real agent directories — one
-    /// transaction for the whole import, so a half-import cannot happen.
+    /// 把一个 bundle 文件夹导入回真实的 agent 目录 —— 整个导入是一个事务，
+    /// 所以半导入不可能发生。
     pub fn import_bundle(&self, dir: &str) -> Value {
         let manifest_path = join(dir, &["agentkeeper-bundle", "manifest.json"]);
         if !exists_file(&manifest_path) {
@@ -1308,13 +1301,13 @@ mod tests {
         let home = temp("target-home");
         let k = keeper_at(&root, &home);
 
-        // workbuddy declares mcp.json, mcp-approvals.json, mcp-tool-list.json —
-        // only the first is a server list.
+        // workbuddy 声明了 mcp.json、mcp-approvals.json、mcp-tool-list.json ——
+        // 只有第一个才是服务器列表。
         let t = k.mcp_target_for("workbuddy", "global", None).unwrap();
         assert!(t.ends_with("mcp.json"), "{}", t);
         assert!(!t.contains("approvals") && !t.contains("tool-list"));
 
-        // codex's first MCP entry is a .toml file, so it wins over mcp.json.
+        // codex 的第一个 MCP 条目是一个 .toml 文件，所以它胜过 mcp.json。
         let t = k.mcp_target_for("codex", "global", None).unwrap();
         assert!(t.ends_with("config.toml"), "{}", t);
 
@@ -1330,9 +1323,9 @@ mod tests {
         let home = temp("save-skill-home");
         let k = keeper_at(&root, &home);
 
-        // `validate_skill` checks the *raw* name against
-        // `^[a-z0-9][a-z0-9-]{0,63}$`, so "PDF Tools" is blocked before `slug`
-        // ever runs — a name only survives if it is already a slug.
+        // `validate_skill` 会拿*原始*名字去比对
+        // `^[a-z0-9][a-z0-9-]{0,63}$`，所以 "PDF Tools" 在 `slug`
+        // 根本没运行之前就被拦下了 —— 一个名字只有本来就已经是 slug 才能存活。
         let data = json!({ "name": "pdf-tools", "description": "Extract text from PDFs" });
         let r = k.save_skill(&json!({
             "data": data,
@@ -1342,7 +1335,7 @@ mod tests {
         assert_eq!(r["ok"], json!(true), "{}", r);
         assert_eq!(r["issues"], json!([]));
 
-        // `skill_dir_for` resolves `~/.claude/skills` against the user home.
+        // `skill_dir_for` 会针对用户主目录解析 `~/.claude/skills`。
         let file = home
             .join(".claude")
             .join("skills")
@@ -1370,8 +1363,8 @@ mod tests {
         let home = temp("save-skill-bad-home");
         let k = keeper_at(&root, &home);
 
-        // A non-empty body is required: `validate_skill` blocks an empty one
-        // first, and the blocked return has no `error` key.
+        // 要求有非空的正文：`validate_skill` 会先拦下空的，而被拦下的返回
+        // 没有 `error` 键。
         let r = k.save_skill(&json!({
             "data": { "name": "x", "description": "y" },
             "body": "body\n",
@@ -1393,7 +1386,7 @@ mod tests {
         let home = temp("save-skill-invalid-home");
         let k = keeper_at(&root, &home);
 
-        // No name: validate_skill treats that as a blocking error.
+        // 没有 name：validate_skill 把它当成一个阻断性错误。
         let r = k.save_skill(&json!({
             "data": { "description": "no name" },
             "body": "",
@@ -1411,8 +1404,8 @@ mod tests {
         let _guard = assets::lock_for_test();
         let root = temp("upsert");
         let home = temp("upsert-home");
-        // claude-code's home is `~/.claude`, so its global MCP config is
-        // `<home>/.claude/.mcp.json` — not `<home>/.mcp.json`.
+        // claude-code 的 home 是 `~/.claude`，所以它的全局 MCP 配置是
+        // `<home>/.claude/.mcp.json` —— 不是 `<home>/.mcp.json`。
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         std::fs::write(
             home.join(".claude").join(".mcp.json"),
@@ -1506,7 +1499,7 @@ mod tests {
         let r = k.import_bundle(&bundle.to_string_lossy());
         assert_eq!(r["ok"], json!(true), "{}", r);
         assert_eq!(r["imported"], json!(["pdf"]));
-        // A skill lands in `skill_dir_for({scope:'global'})` = `~/.claude/skills`.
+        // 一个 skill 落在 `skill_dir_for({scope:'global'})` = `~/.claude/skills`。
         assert!(home
             .join(".claude")
             .join("skills")
@@ -1514,7 +1507,7 @@ mod tests {
             .join("SKILL.md")
             .is_file());
 
-        // A second import is a no-op: the folder already exists.
+        // 第二次导入什么也不做：文件夹已经存在。
         let again = k.import_bundle(&bundle.to_string_lossy());
         assert_eq!(again["ok"], json!(false));
         assert_eq!(again["error"], json!("nothing importable found"));
@@ -1541,8 +1534,8 @@ mod tests {
         std::fs::remove_dir_all(&bundle).ok();
     }
 
-    /// Everything below resolves an id through the process-global scan cache, so
-    /// it must hold the cache lock (see `assets::lock_for_test`).
+    /// 下面的一切都通过进程全局的扫描缓存来解析 id，所以它必须持有那把缓存锁
+    /// （见 `assets::lock_for_test`）。
     #[test]
     fn cached_index_operations() {
         let _guard = assets::lock_for_test();
@@ -1550,7 +1543,7 @@ mod tests {
         let home = temp("cached-home");
         let k = keeper_at(&root, &home);
 
-        // --- delete_mcp removes exactly one server -----------------------
+        // --- delete_mcp 只删掉一个服务器 -------------------------------
         let cfg = home.join(".mcp.json");
         std::fs::write(
             &cfg,
@@ -1580,7 +1573,7 @@ mod tests {
         assert!(after["mcpServers"].get("drop").is_none());
         assert_eq!(after["mcpServers"]["keep"]["command"], json!("a"));
 
-        // --- delete_asset dispatches mcp to delete_mcp -------------------
+        // --- delete_asset 把 mcp 分发给 delete_mcp -----------------------
         std::fs::write(
             &cfg,
             r#"{"mcpServers":{"keep":{"command":"a"},"drop":{"command":"b"}}}"#,
@@ -1594,7 +1587,7 @@ mod tests {
         assert_eq!(r["ok"], json!(true), "{}", r);
         assert!(std::fs::read_to_string(&cfg).unwrap().contains("keep"));
 
-        // --- distribute skips the asset's own location -------------------
+        // --- distribute 跳过资产自身所在的位置 -------------------------
         std::fs::create_dir_all(home.join("skills").join("pdf")).unwrap();
         std::fs::write(home.join("skills").join("pdf").join("SKILL.md"), "x").unwrap();
         let skill = json!({
@@ -1619,10 +1612,10 @@ mod tests {
         assert_eq!(r["error"], json!("nothing to write"));
         assert_eq!(r["skipped"][0]["reason"], json!("same location"));
 
-        // --- save_markdown refuses a rename ------------------------------
-        // The rename guard only runs once `validate_skill` passes, and that
-        // needs a description; without one the missing-description error (and
-        // the dirName warning) is what comes back instead.
+        // --- save_markdown 拒绝改名 -------------------------------------
+        // 改名守卫只有在 `validate_skill` 通过之后才运行，而那需要一个
+        // description；没有它时回来的会是缺失 description 的错误（以及
+        // dirName 警告）。
         let r = k.save_markdown("skill:pdf", "---\nname: other\ndescription: d\n---\nbody\n");
         assert_eq!(r["blocked"], json!(true), "{}", r);
         assert_eq!(
@@ -1630,16 +1623,14 @@ mod tests {
             json!("renaming a skill requires a move (directory is \"pdf\")")
         );
 
-        // --- export_bundle writes a manifest and copies the folder -------
-        // Re-seed the index first: `distribute` and `save_markdown` above both
-        // end in `invalidate()`, which empties the process-global cache. On a
-        // cold cache `index_get` falls back to a full `scan_payload` of
-        // `self.user_home` — the REAL home, not this test's temp tree — so
-        // whether `skill:pdf` resolves here depends on what the machine happens
-        // to have installed. Without this line the test passed when run alone
-        // and failed ~2 runs in 3 under `cargo test` (other tests holding the
-        // cache lock change the interleaving). The re-seed makes the test
-        // deterministic instead of load-dependent.
+        // --- export_bundle 写出 manifest 并拷贝文件夹 --------------------
+        // 先重新播种索引：上面的 `distribute` 和 `save_markdown` 都以
+        // `invalidate()` 结尾，它会清空进程全局缓存。在冷缓存上 `index_get`
+        // 会退回到对 `self.user_home` 的一次完整 `scan_payload` —— 是真实的
+        // home，不是这个测试的临时目录 —— 所以 `skill:pdf` 在这里能否解析，
+        // 取决于这台机器恰好装了什么。没有这一行时，测试单独跑会通过，而在
+        // `cargo test` 下大约 3 次里有 2 次失败（持有缓存锁的其它测试会改变
+        // 交错顺序）。这次重新播种让测试变得确定，而不是取决于负载。
         assets::remember(std::slice::from_ref(&skill), std::slice::from_ref(&skill));
         let out = temp("cached-export");
         let r = k.export_bundle(&[json!("skill:pdf")], &out.to_string_lossy());
@@ -1660,12 +1651,11 @@ mod tests {
             .join("SKILL.md")
             .is_file());
 
-        // --- diff reports the changed lines ------------------------------
-        // Re-seed again: `export_bundle` itself does not touch the cache, but
-        // the test suite runs in parallel and any other test that completes a
-        // write calls `invalidate()`. The cache lock serialises the writes, not
-        // the reads, so asserting on `diff` without re-seeding makes this test
-        // depend on scheduling order.
+        // --- diff 报告发生变化的行 --------------------------------------
+        // 再重新播种一次：`export_bundle` 本身不碰缓存，但测试套件是并行运行的，
+        // 而任何完成了写入的其它测试都会调用 `invalidate()`。缓存锁串行化的是
+        // 写入而不是读取，所以在不重新播种的情况下断言 `diff` 会让这个测试
+        // 依赖调度顺序。
         assets::remember(std::slice::from_ref(&skill), std::slice::from_ref(&skill));
         let r = k.diff("skill:pdf", "line one\nline two\n");
         assert_eq!(r["ok"], json!(true));

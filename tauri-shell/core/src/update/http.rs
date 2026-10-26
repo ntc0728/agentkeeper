@@ -17,7 +17,7 @@ use std::io::Read;
 use super::version::UpdateError;
 use crate::http::request_with_redirects;
 
-/// JSON responses are tiny; anything larger is treated as a broken response
+/// JSON 响应很小；更大的都被当作损坏的响应
 /// （4 MiB 上限）。
 pub const MAX_JSON_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -361,8 +361,8 @@ mod tests {
 
     #[test]
     fn transport_failures_name_the_route_problem() {
-        // Port 1: refused before any response, so this is a transport failure
-        // and never an Ok.
+        // 1 号端口：在任何响应之前就被拒绝，因此这是传输失败，
+        // 绝不会返回 Ok。
         let error = fetch_release("http://127.0.0.1:1/x", None, 1000).unwrap_err();
         assert_eq!(error.status(), 502);
         assert!(

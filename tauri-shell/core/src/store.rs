@@ -719,7 +719,7 @@ impl TxError {
 /// 针对没有更具体 code 的任何事务失败的 `errorCode`。
 const TX_FAILED: &str = "write.failed";
 
-/// `tx-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,7)}`
+/// 事务 id 的格式：`tx-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,7)}`
 fn gen_tx_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -825,33 +825,29 @@ impl Op {
 }
 
 /* ------------------------------------------------------------------ */
-/* in-memory undo state                                                */
+/* 内存中的撤销状态                                                        */
 /* ------------------------------------------------------------------ */
 
-/// One entry of a captured directory, relative to that directory.
+/// 被捕获目录中的一个条目，相对于该目录。
 #[derive(Clone)]
 enum DirSnap {
-    /// A subdirectory. Recorded so an empty directory survives the undo — an
-    /// asset directory that exists but is empty is a real state, and dropping
-    /// it would leave a phantom folder in the agent's tree.
+    /// 一个子目录。记录下来是为了让空目录能在撤销后存活 —— 一个存在但为空的资产
+    /// 目录是一种真实状态，丢掉它会在 agent 的目录树里留下一个幻影文件夹。
     Dir(String),
     File(String, Vec<u8>),
-    /// `target` + "the target was a directory", which is what tells a restore
-    /// to call `symlink_dir` instead of `symlink_file`.
+    /// `target` 加上"目标是一个目录"，正是这一点告诉恢复过程该调用 `symlink_dir`
+    /// 而不是 `symlink_file`。
     Link(String, String, bool),
 }
 
-/// What a transaction touched, so a failure can put it back.
+/// 一个事务触及了什么，以便失败时能把它放回去。
 ///
-/// This lives in memory for exactly as long as the transaction runs and is
-/// then dropped: the product keeps no backup tree and offers no rollback by id,
-/// so the only consumer is [`Store::restore`] below. `Snapshot` is only ever
-/// built by [`Store::snapshot`], which is total — a path that cannot be
-/// captured makes the whole transaction refuse *before* the first write, so
-/// there is no "partially restorable" variant to fall into.
+/// 它在内存中只存活事务运行的这段时间，随后被丢弃：产品不保留备份树，也不提供
+/// 按 id 回滚，因此唯一的消费者是下面的 [`Store::restore`]。`Snapshot` 只会由
+/// [`Store::snapshot`] 构造，而后者是全函数 —— 一个无法被捕获的路径会让整个事务
+/// 在第一次写入*之前*拒绝，所以不存在"只能部分恢复"的变体。
 enum Snapshot {
-    /// The path did not exist before: undoing means removing what this
-    /// transaction created there.
+    /// 该路径此前不存在：撤销意味着移除本次事务在那里创建的东西。
     Absent {
         path: String,
     },
@@ -863,10 +859,9 @@ enum Snapshot {
         path: String,
         entries: Vec<DirSnap>,
     },
-    /// A symbolic link, or a dangling one: the target string plus whether the
-    /// target was a directory, which is what picks `symlink_dir` over
-    /// `symlink_file` on restore. A link is not a file — recreating it as one
-    /// would replace `a -> b` with a stale copy of `b`.
+    /// 一个符号链接，或一个悬空的符号链接：目标字符串加上目标是否为目录，正是它
+    /// 决定恢复时选 `symlink_dir` 还是 `symlink_file`。链接不是文件 —— 把它当
+    /// 文件重建，会把 `a -> b` 换成一个过期的 `b` 副本。
     Link {
         path: String,
         target: String,
@@ -886,7 +881,7 @@ impl Snapshot {
 }
 
 /* ------------------------------------------------------------------ */
-/* Store                                                               */
+/* 存储                                                                  */
 /* ------------------------------------------------------------------ */
 
 pub struct Store {
@@ -895,7 +890,7 @@ pub struct Store {
 }
 
 impl Store {
-    /// Creates the store tree if it is not there yet.
+    /// 如果存储树还不存在就创建它。
     pub fn new(root: &str) -> Store {
         let root_path = PathBuf::from(root);
         let _ = settings::ensure_store(&native_str(&root_path));
@@ -918,24 +913,22 @@ impl Store {
     }
 
     /* -------------------------------------------------------------- */
-    /* undo state                                                      */
+    /* 撤销状态                                                          */
     /* -------------------------------------------------------------- */
 
-    /// Capture one path (file, directory or link) into memory.
+    /// 把一个路径（文件、目录或链接）捕获进内存。
     ///
-    /// Existence is part of the state, so undoing a delete and undoing a create
-    /// are the same code with different data. The walk honours [`SKIP_DIRS`]
-    /// for the same reason [`copy_dir`] does — a `node_modules` tree is not part
-    /// of what any agent asset means, and holding it in RAM would be worse than
-    /// useless.
+    /// 存在性也是状态的一部分，所以撤销一次删除和撤销一次创建是同一段代码配不同的
+    /// 数据。遍历遵守 [`SKIP_DIRS`] 的理由与 [`copy_dir`] 相同 —— 一棵
+    /// `node_modules` 不属于任何 agent 资产的含义，把它留在 RAM 里不只是没用，
+    /// 而是有害。
     ///
-    /// `Err` is a refusal, not a warning: a directory over [`MAX_SNAPSHOT_BYTES`]
-    /// must fail the transaction before the first write, because "restored most
-    /// of it" is exactly the half-written state this must never leave behind.
+    /// `Err` 是拒绝，不是警告：一个超过 [`MAX_SNAPSHOT_BYTES`] 的目录必须让事务
+    /// 在第一次写入之前失败，因为"恢复了其中大部分"正是这里绝不能留下的半写状态。
     fn snapshot(&self, original: &str, budget: &mut usize) -> Result<Snapshot, TxError> {
         let path = Path::new(original);
-        // `exists()` follows links, so a dangling link reads as absent — use
-        // `symlink_metadata` to tell "no such path" from "a broken link".
+        // `exists()` 会跟随链接，所以悬空链接会被读成不存在 —— 用
+        // `symlink_metadata` 来区分"没有这条路径"和"这是一个断链"。
         let meta = match std::fs::symlink_metadata(path) {
             Ok(meta) => meta,
             Err(_) => {
@@ -946,9 +939,8 @@ impl Store {
         };
 
         if meta.is_symlink() {
-            // A dangling link is not an error, it is a state that already
-            // exists on disk; `metadata` then fails and the link is recorded as
-            // pointing at a non-directory, which is the only thing knowable.
+            // 悬空链接不是错误，而是磁盘上已经存在的一种状态；此时 `metadata`
+            // 会失败，于是该链接被记录为指向一个非目录，这是唯一能知道的事。
             let target = std::fs::read_link(path)
                 .map(|t| native_str(&t))
                 .unwrap_or_default();
@@ -989,15 +981,14 @@ impl Store {
         })
     }
 
-    /// `transaction(ops, meta)` — the only way a file may change.
+    /// `transaction(ops, meta)` —— 一个文件得以改变的唯一途径。
     ///
-    /// `meta` keys: `txId`, `kind`, `action`, `agentId`,
-    /// `agentLabel`, `projectId`, `projectName`, `assetId`, `assetName`.
+    /// `meta` 的键：`txId`、`kind`、`action`、`agentId`、
+    /// `agentLabel`、`projectId`、`projectName`、`assetId`、`assetName`。
     ///
-    /// The undo guarantee has two halves, and the first is the load-bearing
-    /// one: every touched path is captured **before** the first op runs, so a
-    /// refusal at capture time means nothing was written at all. The second half
-    /// is [`Store::restore`], which runs only on the failure path.
+    /// 撤销保证有两半，而第一半是承重的那半：每个被触及的路径都在**第一个**操作
+    /// 运行**之前**被捕获，所以捕获阶段的拒绝意味着什么都没有写入。第二半是
+    /// [`Store::restore`]，它只在失败路径上运行。
     pub fn transaction(&self, ops: &[Op], meta: &Value) -> Value {
         for (i, op) in ops.iter().enumerate() {
             if matches!(op.kind, OpKind::CopyDir) && op.from.is_none() {
@@ -1017,22 +1008,20 @@ impl Store {
 
         let mut log: Vec<Value> = Vec::new();
         let mut touched: Vec<Snapshot> = Vec::new();
-        // One budget for the whole transaction, not per path: five 6 MiB
-        // directories are the same problem as one 30 MiB one, and the cap is a
-        // statement about peak memory, which a per-path budget would not be.
+        // 整个事务共用一份预算，而不是每条路径一份：五个 6 MiB 的目录和一个
+        // 30 MiB 的目录是同一个问题，而这个上限是在陈述峰值内存，按路径分配的
+        // 预算做不到这一点。
         let mut budget = MAX_SNAPSHOT_BYTES;
 
         let outcome: Result<(), TxError> = (|| {
-            // 1. capture everything the transaction will touch, before any of it
-            //    moves. A failure here means nothing was written at all.
+            // 1. 在任何东西被移动之前，把事务将要触及的一切都捕获下来。这里的
+            //    失败意味着什么都没有写入。
             //
-            //    A path named twice is captured once. Two ops on the same path
-            //    (distribute pushes `mkdir <rules dir>` + `write <rule>` per
-            //    target, so the same parent recurs across targets) would
-            //    otherwise be charged twice against the shared budget and
-            //    double-counted in `restore`, where the *second* copy would try
-            //    to put back a state the first op had already changed. The
-            //    pre-transaction capture is the only one worth keeping.
+            //    同一条路径被点名两次时只捕获一次。对同一路径的两个操作（distribute
+            //    会为每个目标推送 `mkdir <rules dir>` + `write <rule>`，所以同一个
+            //    父目录会跨目标反复出现）否则会被重复计入共享预算，并且在
+            //    `restore` 里被重复计数 —— 而那里的*第二*份副本会试图放回一个
+            //    第一个操作早已改变过的状态。事务前的这一次捕获才是唯一值得保留的。
             let mut captured: HashSet<String> = HashSet::new();
             for op in ops {
                 if captured.insert(normalize_path(&op.path)) {
@@ -1043,7 +1032,7 @@ impl Store {
                 }
             }
 
-            // 2. apply.
+            // 2. 应用。
             for op in ops {
                 let real = op.path.clone();
                 match op.kind {
@@ -1166,19 +1155,16 @@ impl Store {
         })();
 
         if let Err(err) = outcome {
-            // A restore that itself fails would leave a half-written tree, so
-            // the failures are folded into the answer instead of being
-            // swallowed — all of them, and each with its own code, so the caller
-            // can tell "nothing was written" from "written, then partly undone"
-            // without reading prose.
+            // 一次本身也失败的恢复会留下半写的目录树，所以这些失败被折进应答里，
+            // 而不是被吞掉 —— 全部失败都折进去，每条还带着自己的 code，好让调用方
+            // 不必读散文就能区分"什么都没写"和"写了，然后部分撤销"。
             let restore_errors = self.restore(&touched);
             let error = err.message;
             let error_code = if restore_errors.is_empty() {
                 err.code
             } else {
-                // The restore failure is the more actionable of the two: the
-                // op error is what broke the write, this is what the user has
-                // to go look at on disk.
+                // 恢复失败是两者中更可操作的那个：操作错误是导致写入失败的原因，
+                // 而这个才是用户需要到磁盘上查看的东西。
                 STORE_RESTORE_INCOMPLETE
             };
             settings::audit(
@@ -1199,10 +1185,9 @@ impl Store {
                     "assetId": meta.get("assetId").cloned().unwrap_or(Value::Null),
                 }),
             );
-            // `restoreErrors` is the complete list; `restoreError` is the
-            // joined form kept for callers that predate it. An empty list is
-            // omitted rather than shipped as `[]`, so `get("restoreError")`
-            // still answers "was the undo clean?" on the old contract.
+            // `restoreErrors` 是完整列表；`restoreError` 是为早于它的调用方保留的
+            // 拼接形式。空列表会被省略而不是以 `[]` 发出去，这样在旧契约下
+            // `get("restoreError")` 仍然能回答"撤销是否干净"。
             let mut out = json!({
                 "ok": false,
                 "txId": tx_id,
@@ -1225,10 +1210,9 @@ impl Store {
         }
 
         let ms = now_millis() - t0;
-        // One entry per **op**, not per captured path: the two lists are
-        // deliberately not the same (`mkdir` and `write` on one path are two
-        // ops and one snapshot), and the answer/audit pair has always counted
-        // ops — `keeper::distribute` reads it to build its `written` list.
+        // 每个**操作**一条记录，而不是每条被捕获的路径一条：这两个列表是刻意不同的
+        // （同一路径上的 `mkdir` 和 `write` 是两个操作、一份快照），而应答/审计这一对
+        // 一直统计的是操作 —— `keeper::distribute` 读它来构造自己的 `written` 列表。
         let targets: Vec<Value> = ops.iter().map(|o| Value::String(o.path.clone())).collect();
         let rec = json!({
             "txId": tx_id,
@@ -1249,33 +1233,31 @@ impl Store {
         json!({ "ok": true, "txId": tx_id, "ms": ms, "targets": targets })
     }
 
-    /// Put a captured state list back.
+    /// 把捕获到的状态列表放回去。
     ///
-    /// **Every snapshot is attempted, and every failure is collected.** The old
-    /// shape (`Option<String>`, `return` on the first error) meant a transaction
-    /// touching N paths stopped at the first path it could not put back: everything
-    /// after it stayed in its post-write state and the caller was told about one of
-    /// them. The tree was silently half-undone while the answer read like a single
-    /// fixable complaint. Returning the full list makes "only the first failure" a
-    /// compile error rather than a policy — there is no shorter shape to return.
+    /// **每一份快照都会被尝试，每一处失败都会被收集。** 旧的形式
+    /// （`Option<String>`，在第一个错误处 `return`）意味着一个触及 N 条路径的
+    /// 事务会在第一条放不回去的路径处停下：它之后的每一条路径都停留在写入之后的
+    /// 状态，而调用方只被告知了其中一条。目录树被悄悄撤销了一半，应答却读起来像
+    /// 只有一个可修的抱怨。返回完整列表让"只报告第一个失败"变成一个编译错误而
+    /// 不是一条策略 —— 没有更短的形状可以返回。
     ///
-    /// A single failure still does not stop the others, so the damage from an
-    /// unwritable path is bounded to that path.
+    /// 单个失败仍不会让其他失败停下，所以一条不可写路径造成的损害被限制在那一
+    /// 条路径上。
     fn restore(&self, snaps: &[Snapshot]) -> Vec<RestoreFailure> {
         let mut out = Vec::new();
         for s in snaps {
             let target = Path::new(s.path());
             let outcome: Result<(), RestoreFailure> = match s {
                 Snapshot::Absent { .. } => {
-                    // `symlink_metadata`, not `exists()`: the op may have
-                    // created a *dangling* link, and `exists()` follows links so
-                    // it would report "nothing there" and leave it behind.
+                    // 用 `symlink_metadata` 而不是 `exists()`：操作可能创建了一个
+                    // *悬空*链接，而 `exists()` 会跟随链接，于是它会报告"那里没
+                    // 东西"并把它留在原地。
                     if std::fs::symlink_metadata(target).is_ok() {
                         rmrf(target);
                     }
-                    // Deleting the last file of a freshly created directory (a
-                    // new skill folder) would otherwise leave a phantom entry
-                    // that some agents still enumerate.
+                    // 否则删掉一个刚创建目录里的最后一个文件（比如新建的 skill
+                    // 文件夹）会留下一个幻影条目，而某些 agent 仍会把它枚举出来。
                     if let Some(parent) = target.parent() {
                         prune_empty_parents(&native_str(parent), s.path());
                     }
@@ -1283,8 +1265,8 @@ impl Store {
                 }
                 Snapshot::File { content, .. } => {
                     if target.is_dir() {
-                        // The op replaced a directory with a file (or the other
-                        // way round); restoring means removing what is there.
+                        // 该操作可能把目录换成了文件（或反过来）；恢复意味着移除
+                        // 现在那里的东西。
                         rmrf(target);
                     }
                     match target.parent() {
@@ -1306,11 +1288,10 @@ impl Store {
                     is_dir,
                     ..
                 } => {
-                    // The op may have left a file or directory where the link
-                    // belongs: `symlink_file` on Windows fails with
-                    // `ERROR_ALREADY_EXISTS` rather than replacing it, so the
-                    // undo has to clear the path itself or it reports a failure
-                    // for a tree it could in fact have restored.
+                    // 该操作可能在链接该在的位置留下了文件或目录：Windows 上的
+                    // `symlink_file` 会以 `ERROR_ALREADY_EXISTS` 失败而不是替换它，
+                    // 所以撤销必须自己清掉这条路径，否则它会为一棵其实本可以恢复
+                    // 的目录树报告失败。
                     if std::fs::symlink_metadata(target).is_ok() {
                         rmrf(target);
                     }
@@ -1343,16 +1324,14 @@ impl Store {
 mod tests {
     use super::*;
 
-    /// Open a handle that permits reading but **not** writing or deleting.
+    /// 打开一个只允许读取、**不允许**写入或删除的句柄。
     ///
-    /// This is the deterministic failure trigger for the undo tests: a virus
-    /// scanner, a sync client or a second AgentKeeper holding an asset open is
-    /// the real shape of it. `FILE_SHARE_READ` alone makes every write-open of
-    /// the file fail with a sharing violation while reads still succeed, so the
-    /// capture phase can read the file and the undo cannot write it back. A
-    /// probe proves the environment really behaves that way before the test
-    /// relies on it — without the probe, a future Windows that allowed the
-    /// write would leave the test green while testing nothing.
+    /// 这是撤销测试的确定性失败触发器：病毒扫描器、同步客户端或另一个持有资产
+    /// 句柄的 AgentKeeper 就是它的真实形态。仅仅 `FILE_SHARE_READ` 会让对该文件
+    /// 的每一次写入打开都以共享冲突失败，而读取仍然成功，于是捕获阶段能读到该
+    /// 文件、撤销却写不回去。一次探针会在测试依赖它之前证明环境确实是这个行为
+    /// —— 没有探针的话，某个将来允许写入的 Windows 会让测试一直是绿的，却什么
+    /// 也没测到。
     #[cfg(windows)]
     fn hold_read_only(path: &Path) -> std::fs::File {
         use std::os::windows::fs::OpenOptionsExt;
@@ -1387,18 +1366,16 @@ mod tests {
         Store::new(&root.to_string_lossy())
     }
 
-    /// **The undo does not stop at the first path it cannot put back.**
+    /// **撤销不会在第一条放不回去的路径处停下。**
     ///
-    /// This is the regression the whole `Vec<RestoreFailure>` shape exists for.
-    /// `restore` used to `return Some(<first failure>)`, so a transaction
-    /// touching several paths left every path *after* the failing one in its
-    /// post-write state while the answer named only one of them: the tree was
-    /// silently half-undone and the error described a single problem.
+    /// 这正是整个 `Vec<RestoreFailure>` 形状所存在的理由。`restore` 过去是
+    /// `return Some(<first failure>)`，所以一个触及多条路径的事务会让失败之后的
+    /// 每一条路径都停留在写入之后的状态，而应答只提到其中一条：目录树被悄悄
+    /// 撤销了一半，报错却描述的是单个问题。
     ///
-    /// The exclusive handle is taken **after** the transaction, never before.
-    /// Held across the transaction it makes the *write* fail instead, so the
-    /// transaction aborts and its own undo has already put everything back —
-    /// and then no restore problem exists to assert on.
+    /// 独占句柄是在事务**之后**才拿到的，绝不在之前。若跨事务持有，它会让*写入*
+    /// 失败，于是事务中止、它自己的撤销已经把所有东西放回去了 —— 那时就没有可
+    /// 以断言的恢复问题存在了。
     #[cfg(windows)]
     #[test]
     fn a_failed_restore_does_not_stop_the_paths_after_it() {
@@ -1410,8 +1387,8 @@ mod tests {
         let early = root.join("b.md");
         let late = root.join("c.md");
 
-        // A *successful* transaction is what leaves several paths changed, so
-        // the undo below has several paths to get wrong.
+        // 一次*成功*的事务才会让多条路径被改动，所以下面的撤销才有好几条路径
+        // 可能出错。
         let ok = store.transaction(
             &[
                 Op::write(&locked.to_string_lossy(), "clobbered-locked"),
@@ -1428,7 +1405,7 @@ mod tests {
             ok
         );
 
-        // Hold `locked.md` against writes, so only the *undo* can fail.
+        // 挡住对 `locked.md` 的写入，让只有*撤销*失败。
         let _lock = hold_read_only(&locked);
         let undone = store.restore(&[
             Snapshot::File {
@@ -1471,12 +1448,11 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// Every failure is reported, not just the first — a caller that shows the
-    /// list must not under-report what is sitting in a changed state on disk.
+    /// 每一处失败都被报告，而不只是第一处 —— 一个要展示这个列表的调用方，绝不能
+    /// 低估磁盘上处于已改动状态的东西。
     ///
-    /// Drives [`Store::restore`] directly for the same reason as the test above:
-    /// to have several paths genuinely changed, the setup has to be a
-    /// *successful* transaction. Its locks are taken afterwards.
+    /// 直接驱动 [`Store::restore`]，理由与上面的测试相同：要有多条路径真正被改动，
+    /// 设置步骤必须是一次*成功*的事务。它的锁是在之后才拿到的。
     #[cfg(windows)]
     #[test]
     fn every_unrestorable_path_is_reported_not_just_the_first() {
@@ -1541,13 +1517,11 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The answer shape the renderer keys off: `errorCode` plus the full
-    /// `restoreErrors` list, with `restoreError` kept as the joined form.
+    /// 渲染层所依据的应答形状：`errorCode` 加上完整的 `restoreErrors` 列表，
+    /// 同时保留 `restoreError` 作为拼接形式。
     ///
-    /// The lock is taken *after* a successful transaction, so the transaction
-    /// whose answer is under test is one that actually got as far as writing
-    /// and then could not put everything back — the partial-success state the
-    /// UI has to be able to say out loud.
+    /// 锁是在一次成功的事务*之后*才拿到的，所以被测试应答的那个事务确实走到了
+    /// 写入、然后没能把一切放回去 —— 正是 UI 必须能大声说出来的半成功状态。
     #[cfg(windows)]
     #[test]
     fn a_partly_undone_transaction_reports_its_code_and_every_failed_path() {
@@ -1568,8 +1542,7 @@ mod tests {
         );
         assert_eq!(ok["ok"], json!(true), "{}", ok);
 
-        // Rebuild the answer the failure path builds, from the real snapshots,
-        // with the lock in place for the undo only.
+        // 用真实的快照重建失败路径所构建的应答，只让锁在撤销期间生效。
         let mut budget = MAX_SNAPSHOT_BYTES;
         let snaps = vec![
             store
@@ -1582,7 +1555,7 @@ mod tests {
         let _lock = hold_read_only(&locked);
         let failures = store.restore(&snaps);
 
-        // This is the contract `transaction()` publishes for these failures.
+        // 这就是 `transaction()` 为这些失败所公布的契约。
         let error_code = if failures.is_empty() {
             TX_FAILED
         } else {
@@ -1593,32 +1566,28 @@ mod tests {
         assert_eq!(errors.len(), 1, "{:?}", errors);
         assert_eq!(errors[0]["code"], json!(RESTORE_PATH_FAILED));
         assert!(errors[0]["path"].as_str().unwrap().contains("locked.md"));
-        // `path` is its own field: repeating it inside `detail` would make the
-        // renderer print the same path twice for no gain.
+        // `path` 是独立字段：在 `detail` 里重复它会让渲染层毫无收益地把同一条
+        // 路径打印两遍。
         assert!(
             errors[0]["detail"].as_str().is_some_and(|d| !d.is_empty()),
             "the failure carries the OS reason: {:?}",
             errors[0]
         );
 
-        // And the joined compat string carries the same single failure.
+        // 兼容用的拼接字符串也带着同一条失败。
         assert!(restore_sentence(&failures).contains("locked.md"));
 
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// `restore_dir` empties the directory and rebuilds it, so an entry it fails
-    /// on used to `return Err` and abandon the **rest** of the entries — leaving
-    /// a tree holding only what it happened to reach. Every remaining entry must
-    /// still be written.
+    /// `restore_dir` 会清空目录再重建，所以它失败的条目过去会 `return Err` 并放弃
+    /// **其余**条目 —— 留下一棵只包含它恰好走到的那部分的目录树。剩下的每一个条目
+    /// 都必须仍然被写入。
     ///
-    /// The failing entry is made deterministic without privileges: one entry
-    /// creates a directory (`blocker/…`) and a later entry wants to put a *file*
-    /// at that same name. Writing the file fails on the directory that is now
-    /// standing there, while the entries on either side of it are ordinary
-    /// writes. The list is built by hand precisely so the order is known — a
-    /// walk-order-dependent trigger would make this test flaky rather than
-    /// strict.
+    /// 失败的条目被做成确定性的，而且不需要特权：一个条目创建目录（`blocker/…`），
+    /// 之后一个条目想在同一个名字上放一个*文件*。在已经立在那里的目录上写文件会
+    /// 失败，而它两侧的条目都是普通写入。这个列表是手工搭出来的，正是为了顺序
+    /// 确定 —— 依赖遍历顺序的触发条件会让这个测试变得不稳定而非严格。
     #[test]
     fn a_partly_failed_directory_restore_still_writes_the_other_entries() {
         let root = temp_root("restore-dir-partial");
@@ -1630,9 +1599,9 @@ mod tests {
 
         let entries = vec![
             DirSnap::File("before.md".to_string(), b"original-before".to_vec()),
-            // Creates the directory `blocker`…
+            // 创建目录 `blocker`……
             DirSnap::File("blocker/inner.md".to_string(), b"original-inner".to_vec()),
-            // …and then wants a *file* at that name, which cannot work.
+            // ……然后想在同一个名字上放一个*文件*，这不可能成功。
             DirSnap::File("blocker".to_string(), b"original-blocker".to_vec()),
             DirSnap::File("after.md".to_string(), b"original-after".to_vec()),
         ];
@@ -1646,7 +1615,7 @@ mod tests {
             failures
         );
         assert_eq!(failures[0].code(), RESTORE_PATH_FAILED, "{:?}", failures);
-        // The entries on **both** sides of the failure are present.
+        // 失败条目**两侧**的条目都在。
         assert_eq!(
             std::fs::read_to_string(dir.join("before.md")).unwrap(),
             "original-before",
@@ -1665,9 +1634,9 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A `restore_dir` that cannot write into the directory at all must say so
-    /// **before** destroying the captured tree. `rmrf` runs first otherwise, and
-    /// "could not rebuild" would arrive as "the directory you had is gone".
+    /// 一个根本没法往目录里写的 `restore_dir` 必须在销毁捕获到的目录树**之前**
+    /// 把这件事说出来。否则 `rmrf` 会先跑，而"无法重建"就会以"你原本的目录没了"
+    /// 的形式送达。
     #[test]
     fn a_directory_restore_that_cannot_write_keeps_the_captured_tree() {
         let root = temp_root("restore-dir-probe");
@@ -1675,9 +1644,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("keep.md"), "keep-me").unwrap();
 
-        // The probe path is a *directory*, so writing the probe file fails and
-        // the guard trips — without needing a read-only directory, which Windows
-        // does not enforce for the owner anyway.
+        // 探针路径是一个*目录*，所以写探针文件会失败、守卫会被触发 —— 而且
+        // 不需要一个只读目录，Windows 对属主本来就不强制这一点。
         std::fs::create_dir_all(dir.join(".agentkeeper-restore-probe")).unwrap();
 
         let failures = restore_dir(
@@ -1734,9 +1702,8 @@ mod tests {
         let tx_id = tx["txId"].as_str().unwrap().to_string();
         assert_eq!(tx["targets"], json!([p]));
 
-        // The journal record is the audit line: the app keeps no per-transaction
-        // file on disk, so `txId` exists only to correlate the two halves of the
-        // log with each other and with the transaction's own answer.
+        // 日志记录就是那行审计记录：应用不在磁盘上保留每事务一个文件，所以
+        // `txId` 存在的意义仅是把日志的两半彼此、以及与事务自身的应答关联起来。
         let audit = std::fs::read_to_string(store.audit_file()).unwrap();
         assert_eq!(audit.lines().count(), 1);
         let rec: Value = serde_json::from_str(audit.lines().next().unwrap()).unwrap();
@@ -1750,9 +1717,8 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The product has no backup tree. A transaction — successful, refused or
-    /// failed — must leave nothing behind but the audit journal, because a
-    /// directory of old copies is exactly the thing this build no longer keeps.
+    /// 产品没有备份树。一个事务 —— 无论成功、被拒绝还是失败 —— 除了审计日志之外
+    /// 绝不能留下任何东西，因为一个存放旧副本的目录正是这个版本不再保留的东西。
     #[test]
     fn no_transaction_creates_a_backup_directory() {
         let root = temp_root("no-backups");
@@ -1763,8 +1729,7 @@ mod tests {
         let ok = store.transaction(&[Op::write(&p, "body")], &json!({ "kind": "skill" }));
         assert_eq!(ok["ok"], json!(true), "{}", ok);
 
-        // And the failure path, which is the one that used to copy the touched
-        // paths out before writing them.
+        // 以及失败路径 —— 正是它过去会在写入之前把被触及的路径拷贝出去。
         let failed = store.transaction(
             &[
                 Op::write(&p, "half"),
@@ -1788,8 +1753,8 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// Undo of a *failed* transaction: a delete that ran before the failing op
-    /// must put the file back byte for byte, from the in-memory snapshot.
+    /// *失败*事务的撤销：在失败的操作之前执行的一次删除，必须从内存快照里逐字节
+    /// 把文件放回去。
     #[test]
     fn a_failed_transaction_restores_a_deleted_file_byte_for_byte() {
         let root = temp_root("fail-delete");
@@ -1820,9 +1785,8 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The mirror image: a path that did not exist must end up absent again, and
-    /// the directory that only existed to hold it must be pruned — a phantom
-    /// folder is still enumerated by some agents.
+    /// 镜像的情形：一条本来不存在的路径最终必须再次不存在，而那个仅仅为了容纳它
+    /// 而存在的目录必须被清掉 —— 幻影文件夹仍会被某些 agent 枚举到。
     #[test]
     fn a_failed_transaction_removes_a_created_file_and_prunes_its_dir() {
         let root = temp_root("fail-create");
@@ -1844,22 +1808,18 @@ mod tests {
         assert_eq!(tx["ok"], json!(false), "{}", tx);
         assert!(!target.exists());
         assert!(!dir.exists(), "empty parent left behind: {:?}", dir);
-        // The store root itself must survive; it was not created by the write.
+        // 存储根目录本身必须存活；它不是这次写入创建出来的。
         assert!(root.exists());
 
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A directory op is the case the old disk-copy undo used to cover, and it is
-    /// the one an in-memory snapshot could silently get wrong: the restore has to
-    /// A directory op is the case the old disk-copy undo used to cover, and it is
-    /// the one an in-memory snapshot could silently get wrong: the restore has to
-    /// reproduce the *captured* tree, not merge into what is there now.
+    /// 目录操作正是旧的磁盘拷贝撤销所覆盖的情形，也是内存快照可能悄悄搞错的
+    /// 那个：恢复必须复现*捕获到的*目录树，而不是合并进现在的东西里。
     ///
-    /// The `CopyDir` op is the important one — it names the **directory** as the
-    /// touched path, so the whole tree has to come back from one snapshot. An op
-    /// that names a file inside it would get its own per-file snapshot and hide a
-    /// merge-shaped restore.
+    /// 关键的是 `CopyDir` 操作 —— 它把**目录**本身作为被触及的路径，所以整棵树
+    /// 都必须从同一份快照里回来。一个指名其中某个文件的操作会得到自己的逐文件
+    /// 快照，从而掩盖掉一次合并式的恢复。
     #[test]
     fn a_failed_transaction_restores_a_copied_directory_exactly() {
         let root = temp_root("fail-copiedir");
@@ -1869,7 +1829,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("nested")).unwrap();
         std::fs::write(dir.join("keep.md"), "keep").unwrap();
         std::fs::write(dir.join("nested").join("a.md"), "a").unwrap();
-        // An empty subdirectory is state too, and must survive.
+        // 一个空子目录同样是一种状态，必须存活下来。
         std::fs::create_dir_all(dir.join("empty")).unwrap();
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("x.md"), "x").unwrap();
@@ -1877,8 +1837,8 @@ mod tests {
 
         let tx = store.transaction(
             &[
-                // This op copies *into* `dir`, so `dir` itself is what has to be
-                // captured and put back. (`copy_dir` takes the destination first.)
+                // 这个操作是拷贝*进* `dir`，所以 `dir` 本身才是必须被捕获并放回的
+                // 东西。（`copy_dir` 的第一个参数是目标位置。）
                 Op::copy_dir(&dir.to_string_lossy(), &src.to_string_lossy()),
                 Op::copy_dir(
                     &root.join("nope").to_string_lossy(),
@@ -1909,9 +1869,9 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The size guard is a refusal, not a truncation: a tree that cannot be held
-    /// in memory must stop the transaction *before* the first write, so the
-    /// alternative to a correct restore is never "a partially restored one".
+    /// 尺寸守卫是一次拒绝，而不是一次截断：一棵没法在内存中容纳的目录树必须在
+    /// 第一次写入*之前*就让事务停下，于是"正确恢复"的替代方案永远不会变成
+    /// "恢复了一半"。
     #[test]
     fn an_uncapturable_directory_refuses_before_writing_anything() {
         let root = temp_root("oversize-dir");
@@ -1921,15 +1881,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("a.md"), "small").unwrap();
-        // One file over the whole transaction budget.
+        // 一个就超出整个事务预算的文件。
         std::fs::write(dir.join("blob.bin"), vec![0u8; MAX_SNAPSHOT_BYTES + 1]).unwrap();
         let other = root.join("other.md").to_string_lossy().into_owned();
 
         let tx = store.transaction(
             &[
                 Op::write(&other, "would have landed"),
-                // The destination is the oversized tree, so capturing it is what
-                // the transaction has to do — and what refuses.
+                // 目标就是那棵超大的目录树，所以捕获它正是事务必须做的事 ——
+                // 也正是它拒绝的原因。
                 Op::copy_dir(&dir.to_string_lossy(), &src.to_string_lossy()),
             ],
             &json!({ "kind": "plugin" }),
@@ -1943,10 +1903,10 @@ mod tests {
             "the refusal names the limit: {}",
             tx
         );
-        // The code, not the sentence, is what a renderer keys its wording off.
+        // 是 code 而非那个句子，才是渲染层措辞的依据。
         assert_eq!(tx["errorCode"], json!(STORE_SNAPSHOT_TOO_LARGE), "{}", tx);
-        // Nothing was written, so there is nothing to undo and nothing to report
-        // about an undo: this is a refusal, not a partial write.
+        // 什么都没写入，所以既没有东西需要撤销、也没有关于撤销的失败可报告：
+        // 这是一次拒绝，不是一次部分写入。
         assert!(tx.get("restoreError").is_none(), "{}", tx);
         assert!(tx.get("restoreErrors").is_none(), "{}", tx);
         assert!(
@@ -1962,9 +1922,8 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The same guard on a single file: an oversized config is refused exactly
-    /// like an oversized tree, because there is no partial snapshot for a file
-    /// either.
+    /// 同样的守卫作用在单个文件上：超大的配置和超大的目录树一样被精确地拒绝，
+    /// 因为文件同样没有"部分快照"这种东西。
     #[test]
     fn an_oversized_file_refuses_before_writing_anything() {
         let root = temp_root("oversize-file");
@@ -1991,8 +1950,8 @@ mod tests {
         );
         assert_eq!(tx["errorCode"], json!(STORE_SNAPSHOT_TOO_LARGE), "{}", tx);
         assert!(tx.get("restoreErrors").is_none(), "{}", tx);
-        // The message has to say what to do, not only that a number was hit —
-        // a bare byte count leaves the reader with no next move.
+        // 消息必须说明该怎么办，而不只是说撞上了一个数字 —— 一个光秃秃的字节数
+        // 会让读者毫无下一步可走。
         let msg = tx["error"].as_str().unwrap();
         assert!(
             msg.contains("split this asset into smaller writes"),

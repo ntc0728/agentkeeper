@@ -1,21 +1,18 @@
-//! Settings + store bootstrap — store 初始化与设置的读写。
+//! 设置 + store 初始化 —— store 初始化与设置的读写。
 //!
-//! Settings are a single-file JSON write with the same atomic-rename
-//! guarantee as the rest of the store, so they do not go through the
-//! transaction layer.
+//! 设置是一次单文件 JSON 写入，具备与 store 其余部分相同的原子重命名保证，
+//! 所以它们不走事务层。
 //!
-//! ## Semantics
+//! ## 语义
 //!
-//! * Only keys that exist in `defaults` may be written, and only with the same
-//!   `typeof` as the default. A hand-edited `settings.json` cannot smuggle in a
-//!   string where a number belongs (the update manager would then schedule a
-//!   check every `"abc"` minutes).
-//! * The file is written through `<path>.agentkeeper-tmp-<pid>-<ms>-<seq>` then
-//!   renamed, falling back to a direct write if rename fails (Windows: a
-//!   scanner can hold the target briefly). The `seq` half exists because
-//!   `<pid>-<ms>` is not unique when two tasks write the same path inside one
-//!   millisecond — see [`atomic_write`].
-//! * Every save appends one `audit.jsonl` record.
+//! * 只有 `defaults` 中存在的键才可以被写入，而且必须与默认值具有相同的
+//!   `typeof`。一个手工编辑过的 `settings.json` 无法把字符串偷换成数字的位置
+//!   （那样更新管理器就会每 `"abc"` 分钟安排一次检查）。
+//! * 文件通过 `<path>.agentkeeper-tmp-<pid>-<ms>-<seq>` 写入后再重命名，重命名
+//!   失败时退回直接写入（Windows：扫描器可能会短暂占住目标文件）。`seq` 那一半
+//!   的存在是因为当两个任务在同一毫秒内写同一条路径时 `<pid>-<ms>` 并不唯一
+//!   —— 见 [`atomic_write`]。
+//! * 每次保存都会追加一条 `audit.jsonl` 记录。
 
 use serde_json::{json, Map, Value};
 use std::io::Write;
@@ -24,8 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::model::iso_from_millis;
 
-/// `Store.defaultSettings()` — the type of each default also decides which
-/// values may override it.
+/// `Store.defaultSettings()` —— 每个默认值的类型同时决定了哪些值可以覆盖它。
 pub fn defaults() -> Value {
     json!({
         "lang": "auto",
@@ -64,10 +60,9 @@ fn audit_path(root: &str) -> std::path::PathBuf {
     Path::new(root).join("audit.jsonl")
 }
 
-/// `typeof a === typeof b`, with the narrower
-/// meaning of "object": arrays and
-/// objects are both `object`, null is also `object` (which is why a null in the
-/// file never overrides a typed default).
+/// `typeof a === typeof b`，其中"对象"的含义更窄：数组和
+/// 对象都是 `object`，null 也是 `object`（这就是文件里的一个 null 永远不会覆盖
+/// 一个有类型的默认值的原因）。
 fn same_type(a: &Value, b: &Value) -> bool {
     matches!(
         (a, b),
@@ -79,18 +74,16 @@ fn same_type(a: &Value, b: &Value) -> bool {
     )
 }
 
-/// `Store.ensure()` — create the tree the rest of the app assumes exists.
+/// `Store.ensure()` —— 创建出应用其余部分假定存在的目录树。
 ///
-/// Safe to call repeatedly; this runs on every bootstrap and on every settings
-/// write, which is what makes "first launch" work without a separate step.
+/// 可以反复调用；它在每次启动时和每次设置写入时都会运行，这正是"首次启动"无需
+/// 单独一步就能工作的原因。
 ///
-/// A `backups/` left behind by an older build is **removed** here. The backup
-/// tree is not just unused, it is misleading: it is the only place a user would
-/// look for "undo", and nothing in this build can read it back. Keeping it
-/// meant a folder of stale copies that looks like a feature and is not one.
-/// The removal is scoped to `<root>/backups` — one directory this app created
-/// itself, at a path it owns — and is best-effort: a file locked by another
-/// process must not stop the app from booting.
+/// 旧版本遗留的 `backups/` 在这里被**删除**。备份树不只是没用，它还会误导人：
+/// 它是用户唯一会去寻找"撤销"的地方，而这个版本里没有任何东西能把它读回来。
+/// 留着它意味着一个看起来像功能、实际不是的陈旧副本目录。
+/// 删除范围限定在 `<root>/backups` —— 一个这个应用自己创建、且归它所有的目录
+/// —— 并且是尽力而为的：一个被其它进程锁住的文件绝不该阻止应用启动。
 pub fn ensure_store(root: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(root)?;
     let audit = audit_path(root);
@@ -110,16 +103,15 @@ pub fn ensure_store(root: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Drop the retired `<root>/backups` tree, ignoring every failure.
+/// 丢弃退役的 `<root>/backups` 目录树，忽略其中的一切失败。
 ///
-/// Kept separate from `ensure_store`'s body so the "best effort, never boot-
-/// blocking" rule is stated once. A Windows share or an antivirus scanner can
-/// hold one of these files open; refusing to start over a directory nothing
-/// reads would be a worse outcome than leaving it one more run.
+/// 与 `ensure_store` 的函数体分开，好让"尽力而为、绝不阻塞启动"这条规则只陈述
+/// 一次。Windows 共享或杀毒扫描器可能会占用这些文件中的一个；为一个没有任何
+/// 东西会读的目录拒绝启动，比让它再多留一次运行更糟。
 fn remove_legacy_backups(root: &str) {
     let legacy = Path::new(root).join("backups");
-    // `symlink_metadata`, so a link planted at that path is unlinked rather
-    // than followed into whatever it points at.
+    // 用 `symlink_metadata`，这样被放在那条路径上的一个链接会被解除，而不是被
+    // 跟随进它指向的任何地方。
     let Ok(meta) = std::fs::symlink_metadata(&legacy) else {
         return;
     };
@@ -130,7 +122,7 @@ fn remove_legacy_backups(root: &str) {
     }
 }
 
-/// `readSettings()` — defaults, selectively overridden by the file.
+/// `readSettings()` —— 默认值，被文件有选择地覆盖。
 pub fn read(root: &str) -> Value {
     let raw = std::fs::read(settings_path(root))
         .ok()
@@ -155,13 +147,12 @@ pub fn read(root: &str) -> Value {
     Value::Object(out)
 }
 
-/// `saveSettings(patch)` — filtered merge, atomic write, audit.
+/// `saveSettings(patch)` —— 过滤后的合并、原子写入、审计。
 ///
-/// Returns the same `{ ok, settings }` envelope as
-/// so the renderer's
-/// success path is identical. Errors surface as `{ ok: false, error }` instead
-/// of a silent success: a settings change that did not reach disk must not look
-/// like it did.
+/// 返回与
+/// 相同的 `{ ok, settings }` 信封，好让渲染层的
+/// 成功路径完全一致。错误以 `{ ok: false, error }` 的形式浮现，而不是一次悄悄的
+/// 成功：一次没有到达磁盘的设置变更绝不能看起来像是成功了。
 pub fn save(root: &str, patch: &Value) -> Value {
     let current = read(root);
     let d = defaults();
@@ -170,7 +161,7 @@ pub fn save(root: &str, patch: &Value) -> Value {
 
     if let (Value::Object(d), Value::Object(p)) = (&d, patch) {
         for (k, v) in p {
-            // Unknown keys and type mismatches are ignored.
+            // 未知键和类型不匹配会被忽略。
             let Some(dv) = d.get(k) else { continue };
             if !same_type(dv, v) {
                 continue;
@@ -202,16 +193,14 @@ pub fn save(root: &str, patch: &Value) -> Value {
     json!({ "ok": true, "settings": next })
 }
 
-/// `atomicWrite()` — temp file in the same directory, then rename.
+/// `atomicWrite()` —— 同一目录下的临时文件，然后重命名。
 ///
-/// The temp name must be unique **per call**, not per millisecond: two tasks
-/// writing the *same* path inside one tick (a double-clicked save, or the
-/// renderer saving one asset twice) would otherwise get the same name, and
-/// `File::create` truncates — one writer would overwrite the other's temp file
-/// and both would then rename the mixture into place, which is exactly what
-/// temp+rename exists to prevent. The pid keeps a stale temp file traceable to
-/// the process that failed to clean it up, the timestamp makes it readable, and
-/// the counter is what actually makes it unique.
+/// 临时文件名必须**每次调用**唯一，而不是每毫秒唯一：两个任务在同一刻写*同一条*
+/// 路径（一次双击保存，或者渲染层把同一个资产保存两次）否则会拿到同一个名字，
+/// 而 `File::create` 会截断 —— 于是一个写入者会覆盖另一个写入者的临时文件，
+/// 接着两者都会把混合物重命名到位，而这恰恰就是"临时文件 + 重命名"存在的目的
+/// 要防止的事。pid 让一个残留的临时文件能追溯到那个没能清理掉它的进程，时间戳
+/// 让它可读，而计数器才是真正让它唯一的东西。
 fn temp_name(file_name: &str) -> String {
     static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
     let stamp = std::time::SystemTime::now()
@@ -246,30 +235,27 @@ pub fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     match std::fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
         Err(_) => {
-            // Windows: a virus scanner can hold the target open for a moment.
-            // Dropping the temp file and writing in place is still better than
-            // failing the save.
+            // Windows：病毒扫描器可能会短暂占住目标文件。
+            // 丢弃临时文件并就地写入，仍然比让这次保存失败要好。
             //
-            // This is the one non-atomic branch in the function: during it a
-            // concurrent reader can observe a truncated file. It is not made
-            // "safe" by retrying here — a retry loop would only narrow the
-            // window, and calling the result atomic is how the guarantee gets
-            // lost. Two tests hold the two halves of that apart. The same-path
-            // writers in `tests/boundary.rs` assert a reader never observes a
-            // torn body, so if this branch ever fires on that path the suite
-            // fails instead of the corruption shipping silently. And
+            // 这是这个函数里唯一一处非原子的分支：在它执行期间，一个并发读者
+            // 可能看到一个被截断的文件。这里并不通过重试来把它变得"安全" ——
+            // 一个重试循环只会缩小窗口，而把结果称作原子的正是这个保证丢失的
+            // 方式。有两个测试把这件事的两半分开验证。`tests/boundary.rs` 里
+            // 针对同一路径的写入者断言读者绝不会观察到被撕裂的正文，所以如果
+            // 这个分支在那条路径上曾经触发，套件就会失败，而不是让损坏悄悄
+            // 发布出去。而
             // `a_target_held_without_delete_sharing_makes_atomic_write_fall_back_in_place`
-            // holds the target open without `FILE_SHARE_DELETE`, which is what
-            // forces *this* branch, and asserts the save still lands. The second
-            // proves the fallback works; it does not make the window go away,
-            // which is why the first is still the guarantee that matters.
+            // 在没有 `FILE_SHARE_DELETE` 的情况下占住目标文件，而这正是逼出*这个*
+            // 分支的原因，并断言保存仍然落地。第二个测试证明退回路径可行；它并
+            // 不让那个窗口消失，这正是第一个测试仍然是关键保证的原因。
             let _ = std::fs::remove_file(&tmp);
             std::fs::write(path, content)
         }
     }
 }
 
-/// `Store.audit()` — one JSONL record, `ts` first.
+/// `Store.audit()` —— 一条 JSONL 记录，`ts` 在最前。
 pub fn audit(root: &str, rec: &Value) {
     let mut map = Map::new();
     map.insert("ts".to_string(), Value::String(now_iso()));
@@ -292,13 +278,12 @@ pub fn audit(root: &str, rec: &Value) {
     }
 }
 
-/// `Store.baselineDiff()` — what changed since the user last anchored.
+/// `Store.baselineDiff()` —— 自用户上次锚定以来有什么变化。
 ///
-/// Returns the shape the Health card reads: `{ changed, added, gone, hasBaseline }`.
-/// With no `baseline.json` yet (the
-/// normal state until someone clicks "建立基线") it reports `hasBaseline: false`
-/// instead of pretending everything is clean — and, importantly, instead of
-/// failing: the card renders "loading…" forever on `ok: false`.
+/// 返回健康卡片所读取的形状：`{ changed, added, gone, hasBaseline }`。
+/// 还没有 `baseline.json` 时（在有人点击"建立基线"之前的常态）它报告
+/// `hasBaseline: false`，而不是假装一切都是干净的 —— 而且更重要的是，不是
+/// 失败：卡片在 `ok: false` 上会永远渲染"加载中……"。
 pub fn baseline_diff(root: &str, assets: &[(String, String)]) -> Value {
     let base = read_baseline(root);
     let mut changed = Vec::new();
@@ -329,11 +314,10 @@ pub fn baseline_diff(root: &str, assets: &[(String, String)]) -> Value {
     })
 }
 
-/// `Store.setBaseline()` — anchor the current fingerprints.
+/// `Store.setBaseline()` —— 锚定当前的指纹。
 ///
-/// This is a single file in the store root with the same atomic-rename
-/// guarantee as settings.json; it does not touch agent files, so it does not
-/// need the transaction layer.
+/// 这是 store 根目录下的一个文件，具备与 settings.json 相同的原子重命名保证；
+/// 它不触碰 agent 文件，所以不需要事务层。
 pub fn set_baseline(root: &str, assets: &[(String, String)]) -> Value {
     let mut map = Map::new();
     for (id, fp) in assets {
@@ -367,30 +351,28 @@ fn read_baseline(root: &str) -> Map<String, Value> {
 }
 
 /* ------------------------------------------------------------------ */
-/* renderer crash channel (`ak:ui-error`)                              */
+/* 渲染层崩溃通道（`ak:ui-error`）                                       */
 /* ------------------------------------------------------------------ */
 
-/// How many renderer errors are kept. Small on purpose: this file is a
-/// diagnostic tail, not a log archive, and a renderer stuck in an error loop can
-/// emit thousands of lines per minute.
+/// 保留多少条渲染层错误。刻意很小：这个文件是一条诊断尾巴，不是一个日志归档，
+/// 而一个卡在错误循环里的渲染层每分钟能吐出几千行。
 pub const UI_ERROR_LIMIT: usize = 200;
 
-/// Per-field cap for `message` / `stack`. A minified stack with a build hash and
-/// a dozen frames is comfortably under 4 KB; anything longer is a data URL or a
-/// runaway string and would push a single record into the "large file" category.
+/// `message` / `stack` 的逐字段上限。一个带构建哈希和十几个帧的压缩栈稳稳在
+/// 4 KB 以内；更长的就是一个 data URL 或一条失控的字符串，会把单条记录推进
+/// "大文件"那一类。
 pub const UI_ERROR_FIELD_MAX: usize = 4096;
 
-/// Diagnostics live next to `audit.jsonl` in the store root, so "open the store
-/// folder" surfaces them without a second path convention.
+/// 诊断信息与 `audit.jsonl` 并排放在 store 根目录，所以"打开 store 文件夹"
+/// 就能看到它们，而不需要第二套路径约定。
 pub const UI_ERROR_FILE: &str = "ui-errors.jsonl";
 
-/// Cut a string to at most `max` bytes **on a UTF-8 character boundary**.
+/// 把一个字符串截断到最多 `max` 个字节，且**在 UTF-8 字符边界上**。
 ///
-/// `s[..n]` panics when `n` splits a character, and `&s.as_bytes()[..n]` returns
-/// bytes that `from_utf8` then rejects — a Chinese stack message truncated at
-/// an arbitrary byte offset is exactly that case (3 bytes per character, so 4096
-/// is not a boundary). Walking back to the nearest boundary is the only
-/// truncation that keeps the line parseable as JSON *and* readable as text.
+/// `s[..n]` 在 `n` 切断一个字符时会 panic，而 `&s.as_bytes()[..n]` 返回的字节
+/// 随后会被 `from_utf8` 拒绝 —— 一条在任意字节偏移处被截断的中文栈消息正是这种
+/// 情形（每字符 3 字节，所以 4096 不是边界）。回退到最近的边界是唯一一种既让
+/// 这一行仍能按 JSON 解析、又仍然可读的截断。
 fn cut_utf8(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
@@ -402,9 +384,8 @@ fn cut_utf8(s: &str, max: usize) -> String {
     s[..end].to_string()
 }
 
-/// Build the record that gets appended: the five documented fields (empty
-/// string when absent, so the renderer never has to test for `null`) plus every
-/// unknown key, untouched.
+/// 构造被追加的那条记录：五个有文档的字段（缺失时是空字符串，好让渲染层永远
+/// 不必去测试 `null`），再加上每一个未知键，原样保留。
 fn ui_error_record(payload: &Value) -> Value {
     let mut out = Map::new();
     let text = |key: &str| {
@@ -425,8 +406,8 @@ fn ui_error_record(payload: &Value) -> Value {
     );
     out.insert("view".into(), Value::String(text("view")));
     out.insert("at".into(), Value::String(text("at")));
-    // Unknown keys survive verbatim: the renderer will grow this payload and the
-    // backend must not have to ship in lockstep to keep the extra fields.
+    // 未知键逐字存活：渲染层会扩展这个负载，后端不必同步发版才能保留那些
+    // 额外字段。
     if let Value::Object(map) = payload {
         for (k, v) in map {
             if !out.contains_key(k) {
@@ -437,70 +418,62 @@ fn ui_error_record(payload: &Value) -> Value {
     Value::Object(out)
 }
 
-/// `ak:ui-error` — append one renderer error, keeping at most
-/// [`UI_ERROR_LIMIT`] lines.
+/// `ak:ui-error` —— 追加一条渲染层错误，最多保留
+/// [`UI_ERROR_LIMIT`] 行。
 ///
-/// Read-trim-write rather than a rotating log: the file is bounded, so the whole
-/// thing fits in memory, and the alternative (append + periodic rotate) leaves a
-/// second file whose lifecycle nothing owns.
+/// 采用"读取-裁剪-写入"而不是轮转日志：这个文件是有界的，所以整体都能放进内存，
+/// 而另一种做法（追加 + 定期轮转）会留下一个其生命周期无人负责的第二文件。
 ///
-/// Never panics and never returns `Err` to the caller — a renderer reporting a
-/// crash must not itself crash the app. A failed write is reported as
-/// `{"ok": false, "error": ...}` and echoed to stderr, which is where a
-/// packaged build's console shows it.
+/// 绝不 panic，也绝不向调用方返回 `Err` —— 一个报告崩溃的渲染层绝不该自己把
+/// 应用搞崩。写入失败会以 `{"ok": false, "error": ...}` 的形式报告，并回显到
+/// stderr，那正是打包构建的控制台会显示的地方。
 ///
-/// **Concurrent reports are safe.** The read-trim-write runs under
-/// [`UI_ERROR_LOCK`], so two renderer errors arriving together are serialised
-/// and both lines survive; the last writer can no longer save a body it read
-/// before the other one wrote. Cheap to guarantee here (one small file, writes
-/// already bounded by [`UI_ERROR_LIMIT`]) and expensive to live without: the
-/// line lost to a race is the one explaining the crash in front of the user.
+/// **并发报告是安全的。** 读取-裁剪-写入在 [`UI_ERROR_LOCK`] 之下运行，所以
+/// 同时抵达的两个渲染层错误会被串行化、两条行都存活；最后写入者再也无法保存它
+/// 在另一个写入者写入之前读到的正文。在这里保证这一点代价很低（一个小文件，写入
+/// 本身已被 [`UI_ERROR_LIMIT`] 限制），而不保证的代价很高：因竞态丢掉的那一行
+/// 恰恰是解释用户面前那次崩溃的那一行。
 pub fn ui_error(root: &str, payload: &Value) -> Value {
     match append_ui_error(root, payload) {
         Ok(count) => json!({ "ok": true, "count": count }),
         Err(e) => {
-            // stderr as well: the renderer's toast is the only other copy, and
-            // it disappears with the page that reported the error.
+            // 同时也写 stderr：渲染层的 toast 是唯一的另一份拷贝，而它会随着
+            // 报告错误的那个页面一起消失。
             eprintln!("[ui-error] could not append to {}: {}", UI_ERROR_FILE, e);
             json!({ "ok": false, "error": e.to_string() })
         }
     }
 }
 
-/// Serialises the read-trim-write in [`append_ui_error`].
+/// 串行化 [`append_ui_error`] 里的读取-裁剪-写入。
 ///
-/// Why a lock and not "append and let the OS interleave": every report rewrites
-/// the whole bounded file, so two reports that overlap both read the same old
-/// body and the second write silently drops the first line. Appending would fix
-/// that but loses the cap, which is the reason the file is a rewrite in the
-/// first place.
+/// 为什么用一把锁而不是"追加、任由操作系统交错"：每一条报告都会重写整个有界的
+/// 文件，所以两份重叠的报告会读到同一份旧正文，第二次写入就会悄悄丢掉第一行。
+/// 追加能修好这一点，但会丢掉上限，而上限正是这个文件之所以是重写的原因。
 ///
-/// One process-wide lock, not a per-root map: there is exactly one store root
-/// per process, the critical section is one small file, and a map would need a
-/// lifecycle (and a cleanup rule) of its own for no gain.
+/// 一把进程级的锁，而不是按 root 的映射：每个进程恰好只有一个 store 根目录，
+/// 临界区就是一个小文件，而一个映射需要自己的生命周期（以及一条清理规则）却没有
+/// 任何收益。
 ///
-/// `unwrap_or_else(|e| e.into_inner())` rather than `unwrap`: a panic in some
-/// other thread must not poison this lock permanently — the crash channel going
-/// silent after the first panic is precisely the failure it exists to report.
+/// 用 `unwrap_or_else(|e| e.into_inner())` 而不是 `unwrap`：其它线程里的一次 panic
+/// 绝不该永久毒化这把锁 —— 崩溃通道在第一次 panic 之后就沉默，恰恰就是它存在的
+/// 目的所要报告的那种失败。
 static UI_ERROR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn append_ui_error(root: &str, payload: &Value) -> std::io::Result<usize> {
     let dir = Path::new(root);
-    // A missing store root is created here rather than assumed: this command can
-    // be the first thing a crashed renderer calls, before `bootstrap` ran.
+    // 缺失的 store 根目录在这里被创建而不是被假定存在：这条命令可能就是一个崩溃
+    // 的渲染层在 `bootstrap` 之前调用的第一件事。
     if !dir.as_os_str().is_empty() {
         std::fs::create_dir_all(dir)?;
     }
     let path = dir.join(UI_ERROR_FILE);
 
-    // The guard is taken here, around the read *and* the write, because the lock
-    // has to cover both halves of the read-modify-write: guarding only the write
-    // still lets a second reporter read the pre-append body. Locking at this
-    // single entry point (rather than in `ui_error`) also covers any future
-    // caller that appends directly, and keeps the invariant next to the code
-    // that breaks it. Not `try_lock`: skipping the write under contention trades
-    // a lost line for a lost report, which is worse — a refused report is not
-    // retried by the renderer.
+    // 守卫在这里获取，围着读取*和*写入，因为这把锁必须覆盖读-改-写的两半：只守
+    // 住写入仍然会让第二个报告者读到追加之前的正文。在这个单一入口处加锁
+    // （而不是在 `ui_error` 里）还覆盖了将来任何直接追加的调用者，并把这条不变量
+    // 放在会破坏它的代码旁边。不用 `try_lock`：在争用下跳过写入等于用丢掉一行
+    // 换丢掉一份报告，更糟 —— 被拒绝的报告渲染层是不会重试的。
     let _guard = UI_ERROR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
@@ -510,12 +483,11 @@ fn append_ui_error(root: &str, payload: &Value) -> std::io::Result<usize> {
         .map(|l| l.to_string())
         .collect();
 
-    // One line, one object — `to_string`, not pretty: a pretty record would
-    // occupy several lines and break both the cap and any line-based reader.
+    // 一行一个对象 —— 用 `to_string`，不要 pretty：一条 pretty 的记录会占掉好几
+    // 行，同时破坏上限和任何基于行的读取器。
     lines.push(ui_error_record(payload).to_string());
 
-    // Drop the oldest, never the newest: the most recent error is the one that
-    // explains the crash in front of the user.
+    // 丢掉最旧的，绝不丢最新的：最近的那次错误才是解释用户面前那次崩溃的。
     if lines.len() > UI_ERROR_LIMIT {
         let excess = lines.len() - UI_ERROR_LIMIT;
         lines.drain(0..excess);
@@ -523,16 +495,16 @@ fn append_ui_error(root: &str, payload: &Value) -> std::io::Result<usize> {
 
     let mut body = lines.join("\n");
     body.push('\n');
-    // Same atomic-rename guarantee as every other store file: a half-written
-    // diagnostics file is worthless exactly when it is needed.
+    // 与 store 里其它每个文件相同的原子重命名保证：一个半写的诊断文件恰恰在
+    // 最需要它的时候毫无价值。
     atomic_write(&path, &body)?;
     Ok(lines.len())
 }
 
-/// `Store.readAudit()` — newest first, optionally filtered.
+/// `Store.readAudit()` —— 最新的在前，可选过滤。
 ///
-/// Returns a **plain array**, not an envelope: `ak:audit` hands this straight
-/// to the renderer, which does `audit.filter(...)`.
+/// 返回一个**普通数组**，而不是信封：`ak:audit` 把它直接交给渲染层，而渲染层
+/// 会做 `audit.filter(...)`。
 pub fn read_audit(
     root: &str,
     limit: usize,
@@ -582,14 +554,12 @@ mod tests {
         dir.to_string_lossy().into_owned()
     }
 
-    /// Two writes of the same file must never share a temp name, even when they
-    /// begin inside the same millisecond: the pid and the clock cannot tell them
-    /// apart, so without the sequence counter the second `File::create`
-    /// truncates the first writer's temp file and both rename the mixture.
+    /// 对同一个文件的两次写入绝不能共用一个临时名字，即使它们在同一毫秒内
+    /// 开始：pid 和时钟无法区分它们，所以没有那个序列计数器时第二次
+    /// `File::create` 会截断第一个写入者的临时文件，两者随后重命名那个混合物。
     ///
-    /// Fifty calls, not two: a single pair can straddle a millisecond boundary by
-    /// luck, which is exactly how this bug would hide. Fifty names inside a few
-    /// microseconds cannot.
+    /// 五十次调用而不是两次：单独一对可能碰巧跨过毫秒边界，而这正是这个 bug
+    /// 会藏身的方式。五十个名字落在几微秒内则不可能。
     #[test]
     fn temp_file_names_are_unique_per_call() {
         let mut names = std::collections::HashSet::new();
@@ -727,7 +697,7 @@ mod tests {
             ("b".to_string(), "fp2".to_string()),
         ];
 
-        // No baseline yet: hasBaseline false, everything looks "added".
+        // 还没有基线：hasBaseline 为 false，一切看起来都像是"新增"。
         let d = baseline_diff(&root, &first);
         assert_eq!(d["hasBaseline"], json!(false));
         assert_eq!(d["added"].as_array().unwrap().len(), 2);
@@ -758,7 +728,7 @@ mod tests {
         atomic_write(&p, "one").unwrap();
         atomic_write(&p, "two").unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "two");
-        // No temp files left behind.
+        // 没有临时文件残留。
         let leftovers: Vec<_> = std::fs::read_dir(&root)
             .unwrap()
             .filter_map(|e| e.ok())
@@ -784,11 +754,10 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A profile written by an older build still has a `backups/` directory full
-    /// of stale copies. It is removed on the next `ensure_store`: nothing in this
-    /// build can read it back, and a folder that looks like "undo" but does
-    /// nothing is worse than no folder. The removal is scoped to `<root>/backups`
-    /// — the app's own path — never the agent directories the copies came from.
+    /// 一个由旧版本写出的配置档仍然有一个装满陈旧副本的 `backups/` 目录。它会在
+    /// 下一次 `ensure_store` 时被删除：这个版本里没有任何东西能把它读回来，而一个
+    /// 看起来像"撤销"却什么都不做的目录比没有目录更糟。删除范围限定在
+    /// `<root>/backups` —— 应用自己的路径 —— 绝不是那些副本来源的 agent 目录。
     #[test]
     fn ensure_store_removes_a_legacy_backups_directory() {
         let root = temp_root("legacy-backups");
@@ -801,14 +770,13 @@ mod tests {
             !Path::new(&root).join("backups").exists(),
             "the retired backup tree must be gone after ensure_store"
         );
-        // Everything the app actually reads is still there.
+        // 应用真正读取的一切仍然都在。
         assert!(audit_path(&root).is_file());
         assert!(meta_path(&root).is_file());
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A second launch must not recreate it, and must not treat its absence as
-    /// an error.
+    /// 第二次启动绝不能把它重建出来，也绝不能把它的缺失当成一个错误。
     #[test]
     fn ensure_store_is_idempotent_after_the_backup_tree_is_gone() {
         let root = temp_root("legacy-backups-twice");

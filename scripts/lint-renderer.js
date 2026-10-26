@@ -1,15 +1,15 @@
 'use strict';
 /**
- * Lightweight source lint for the renderer bundle.
+ * 渲染进程产物包的轻量源码 lint。
  *
- * The bundler is zero-dependency, so there is no eslint. These checks target
- * the mistakes that actually bit us during the i18n refactor:
+ * 打包器是零依赖的，所以没有 eslint。这些检查瞄准的是 i18n 重构期间
+ * 真正咬到我们的那些错误：
  *
- *   1. a local identifier shadowing a module-scope one (`const t` twice in a
- *      module throws at load time and blanks the whole window)
- *   2. hardcoded UI strings that should have gone through t()
- *   3. inline style attributes, which our strict CSP refuses
- *   4. unbalanced requires / missing files
+ *   1. 局部标识符遮蔽了模块作用域里的同名标识符（同一个模块里写两次
+ *      `const t` 会在加载时抛错，整个窗口一片空白）
+ *   2. 本该走 t() 的硬编码 UI 字符串
+ *   3. 内联 style 属性，我们的严格 CSP 拒绝它们
+ *   4. require 不配对 / 文件缺失
  *
  *   node scripts/lint-renderer.js
  */
@@ -24,35 +24,35 @@ const problems = [];
 
 function rel(p) { return path.relative(ROOT, p); }
 
-/* ---- 1. duplicate top-level + shadowed identifiers ---- */
+/* ---- 1. 顶层重复声明 + 被遮蔽的标识符 ---- */
 
 /**
- * Detect identifier clashes that blank the whole window.
+ * 找出那些会让整个窗口空白的标识符冲突。
  *
- * A regex cannot model JS scoping — `const t = ...` at module scope plus
- * `(t) => ...` as an arrow parameter is legal in isolation but throws
- * "Identifier 't' has already been declared" when both land in one script.
- * `node --check` does not catch it either (it treats the file as a script and
- * only warns once in sloppy mode), so we compile the file the way the browser
- * will: wrapped in a function, with `const` redeclarations promoted to errors.
+ * 正则无法模拟 JS 的作用域——模块作用域的 `const t = ...` 加上箭头函数参数
+ * `(t) => ...`，各自单看都合法，但当两者落进同一个脚本里就会抛
+ * "Identifier 't' has already been declared"。`node --check` 也抓不到它
+ * （它把这个文件当脚本处理，而且只在 sloppy 模式下警告一次），所以我们
+ * 按浏览器的方式编译这个文件：包进一个函数里，并把 `const` 的重复声明
+ * 提升为错误。
  */
 function checkScope(src, file) {
   const names = new Map();
-  // 1. module-scope declarations (column 0)
+  // 1. 模块作用域的声明（第 0 列）
   for (const m of src.matchAll(/^(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)/gm)) {
     names.set(m[1], (names.get(m[1]) || 0) + 1);
   }
-  // 2. arrow-function parameters and catch bindings — these live in their own
-  //    scope, so only a *duplicate within one function body* is a problem.
-  //    We conservatively flag a parameter that repeats in the same line.
+  // 2. 箭头函数参数与 catch 绑定——它们活在自己的作用域里，
+  //    所以只有*同一个函数体内*的重复才是问题。
+  //    我们保守地把同一行里重复出现的参数标记出来。
   const dupTop = [...names.entries()].filter(([, n]) => n > 1);
   for (const [name] of dupTop) {
     problems.push(`${rel(file)}  duplicate top-level \`${name}\` — throws at load`);
   }
 
-  // 3. the real test: compile the file the way the browser does — as a strict
-  //    module script. In sloppy mode `const t` + `(t) => …` does NOT throw,
-  //    which is exactly why the bug survived `node --check`.
+  // 3. 真正的检验：按浏览器的方式编译这个文件——作为严格的
+  //    模块脚本。在 sloppy 模式下 `const t` + `(t) => …` 并不会抛错，
+  //    这正是那个 bug 能躲过 `node --check` 的原因。
   try {
     // eslint-disable-next-line no-new-func
     new Function('"use strict";\n' + src);
@@ -65,19 +65,19 @@ function checkScope(src, file) {
   return true;
 }
 
-/* ---- 2. hardcoded UI strings ---- */
+/* ---- 2. 硬编码的 UI 字符串 ---- */
 
 const UI_STRING_PATTERNS = [
-  // el('...', {...}, 'Some English text') — a literal child
+  // el('...', {...}, 'Some English text') — 字面量子节点
   /\bel\((?:[^()]|\([^()]*\))*?,\s*'([A-Z][a-z]+ [a-z][^']{4,60})'/g,
   /\bel\((?:[^()]|\([^()]*\))*?,\s*"([A-Z][a-z]+ [a-z][^"]{4,60})"/g,
-  // Three shapes that must be matched: a trailing label argument, a
-  // textContent/innerHTML assignment, and a label inside an options array.
-  //   a) a trailing label argument:  }, 'Some English text')
+  // 必须匹配的三种形状：末尾的 label 参数、一次
+  // textContent/innerHTML 赋值，以及 options 数组里的 label。
+  //   a) 末尾的 label 参数：  }, 'Some English text')
   /\},\s*'([A-Z][a-z]+ [a-z][^']{3,60})'\s*\)/g,
-  //   b) a textContent/innerHTML assignment:  x.textContent = 'Some text'
+  //   b) 一次 textContent/innerHTML 赋值：  x.textContent = 'Some text'
   /\.(?:textContent|innerHTML)\s*=\s*'(?:[a-z]{2,6}:\s*)?([A-Z][a-z]+ [a-z][^']{3,60})'/g,
-  //   c) a label in an options array:  [['value', 'Some English label'], …]
+  //   c) options 数组里的 label：  [['value', 'Some English label'], …]
   /\[\s*\[\s*'[a-z-]+',\s*'([A-Z][a-z]+ [a-z][^']{2,60})'\s*\]/g
 ];
 
@@ -85,13 +85,13 @@ function findHardcoded(src, file) {
   const lines = src.split('\n');
   let hits = 0;
   lines.forEach((line, i) => {
-    // Skip comments and the i18n dictionary itself.
+    // 跳过注释和 i18n 词典本身。
     if (/^\s*(\/\/|\*|\/\*)/.test(line)) return;
     for (const re of UI_STRING_PATTERNS) {
       re.lastIndex = 0;
       let m;
       while ((m = re.exec(line))) {
-        // A call to t() is fine; a bare literal is not.
+        // 调用 t() 是可以的；裸字面量不行。
         const before = line.slice(Math.max(0, m.index - 3), m.index);
         if (/t\(\s*$/.test(before)) continue;
         hits++;
@@ -105,7 +105,7 @@ function findHardcoded(src, file) {
   return hits;
 }
 
-/* ---- 3. inline style attributes (CSP) ---- */
+/* ---- 3. 内联 style 属性（CSP） ---- */
 
 function findInlineStyles(src, file) {
   const n = (src.match(/\bstyle:\s*['"]/g) || []).length;
@@ -116,7 +116,7 @@ function findInlineStyles(src, file) {
   return n;
 }
 
-/* ---- 4. unresolved requires ---- */
+/* ---- 4. 解析不到的 require ---- */
 
 function checkRequires(src, file) {
   for (const m of src.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)) {
@@ -128,7 +128,7 @@ function checkRequires(src, file) {
   }
 }
 
-/* ---- 5. i18n dictionary parity ---- */
+/* ---- 5. i18n 词典对齐 ---- */
 
 function checkI18nParity() {
   const i18nPath = path.join(SRC, 'renderer', 'i18n.js');
@@ -150,10 +150,10 @@ function checkI18nParity() {
   if (extra.length) problems.push(`i18n.js: zh has ${extra.length} extra key(s): ${extra.slice(0, 6).join(', ')}`);
   if (!missing.length && !extra.length) console.log(`  i18n parity OK (${en.size} keys in both languages)`);
 
-  // Parity alone is not enough: a key can be defined in both languages and
-  // still be called with a name that exists in neither (typo, or a key that
-  // was renamed in app.js only). t() returns the key itself in that case, so
-  // the UI silently shows "dashboard.enabledCount" to the user.
+  // 只有键对齐还不够：一个键可以在两种语言里都定义了，
+  // 却仍然被用成一个两种语言里都不存在的名字来调用（拼写错误，或者
+  // 只在 app.js 里改了名）。这种情况下 t() 会把键本身返回，于是
+  // UI 就无声无息地把 "dashboard.enabledCount" 显示给用户。
   const appPath = path.join(SRC, 'renderer', 'app.js');
   if (fs.existsSync(appPath)) {
     const app = fs.readFileSync(appPath, 'utf8');
@@ -170,20 +170,19 @@ function checkI18nParity() {
   }
 }
 
-/* ---- 5b. i18n: keys nobody references (dead weight) ---- */
+/* ---- 5b. i18n：没人引用的键（死重） ---- */
 
 /**
- * The forward check above ("called but not defined") has a mirror image:
- * keys that are defined in both languages and used by nobody. They are not
- * harmless — every one of them is a translation somebody wrote for a UI that
- * no longer exists, and the dictionary only ever grows, so the file slowly
- * becomes a second, invisible product surface.
+ * 上面那个正向检查（"调用了但没定义"）有一个镜像：
+ * 两种语言里都定义了、却没人用的键。它们并不是无害的——每一个都是
+ * 有人为一个已经不存在的 UI 写的翻译，而词典只增不减，于是这个文件
+ * 慢慢变成了第二个看不见的产品界面。
  *
- * Coverage is static on purpose: a key counts as used when it appears as a
- * string literal anywhere in app.js / index.html (that covers `titleKey`,
- * `data-i18n` and comparisons) or when it sits under a dynamic root such as
- * `t('assets.' + kind)`. That over-approximates usage, which is the safe
- * direction for a linter — it will never demand the deletion of a live key.
+ * 覆盖率刻意做成静态的：一个键只要以字符串字面量的形式出现在 app.js /
+ * index.html 的任何地方（这覆盖了 `titleKey`、`data-i18n` 以及各种比较），
+ * 或者它位于某个动态根之下（例如 `t('assets.' + kind)`），就算被用到了。
+ * 这种估算是对用法的过度近似，对一个 linter 来说是安全的那个方向——
+ * 它绝不会要求删掉一个还活着的键。
  */
 function checkI18nUnused() {
   const i18nPath = path.join(SRC, 'renderer', 'i18n.js');
@@ -212,14 +211,13 @@ function checkI18nUnused() {
   }
 }
 
-/* ---- 6. cross-script global collisions ---- */
+/* ---- 6. 跨脚本的全局冲突 ---- */
 
 /**
- * Classic <script> tags share ONE global lexical scope. A top-level `const t`
- * in app.js and a top-level `function t` in i18n.js therefore throw
- * "Identifier 't' has already been declared" at load, and the window goes
- * blank with no other symptom. node --check does not catch this because it
- * compiles each file in isolation.
+ * 传统的 <script> 标签共享同一个全局词法作用域。所以 app.js 里顶层的
+ * `const t` 与 i18n.js 里顶层的 `function t` 会在加载时抛
+ * "Identifier 't' has already been declared"，窗口一片空白，且没有任何其他
+ * 症状。node --check 抓不到这一点，因为它每个文件都是单独编译的。
  */
 function checkGlobalCollisions(files) {
   const owner = new Map();
@@ -246,7 +244,7 @@ function checkGlobalCollisions(files) {
   return n;
 }
 
-/* ---- 7. untranslated literals ---- */
+/* ---- 7. 未翻译的字面量 ---- */
 
 const CODE_ATTRS = new Set([
   'class', 'className', 'style', 'title', 'value', 'href', 'src', 'type',
@@ -279,19 +277,19 @@ function findUntranslated(src, file) {
   return hits.length;
 }
 
-/* ---- 7b. prose inside template literals ---- */
+/* ---- 7b. 模板字面量里的散文 ---- */
 
 /**
- * Object keys get filtered above; this catches the other half of the problem
- * — English prose interpolated into template literals, e.g.
- *   el('h3', {}, `${n} changes waiting`)      → missed by the attr rule
- *   toast(`Applied to ${n} locations`)        → missed by the attr rule
- * We only flag literals that contain a space (prose) and a lowercase letter
- * (i.e. not an identifier, path, or CSS value).
+ * 对象键在上面已经过滤掉了；这里抓的是问题的另一半
+ * ——被插值进模板字面量的英文散文，例如：
+ *   el('h3', {}, `${n} changes waiting`)      → 属性规则抓不到
+ *   toast(`Applied to ${n} locations`)        → 属性规则抓不到
+ * 我们只标记那些既含空格（散文）又含小写字母的字面量
+ * （也就是排除掉标识符、路径或 CSS 值）。
  */
 function findTemplateProse(src, file) {
   const hits = [];
-  // Strip line comments first: documentation about the CSP string is not UI.
+  // 先剥掉行注释：关于 CSP 字符串的说明不是 UI。
   const lines = src.split('\n');
   const re = /`([^`]*)`/g;
   let m;
@@ -300,20 +298,20 @@ function findTemplateProse(src, file) {
     const atLineStart = lines[startLine].trim().startsWith('//');
     if (atLineStart) continue;
     const body = m[1];
-    // Only the literal text chunks, not the ${…} expressions.
+    // 只看字面量文本块，不看 ${…} 表达式。
     for (const chunk of body.split(/\$\{[^}]*\}/)) {
-      // A nested template whose own literal is already translated.
+      // 嵌套模板，而它自己的字面量已经翻译过了。
       if (/t\('[\w.]+'\)\s*$/.test(chunk)) continue;
       const words = chunk.trim();
       if (words.length < 8) continue;
       if (!/[a-z]{3,}/.test(words)) continue;          // needs real words
       if (!/\s/.test(words)) continue;                  // prose has spaces
       if (/^[\w./\\:@' -]+$/.test(words) && !/^[A-Z]/.test(words)) continue;
-      // Known non-UI fragments: CSP directives, file paths, MIME-ish tokens.
+      // 已知的非 UI 片段：CSP 指令、文件路径、类似 MIME 的标记。
       if (/style-src|script-src|default-src|Content-Security/i.test(words)) continue;
-      // HTML markup, not prose — only the escaped text inside matters.
+      // HTML 标记，不是散文——只有里面被转义的文字才算数。
       if (/^<\/?[a-z][\w-]*[\s>]/i.test(words)) continue;
-      // The deliberate English fallback for when i18n.js itself failed to load.
+      // 刻意保留的英文兜底文案，用于 i18n.js 自己加载失败的情况。
       if (/^Startup failed:/i.test(words)) continue;
       const line = src.slice(0, m.index).split('\n').length;
       hits.push({ line, val: words.slice(0, 50) });
@@ -326,7 +324,7 @@ function findTemplateProse(src, file) {
   return hits.length;
 }
 
-/* ---- run ---- */
+/* ---- 运行 ---- */
 
 console.log('linting renderer…\n');
 const targets = [
@@ -339,10 +337,9 @@ let shadowCount = 0, hardCount = 0, styleCount = 0;
 for (const f of targets) {
   if (!fs.existsSync(f)) { problems.push(`${rel(f)} missing`); continue; }
   const src = fs.readFileSync(f, 'utf8');
-  // Parse before linting. Every rule below reads the source as *text*, so a file
-  // that does not parse would sail through every text rule while the renderer
-  // fails to evaluate at runtime. This check costs milliseconds and turns that
-  // into a build failure.
+  // 先解析再 lint。下面每条规则都是把源码当*文本*读的，所以一个
+  // 解析不过的文件会一路畅通地穿过所有文本规则，而渲染进程在运行时
+  // 却求值失败。这项检查只花几毫秒，却能把这种情况变成一次构建失败。
   try {
     new vm.Script(src, { filename: f });
   } catch (e) {
@@ -350,8 +347,8 @@ for (const f of targets) {
     continue;
   }
   shadowCount += checkScope(src, f) ? 0 : 1;
-  // Every target is a renderer file. The guard keeps a non-renderer target from
-  // silently inheriting the untranslated-string rule, which is UI-only.
+  // 每个目标都是渲染进程文件。这个守卫防止非渲染进程目标
+  // 悄无声息地继承「未翻译字符串」这条只适用于 UI 的规则。
   hardCount += f.includes(`${path.sep}renderer${path.sep}`) ? findUntranslated(src, f) : 0;
   if (f.endsWith("app.js")) hardCount += findTemplateProse(src, f);
   styleCount += findInlineStyles(src, f);

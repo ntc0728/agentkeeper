@@ -1,26 +1,25 @@
 /**
- * Regenerate the parity snapshots in `tauri-shell/core/src/adapters.rs`.
+ * 重新生成 `tauri-shell/core/src/adapters.rs` 里的对齐快照。
  *
- * WHAT IT DOES
- *   Loads the declared adapter table (scripts/adapter-table.js) with a fake user
- *   home, evaluates every path template, and freezes both the table
- *   and the resolved paths into two Rust string constants (`DECLARED_TABLE_JSON`,
- *   `RESOLVED_PATHS_JSON`) at the end of that file. The Rust tests in `mod tests`
- *   then compare AGENTS / resolve_home / join_native against the frozen JS
- *   output.
+ * 它做什么
+ *   用一个假的用户主目录加载声明的适配器表（scripts/adapter-table.js），
+ *   求值每一条路径模板，然后把表本身和解析出来的路径一起冻结成该文件末尾的
+ *   两个 Rust 字符串常量（`DECLARED_TABLE_JSON`、
+ *   `RESOLVED_PATHS_JSON`）。`mod tests` 里的 Rust 测试随后拿
+ *   AGENTS / resolve_home / join_native 与这份冻结下来的 JS
+ *   输出逐一比对。
  *
- * WHY IT EXISTS
- *   Asset parity ("both builds return the same assets") cannot see an adapter
- *   whose home directory does not exist on this machine: both builds agree
- *   about nothing. A snapshot taken from the declared source closes that blind spot —
- *   and it must be *generated*, never hand-copied, because a hand-copied
- *   snapshot silently freezes whatever the copier believed the source said.
+ * 它为什么存在
+ *   资产对齐（两个构建返回同样的资产）看不见那些主目录在本机上并不存在的
+ *   适配器：两个构建什么都对不上，什么都没说到。从声明源头取来的快照正好补上
+ *   这个盲区——而且它必须是*生成*出来的，绝不能手抄，因为手抄的
+ *   快照会悄无声息地冻结下抄写者以为的源头内容。
  *
- * WHEN IT MUST BE RE-RUN
- *   Any change to `scripts/adapter-table.js` — an added/removed/renamed agent, a
- *   changed `home` template, or any edited skills/rules/memory/mcp/plugins
- *   list. If you add an agent, also add it to `AGENTS` in adapters.rs; the
- *   generated tests will fail until you do, which is the point.
+ * 什么时候必须重跑
+ *   `scripts/adapter-table.js` 的任何改动——新增/删除/重命名 agent、
+ *   改过 `home` 模板，或者 skills/rules/memory/mcp/plugins
+ *   列表被编辑过。如果你新增一个 agent，记得同时把它加到 adapters.rs 的
+ *   `AGENTS` 里；生成的测试会在你这么做之前一直失败，而这正是本意。
  *
  *   node scripts/gen-adapters-snapshots.js      (or: npm run tauri:adapters)
  */
@@ -39,9 +38,8 @@ if (!fs.existsSync(ADAPTERS_RS)) {
   process.exit(1);
 }
 
-os.homedir = () => FAKE_HOME; // replaces the real home for this process only
-// Adapter table + tilde expansion come from the single copy in
-// scripts/adapter-table.js.
+os.homedir = () => FAKE_HOME; // 只在这个进程里替换真实主目录
+// 适配器表和波浪号展开都取自 scripts/adapter-table.js 里的那一份唯一副本。
 const { AGENTS, SHARED_SKILLS_DIR, resolveHome } = require(path.join(REPO, 'scripts/adapter-table'));
 
 const agents = [];
@@ -53,13 +51,13 @@ for (const a of AGENTS) {
   const put = (bag, group, list, base) => {
     for (const rel of list || []) bag[group + ':' + rel] = path.resolve(base, rel);
   };
-  // globals resolve against the agent home.
+  // globals 相对 agent 主目录解析。
   put(globalPaths, 'globals.skills', a.globals.skills, home);
   put(globalPaths, 'globals.plugins', a.globals.plugins, home);
   put(globalPaths, 'globals.rules', a.globals.rules, home);
   put(globalPaths, 'globals.memory', a.globals.memory, home);
   put(globalPaths, 'globals.mcp', a.globals.mcp, home);
-  // projects resolve against the project dir.
+  // projects 相对项目目录解析。
   put(projectPaths, 'projects.skills', a.projects.skills, FAKE_PROJECT);
   put(projectPaths, 'projects.rules', a.projects.rules, FAKE_PROJECT);
   put(projectPaths, 'projects.memory', a.projects.memory, FAKE_PROJECT);
@@ -101,8 +99,8 @@ const snapshot = {
   agents
 };
 
-// Pretty-print the table so a future diff is readable, but keep the resolved
-// paths one agent per line.
+// 把表漂亮地打印出来，好让以后的 diff 读得懂，但解析后的路径仍保持
+// 一个 agent 一行。
 const tableJson = JSON.stringify(snapshot, null, 1);
 const resolvedJson =
   '{\n' +
@@ -114,36 +112,35 @@ const resolvedJson =
 const rust = String.raw`
 #[cfg(test)]
 mod tests {
-    //! Snapshot tests against the declared adapter table.
+    //! 针对声明式适配器表的快照测试。
     //!
-    //! Everything here is generated: run
+    //! 这里的一切都是生成的：请在
     //!
     //!     npm run tauri:adapters      (scripts/gen-adapters-snapshots.js)
     //!
-    //! after any change to scripts/adapter-table.js. The two JSON constants below
-    //! are that script's output — the adapter table evaluated with os.homedir()
-    //! set to FAKE_HOME, plus every path template resolved against it. Never
-    //! edit them by hand: a hand-edited snapshot asserts whatever the editor
-    //! believed, not what the table says.
+    //! 之后、即每次改动 scripts/adapter-table.js 之后重跑。下面那两个 JSON
+    //! 常量就是那个脚本的输出——把 os.homedir() 设成 FAKE_HOME 求值后的
+    //! 适配器表，加上每一条相对它解析出来的路径模板。绝不要
+    //! 手工编辑它们：手工改过的快照断言的是编辑者以为的内容，
+    //! 而不是表里真正写的内容。
     use super::*;
     use crate::model::join_native;
     use serde_json::Value;
     use std::path::Path;
 
-    /// Fake user home / project root the snapshot below was taken with.
-    /// Nothing here touches the real machine — every assertion compares
-    /// strings produced by the two adapter tables for the same fake input.
+    /// 下面这份快照拍摄时所用的假用户主目录 / 项目根。
+    /// 这里没有任何东西会碰到真实机器——每一条断言比较的都是
+    /// 两份适配器表针对同一份假输入产生的字符串。
     const FAKE_HOME: &str = "${FAKE_HOME}";
     const FAKE_PROJECT: &str = "${FAKE_PROJECT}";
 
-    /// scripts/adapter-table.js loaded with os.homedir() === FAKE_HOME, plus the
-    /// family and notes fields.
+    /// 以 os.homedir() === FAKE_HOME 加载的 scripts/adapter-table.js，
+    /// 外加 family 与 notes 字段。
     const DECLARED_TABLE_JSON: &str = r##"${tableJson}"##;
 
-    /// Every path template of every adapter, resolved on the reference side:
-    /// path.resolve(home, rel) for globals and path.resolve(proj.dir, rel) for
-    /// projects, with home coming from resolveHome() in
-    /// scripts/adapter-table.js.
+    /// 每个适配器的每一条路径模板，在参考侧解析后的结果：
+    /// globals 用 path.resolve(home, rel)，projects 用 path.resolve(proj.dir, rel)，
+    /// 其中 home 来自 scripts/adapter-table.js 里的 resolveHome()。
     const RESOLVED_PATHS_JSON: &str = r##"${resolvedJson}"##;
 
     fn declared_table_json() -> Value {
@@ -175,10 +172,10 @@ mod tests {
         v.iter().map(|s| (*s).to_string()).collect()
     }
 
-    /// Compare two paths the way the filesystem does. path.resolve rewrites
-    /// every separator to the native one, while this implementation keeps the slash that
-    /// resolve_home preserved after the tilde, so the raw strings can differ in
-    /// separator only. What must match is the directory they name.
+    /// 按文件系统的方式比较两条路径。path.resolve 会把
+    /// 每个分隔符改写成本机形式，而这个实现保留了 resolve_home
+    /// 在波浪号之后保留的那个斜杠，所以两个原始字符串可能只在
+    /// 分隔符上不同。必须一致的是它们指向的目录。
     fn same_path(js: &str, rust: &str) -> bool {
         fn norm(s: &str) -> String {
             s.replace('\\', "/")
@@ -186,7 +183,7 @@ mod tests {
         norm(js) == norm(rust)
     }
 
-    /// 17 adapters, declaration order preserved, every field identical.
+    /// 17 个适配器，声明顺序保持不变，每个字段都完全一致。
     #[test]
     fn the_declared_table_and_the_rust_one_agree_field_for_field() {
         let js = declared_agents_json();
@@ -207,11 +204,11 @@ mod tests {
             assert_eq!(r.accent, j["accent"].as_str().unwrap_or_default(), "{}: accent", id);
             assert_eq!(r.home, j["home"].as_str().unwrap_or_default(), "{}: home", id);
 
-            // notes is undefined on every adapter but two.
+            // notes 在除两个之外的所有适配器上都是 undefined。
             let declared_notes = j["notes"].as_str().map(|s| s.to_string());
             assert_eq!(r.notes.map(|s| s.to_string()), declared_notes, "{}: notes", id);
 
-            // family is a plain field; this implementation derives it from the id.
+            // family 是个普通字段；这个实现从 id 推导它。
             assert_eq!(
                 family(r.id),
                 j["family"].as_str().unwrap_or_default(),
@@ -248,8 +245,8 @@ mod tests {
         }
     }
 
-    /// Every declared id resolves here, and an unknown id resolves to nothing instead
-    /// of a guessed path.
+    /// 每个声明过的 id 在这里都能解析出来，而未知 id 解析不到任何东西，
+    /// 而不是猜出一条路径。
     #[test]
     fn by_id_covers_every_declared_agent() {
         for j in declared_agents_json() {
@@ -260,9 +257,9 @@ mod tests {
         assert!(by_id("claude-cod").is_none());
     }
 
-    /// Byte-exact: only the tilde is substituted, the rest of the token —
-    /// including the slash right behind it — stays as written. path.resolve
-    /// would normalise it away, so this asserts the raw string.
+    /// 字节级精确：只有波浪号被替换，token 的其余部分——
+    /// 包括紧跟在它后面的那个斜杠——都保持原样。path.resolve
+    /// 会把它归一化掉，所以这里断言的是原始字符串。
     #[test]
     fn resolve_home_substitutes_the_home_placeholder_byte_for_byte() {
         assert_eq!(declared_table_json()["fakeHome"].as_str().unwrap(), FAKE_HOME);
@@ -279,18 +276,18 @@ mod tests {
                 want
             );
         }
-        // A bare tilde is the home itself; a token without one passes through.
+        // 光秃秃的波浪号就是主目录本身；不含波浪号的 token 原样透传。
         assert_eq!(resolve_home("~", FAKE_HOME).as_deref(), Some(FAKE_HOME));
         assert_eq!(resolve_home("", FAKE_HOME), None);
         assert_eq!(resolve_home("/opt/agent", FAKE_HOME).as_deref(), Some("/opt/agent"));
     }
 
-    /// The blind spot asset parity cannot see: a template that resolves to the
-    /// wrong directory is invisible while neither build has that directory.
+    /// 资产对齐看不见的那个盲区：一个解析到错误目录的模板，
+    /// 在两个构建都没有那个目录时是看不见的。
     ///
-    /// Driven from the Rust table (what this implementation walks) and checked
-    /// against the snapshot in both directions — a template must exist on
-    /// both sides, and the snapshot must not carry one we dropped.
+    /// 由 Rust 表驱动（也就是这个实现遍历的那份），并与快照
+    /// 双向核对——一个模板必须在两边都存在，
+    /// 而且快照里不能带着一条我们丢掉的模板。
     #[test]
     fn every_path_template_resolves_under_the_declared_home() {
         let resolved = resolved_paths_json();
@@ -364,8 +361,8 @@ mod tests {
         );
     }
 
-    /// The shared directory is a constant rather than an adapter, so it drifts
-    /// easily: assert both the token and its expansion.
+    /// 共享目录是一个常量而不是一个适配器，所以它很容易漂移：
+    /// token 和它的展开结果都要断言。
     #[test]
     fn shared_skills_dir_is_the_declared_constant() {
         let table = declared_table_json();
@@ -382,10 +379,10 @@ mod tests {
 `;
 
 let src = fs.readFileSync(ADAPTERS_RS, 'utf8');
-// Truncate at the FIRST generated block, whatever the line endings are:
-// the file may be CRLF, and a marker spelled with LF would not match it —
-// then `indexOf` returns -1, `slice(0, -1)` keeps everything, and the
-// generator APPENDS a second copy of the block on every run.
+// 在第一个生成块处截断，不管行尾是哪种：
+// 文件可能是 CRLF，而一个用 LF 拼写的标记就匹配不上它——
+// 于是 `indexOf` 返回 -1，`slice(0, -1)` 保留了全部内容，
+// 生成器就会在每次运行时都追加一份该块的副本。
 const marker = /\r?\n#\[cfg\(test\)\]\r?\nmod tests \{/;
 const m = marker.exec(src);
 if (m) {

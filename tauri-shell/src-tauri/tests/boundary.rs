@@ -1,14 +1,13 @@
-//! Boundary conditions the behavioural suites deliberately stay away from:
-//! Windows path length, concurrent transactions against one store, and an
-//! HTTP peer that accepts a connection and then says nothing.
+//! 行为测试套件刻意避开的边界条件：
+//! Windows 路径长度、针对同一个 store 的并发事务，以及一个
+//! 接受连接后却什么都不说的 HTTP 对端。
 //!
-//! Why a separate file: `contract.rs` / `write_path.rs` assert *what* the store
-//! records for one caller at a time. Everything here is about the edges — a
-//! path the OS itself refuses unless you ask differently, several writers
-//! sharing one journal, and a socket that never answers. Each test therefore
-//! asserts a property that must hold no matter how the implementation is
-//! written (bytes on disk, line count, elapsed time), and each has a mutation
-//! that makes it red.
+//! 为什么单独一个文件：`contract.rs` / `write_path.rs` 断言的是*单个调用方*
+//! 逐次调用时 store *记录了什么*。这里的一切都关乎边界 —— 一个
+//! 除非你换种方式请求、否则 OS 本身就拒绝的路径，几个写者
+//! 共用一份 journal，以及一个永不回话的 socket。因此每个测试都
+//! 断言一条无论实现怎么写都必须成立的性质（磁盘上的字节、行数、耗时），
+//! 而且每个都有一个能让它变红的变异。
 
 mod common;
 
@@ -22,10 +21,10 @@ use std::sync::{Arc, Barrier};
 use common::{cleanup, read, temp_root};
 
 /* ------------------------------------------------------------------ */
-/* fixtures                                                            */
+/* fixtures —— 夹具                                                   */
 /* ------------------------------------------------------------------ */
 
-/// A store root plus a second temp dir the test may use as an agent tree.
+/// store 根目录，以及测试可以当作 agent 目录树使用的第二个临时目录。
 struct Fixture {
     dir: PathBuf,
     root: String,
@@ -45,22 +44,22 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        // `store::rmrf`, not `remove_dir_all`: the latter's trash layer fails on
-        // trees it did not create (see tests/common/mod.rs).
+        // 用 `store::rmrf`，而不是 `remove_dir_all`：后者的回收层
+        // 对不是它自己创建的目录树会失败（见 tests/common/mod.rs）。
         cleanup(&self.dir);
     }
 }
 
 /* ------------------------------------------------------------------ */
-/* long paths (Windows MAX_PATH)                                       */
+/* long paths (Windows MAX_PATH) —— 长路径                              */
 /* ------------------------------------------------------------------ */
 
-/// A file path under `base` that is longer than Windows' legacy `MAX_PATH`.
+/// `base` 之下一个比 Windows 传统 `MAX_PATH` 更长的文件路径。
 ///
-/// `MAX_PATH` is 260 characters *including* the terminator and it counts the
-/// whole absolute path, so the only way to reach it is depth. The loop appends
-/// 49-character segments until the path alone is over 330, which leaves room
-/// for the file name and for a temp root shorter or longer than this host's.
+/// `MAX_PATH` 是 260 个字符，*包含* 终止符，并且它计算的是
+/// 整条绝对路径，所以唯一能触及它的办法是加深目录。循环追加
+/// 49 字符的片段，直到光路径本身就超过 330，从而给文件名留出余地，
+/// 也容得下比本机更短或更长的临时根目录。
 fn long_target(base: &Path, file: &str) -> String {
     let mut p = base.to_path_buf();
     let mut level = 0;
@@ -72,32 +71,28 @@ fn long_target(base: &Path, file: &str) -> String {
     store::native_str(&p)
 }
 
-/// `\\?\` + path, spelled independently of the production helper: the point of
-/// the read-back assertions below is that the bytes are on disk, not that two
-/// copies of the same helper agree.
+/// `\\?\` + 路径，独立于生产用的那个辅助函数拼写：下面那些读回断言
+/// 的重点是字节确实在磁盘上，而不是同一个辅助函数的两个副本彼此一致。
 fn verbatim_join(p: &str) -> String {
     format!(r"\\?\{}", p)
 }
 
-/// A path past `MAX_PATH` must still be writable and readable.
+/// 超过 `MAX_PATH` 的路径仍然必须可写可读。
 ///
-/// The ceiling is real on this host — `cmd.exe`, which does not opt in, answers
-/// "the system cannot find the path specified" (`os error 3`) for the very same
-/// file — but `std::fs` gets past it. Three facts pin down where that comes
-/// from: the test binary carries **no** `longPathAware` manifest, the registry
-/// switch is off (`HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\
-/// LongPathsEnabled = 0`), and this toolchain's `libstd` contains
-/// `std::sys::path::windows::maybe_verbatim` — the helper that rewrites an
-/// absolute path into its `\\?\` form. So the store does **not** prepend the
-/// prefix itself, and should not: a second prefix is invalid, and applying one
-/// unconditionally would also change the legacy `.`/`..` and trailing-dot
-/// handling for every short path.
+/// 这个上限在本机是真实存在的 —— 并未选择加入长路径支持的 `cmd.exe`
+/// 对同一个文件会回答"系统找不到指定的路径"（`os error 3`）——
+/// 但 `std::fs` 能绕过去。有三件事钉住了它的来源：
+/// 测试二进制**没有** `longPathAware` 清单，注册表开关是关的
+/// （`HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled = 0`），
+/// 并且本工具链的 `libstd` 里含有 `std::sys::path::windows::maybe_verbatim`
+/// —— 那个把绝对路径改写成 `\\?\` 形式的辅助函数。所以 store **不会**自己
+/// 加这个前缀，也不应该加：第二个前缀是无效的，而且无条件地加还会
+/// 改变每一条短路径的传统 `.`/`..` 与结尾点号处理方式。
 ///
-/// What this test pins down is that the store keeps inheriting that behaviour:
-/// the day someone shortens paths on purpose (an 8.3 alias, a `cmd`-based copy,
-/// a direct Win32 call that bypasses std), a project checked out ten levels deep
-/// under a long user name breaks, and the failure surfaces as a misleading
-/// "cannot find the path" on a directory Explorer opens fine.
+/// 本测试钉住的是 store 继续继承这一行为：等到有人故意缩短路径
+/// （8.3 别名、基于 `cmd` 的复制、绕开 std 的直接 Win32 调用）时，
+/// 一个签出在长用户名下十层深的项目就会坏掉，而且失败会表现为
+/// 一句误导人的"找不到路径"，可那个目录 Explorer 打开却好好的。
 #[test]
 fn a_path_past_max_path_is_written_and_read_back_byte_for_byte() {
     let fx = Fixture::new("long-path");
@@ -109,8 +104,8 @@ fn a_path_past_max_path_is_written_and_read_back_byte_for_byte() {
         target
     );
 
-    // Multibyte content on purpose: a truncating or lossy path conversion shows
-    // up as a different byte count, not as an error.
+    // 刻意用多字节内容：一次截断或有损的路径转换表现为
+    // 不同的字节数，而不是一个错误。
     let content = format!(
         "---\nname: far-away\ndescription: {}\n---\n\nbody 远端资产\n",
         "超出路径上限".repeat(4)
@@ -136,8 +131,8 @@ fn a_path_past_max_path_is_written_and_read_back_byte_for_byte() {
         "the asset read path cannot read back what the write path produced"
     );
 
-    // Nothing half-written may be left behind: the temp file `atomic_write`
-    // creates and renames sits in the same directory as the target.
+    // 不得留下任何写了一半的东西：`atomic_write`
+    // 创建并重命名的临时文件就在目标所在的同一个目录里。
     let parent = Path::new(&target).parent().expect("parent");
     let names: Vec<String> = std::fs::read_dir(verbatim_join(&store::native_str(parent)))
         .expect("read the deepest directory")
@@ -153,11 +148,11 @@ fn a_path_past_max_path_is_written_and_read_back_byte_for_byte() {
 }
 
 /* ------------------------------------------------------------------ */
-/* concurrency                                                         */
+/* concurrency —— 并发                                                 */
 /* ------------------------------------------------------------------ */
 
-/// The body writer `t` produces on iteration `i`; used both to write and to
-/// check what a concurrent reader saw.
+/// 写者 `t` 在第 `i` 次迭代产生的内容；既用来写入，也用来
+/// 核对并发读者看到的东西。
 fn writer_body(t: usize, i: usize) -> String {
     format!(
         "writer-{}-iteration-{}\n{}",
@@ -167,7 +162,7 @@ fn writer_body(t: usize, i: usize) -> String {
     )
 }
 
-/// One transaction per call, writing `content` to `path`.
+/// 每次调用一个事务，把 `content` 写入 `path`。
 fn write_once(store: &Store, path: &str, content: &str) -> Value {
     store.transaction(
         &[Op::write(path, content)],
@@ -175,14 +170,13 @@ fn write_once(store: &Store, path: &str, content: &str) -> Value {
     )
 }
 
-/// Eight writers, twenty-five transactions each, all different files, one
-/// store root.
+/// 八个写者，每个二十五个事务，各写不同的文件，共用一个
+/// store 根目录。
 ///
-/// What this pins down is the journal and the temp files, not "does it work":
-/// `audit.jsonl` is appended to from eight threads at once, so a torn or
-/// interleaved line would corrupt the Activity page's only data source, and a
-/// shared temp name would leave `.agentkeeper-tmp-*` garbage behind. Both are
-/// invisible in single-threaded tests.
+/// 本测试钉住的是 journal 与临时文件，而不是"能不能用"：
+/// `audit.jsonl` 是被八个线程同时追加的，所以一行被撕裂或交错
+/// 就会破坏 Activity 页面唯一的数据源；而一个共用的临时文件名
+/// 会留下 `.agentkeeper-tmp-*` 垃圾。两者在单线程测试里都看不见。
 #[test]
 fn eight_threads_writing_different_files_keep_the_journal_intact() {
     let fx = Fixture::new("conc-distinct");
@@ -239,9 +233,9 @@ fn eight_threads_writing_different_files_keep_the_journal_intact() {
             .unwrap_or_else(|e| panic!("line {} is not valid JSON ({}): {}", n + 1, e, line));
     }
 
-    // No temp file survived anywhere in the tree, and every state file the
-    // store keeps is still parseable — a half-renamed settings.json would break
-    // the next launch.
+    // 目录树里任何地方都没有残留的临时文件，而且 store 保留的每个状态文件
+    // 仍然可解析 —— 一个被重命名了一半的 settings.json 会让
+    // 下次启动坏掉。
     let mut leftovers: Vec<String> = Vec::new();
     collect(&fx.dir, "", &mut leftovers);
     assert!(
@@ -262,8 +256,8 @@ fn eight_threads_writing_different_files_keep_the_journal_intact() {
     }
 }
 
-/// Walk the store tree, collecting temp files by relative path. Recursive
-/// because a leftover can sit next to any target, not just at the root.
+/// 遍历 store 目录树，按相对路径收集临时文件。之所以递归，
+/// 是因为残留可能就在任何目标旁边，不只是在根目录。
 fn collect(dir: &Path, base: &str, temp: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -283,15 +277,15 @@ fn collect(dir: &Path, base: &str, temp: &mut Vec<String>) {
     }
 }
 
-/// Four threads writing the *same* path: every state a reader can observe must
-/// be one writer's complete body, never a mixture of two.
+/// 四个线程写*同一个*路径：读者能观察到的每一种状态都必须是
+/// 某一个写者的完整内容，绝不能是两个写者的混合。
 ///
-/// `atomic_write` is temp-then-rename precisely so a reader can never observe a
-/// half-written file, and this is the test that holds it to that. Two failure
-/// modes are counted separately because they mean different things:
-/// `failed` = the transaction itself refused (a shared temp name makes the
-/// rename collide), `torn` = a read returned something that is not any writer's
-/// complete body (an in-place write, or a rename that lost a race).
+/// `atomic_write` 采用先写临时文件再重命名，正是为了让读者永远看不到
+/// 半个文件，而本测试就是让这条承诺兑现的那一个。两种失败模式
+/// 被分开统计，因为它们含义不同：
+/// `failed` = 事务本身被拒绝（共用临时文件名会让重命名撞车），
+/// `torn` = 读回来的东西不属于任何一个写者的完整内容
+/// （原地写入，或一次输掉竞争的重命名）。
 #[test]
 fn four_threads_writing_one_path_leave_exactly_one_writers_content() {
     let fx = Fixture::new("conc-same");
@@ -301,12 +295,12 @@ fn four_threads_writing_one_path_leave_exactly_one_writers_content() {
     let barrier = Arc::new(Barrier::new(4));
     let failed = Arc::new(AtomicUsize::new(0));
     let torn = Arc::new(AtomicUsize::new(0));
-    // The first offending read is kept verbatim: "not one writer's body" is
-    // useless in a failure message without the length and the marker it broke
-    // on, and this test's whole subject is *how* it broke.
+    // 第一次出问题的读取被原样保留下来："不属于任何一个写者的内容"
+    // 在缺少长度和它坏在哪里的标记时对失败信息毫无用处，
+    // 而本测试的全部主题正是*它*是怎么坏的。
     let sample = Arc::new(std::sync::Mutex::new(String::new()));
-    // Every body any writer can produce, so a concurrent read can be judged
-    // without knowing who won the race.
+    // 任何写者可能产生的全部内容，这样并发读取就能被判定，
+    // 而不必知道是谁赢下了这场竞争。
     let bodies: Vec<String> = (0..4)
         .flat_map(|t| (0..10).map(move |i| writer_body(t, i)))
         .collect();
@@ -324,16 +318,16 @@ fn four_threads_writing_one_path_leave_exactly_one_writers_content() {
             scope.spawn(move || {
                 barrier.wait();
                 for i in 0..10 {
-                    // ~4 KB of a single repeated marker: two interleaved writes
-                    // cannot accidentally produce this shape.
+                    // 约 4 KB 的单一重复标记：两次交错的写入
+                    // 不可能碰巧产生这种形状。
                     let content = writer_body(t, i);
                     let tx = write_once(&store, &path, &content);
                     if tx["ok"] != json!(true) {
                         failed.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
-                    // Read back while others are still writing: whatever is on
-                    // disk must be one of the complete bodies.
+                    // 在别人还在写的时候读回来：磁盘上的东西
+                    // 必须是那些完整内容之一。
                     let seen = read(&path);
                     if !bodies.iter().any(|b| *b == seen) {
                         torn.fetch_add(1, Ordering::Relaxed);
@@ -381,36 +375,34 @@ fn four_threads_writing_one_path_leave_exactly_one_writers_content() {
 }
 
 /* ------------------------------------------------------------------ */
-/* the rename-failure fallback in `atomic_write`                       */
+/* `atomic_write` 中的重命名失败回退分支                                */
 /* ------------------------------------------------------------------ */
 
-/// Sharing flags for the handle that holds the target file.
+/// 持有目标文件的句柄所用的共享标志。
 ///
-/// Read + write are shared (so ordinary readers and writers keep working), but
-/// **`FILE_SHARE_DELETE` is deliberately left out** — that omission is the whole
-/// trigger, see the test below.
+/// 读 + 写是共享的（这样普通读者和写者仍能正常工作），但
+/// **`FILE_SHARE_DELETE` 被刻意排除在外** —— 正是这个遗漏构成了
+/// 全部触发条件，见下面的测试。
 #[cfg(windows)]
 const FILE_SHARE_READ: u32 = 0x1;
 #[cfg(windows)]
 const FILE_SHARE_WRITE: u32 = 0x2;
 
-/// `atomic_write`'s "rename failed, write in place" branch, forced
-/// deterministically.
+/// 确定性地强制走 `atomic_write` 的"重命名失败、原地写入"分支。
 ///
-/// `std::fs::rename` is `MoveFileExW(.., MOVEFILE_REPLACE_EXISTING)` on Windows,
-/// which must **delete** the target it replaces: it opens the target for
-/// `DELETE` access. A handle that shares read+write but not
-/// `FILE_SHARE_DELETE` makes that open fail (`ERROR_SHARING_VIOLATION` / 32, or
-/// `ERROR_ACCESS_DENIED` / 5), while a plain write-open of the same file needs
-/// only `FILE_WRITE_DATA` — which *is* shared. So rename is refused and the
-/// in-place fallback still succeeds, on the same file, with no timing race.
-/// This is the real shape of it: a scanner or a sync client holding the target
-/// for a few hundred milliseconds, not a fabricated error injection.
+/// 在 Windows 上 `std::fs::rename` 就是 `MoveFileExW(.., MOVEFILE_REPLACE_EXISTING)`，
+/// 它必须**删除**它所替换的目标：它会以 `DELETE` 访问权限打开目标。
+/// 一个共享读+写但不共享 `FILE_SHARE_DELETE` 的句柄会让这次打开失败
+/// （`ERROR_SHARING_VIOLATION` / 32，或 `ERROR_ACCESS_DENIED` / 5），
+/// 而对同一个文件的普通写打开只需要 `FILE_WRITE_DATA` —— 那个是*被*共享的。
+/// 所以重命名被拒绝，而原地回退仍然成功，在同一个文件上，且没有时序竞争。
+/// 这才是它的真实形态：某个扫描器或同步客户端持有目标几百毫秒，
+/// 而不是人为注入的错误。
 ///
-/// What this test proves is that **the fallback path works**. It does not prove
-/// the fallback is atomic — the window where a reader sees a truncated file is
-/// still there, and `four_threads_writing_one_path_leave_exactly_one_writers_content`
-/// stays the guard against anyone observing it.
+/// 本测试证明的是**回退路径可用**。它并不证明回退是原子的 —— 读者看到
+/// 截断文件的那个窗口依然存在，而
+/// 那个测试 `four_threads_writing_one_path_leave_exactly_one_writers_content`
+/// 仍然是防止任何人观察到它的守卫。
 #[cfg(windows)]
 #[test]
 fn a_target_held_without_delete_sharing_makes_atomic_write_fall_back_in_place() {
@@ -428,12 +420,11 @@ fn a_target_held_without_delete_sharing_makes_atomic_write_fall_back_in_place() 
         .open(&target)
         .expect("hold the target without FILE_SHARE_DELETE");
 
-    // Prove the environment really refuses the rename before relying on it. A
-    // probe is not ceremony: if a future Windows or a different filesystem ever
-    // allows this rename, `atomic_write` takes its *success* path and every
-    // assertion below would still pass — the test would go green while testing
-    // nothing. With the probe it goes red instead, which is the only honest
-    // outcome for "the trigger stopped working".
+    // 先证明环境确实拒绝这次重命名，再依赖它。探针不是形式主义：
+    // 如果将来的 Windows 或别的文件系统允许了这次重命名，`atomic_write`
+    // 就会走它的*成功*路径，而下面每一条断言仍然会通过 —— 测试会变绿，
+    // 却什么也没测到。有了探针，它会变红，这才是"触发条件失效了"
+    // 唯一诚实的结论。
     let probe = target.with_file_name("rename-probe.tmp");
     std::fs::write(&probe, "probe").expect("write the probe");
     let refused = std::fs::rename(&probe, &target);
@@ -449,8 +440,8 @@ fn a_target_held_without_delete_sharing_makes_atomic_write_fall_back_in_place() 
         "the refused probe rename changed the target anyway"
     );
 
-    // Multibyte body on purpose: a lossy or truncated in-place write shows up as
-    // a different byte count, not as an error.
+    // 刻意用多字节内容：一次有损或被截断的原地写入表现为
+    // 不同的字节数，而不是一个错误。
     let new = "{\"lang\":\"auto\",\"theme\":\"dark\",\"note\":\"回退写入\"}\n";
     let result = settings::atomic_write(&target, new);
     assert!(
@@ -465,9 +456,9 @@ fn a_target_held_without_delete_sharing_makes_atomic_write_fall_back_in_place() 
         "the in-place fallback did not land the new content byte for byte"
     );
 
-    // The temp file must be cleaned up on the fallback path too — a leftover
-    // `.agentkeeper-tmp-*` is what the residue gate hunts in the tree, and here
-    // it would be dropped next to the user's settings on every such save.
+    // 临时文件在回退路径上也必须被清理 —— 残留的
+    // `.agentkeeper-tmp-*` 正是残留物关卡在目录树里搜寻的东西，
+    // 而在这里它会在每次这样的保存后被丢到用户的设置旁边。
     let names: Vec<String> = std::fs::read_dir(&fx.dir)
         .expect("read the store root")
         .filter_map(|e| e.ok())
@@ -480,8 +471,8 @@ fn a_target_held_without_delete_sharing_makes_atomic_write_fall_back_in_place() 
         names
     );
 
-    // Now let go of the handle and read again: the bytes must have reached the
-    // disk, not merely a cache or a buffered handle.
+    // 现在松开句柄再读一次：字节必须真的到达了
+    // 磁盘，而不只是待在缓存或某个带缓冲的句柄里。
     drop(held);
     assert_eq!(
         std::fs::read_to_string(&target).expect("read after releasing the handle"),
@@ -491,18 +482,18 @@ fn a_target_held_without_delete_sharing_makes_atomic_write_fall_back_in_place() 
 }
 
 /* ------------------------------------------------------------------ */
-/* the crash channel under concurrent reports                          */
+/* 并发上报下的崩溃通道                                               */
 /* ------------------------------------------------------------------ */
 
-/// Eight threads × twenty-five renderer errors, every message unique.
+/// 八个线程 × 二十五条渲染器错误，每条消息都唯一。
 ///
-/// `append_ui_error` is a read-trim-write: it reads the whole file, appends a
-/// line, trims to [`settings::UI_ERROR_LIMIT`] and rewrites. Two reports that
-/// overlap therefore both read the same old body and the second write erases the
-/// first line. The count here is chosen to be *exactly* the cap (8 × 25 = 200 =
-/// `UI_ERROR_LIMIT`) for one reason: trim can never run, so a shorter file is
-/// not "the cap working", it is a dropped line — and the missing message names
-/// which one.
+/// `append_ui_error` 是"读-裁剪-写"：它读整个文件、追加一行、
+/// 裁剪到 [`settings::UI_ERROR_LIMIT`] 然后重写。于是两份重叠的上报
+/// 会读到同一份旧内容，第二次写就把第一行抹掉了。这里的条数
+/// 被特意选成*恰好*等于上限（8 × 25 = 200 = `UI_ERROR_LIMIT`），
+// 只有一个原因：裁剪永远不会执行，所以一份更短的文件
+/// 不是"上限在起作用"，而是丢了一行 —— 而缺失的消息会指明
+/// 丢的是哪一条。
 #[test]
 fn concurrent_ui_error_reports_keep_every_line() {
     let fx = Fixture::new("ui-error-concurrent");
@@ -528,8 +519,8 @@ fn concurrent_ui_error_reports_keep_every_line() {
                             "at": "2026-10-20T00:00:00.000Z"
                         }),
                     );
-                    // A refusal is a different defect from a lost line, so it is
-                    // counted separately rather than folded into the line count.
+                    // 一次拒绝与丢一行是不同的缺陷，所以它
+                    // 被单独统计，而不是折进行数里。
                     if r["ok"] != json!(true) {
                         refused.fetch_add(1, Ordering::Relaxed);
                     }
@@ -581,8 +572,8 @@ fn concurrent_ui_error_reports_keep_every_line() {
         .collect();
     let mut missing: Vec<&String> = expected.difference(&seen).collect();
     let mut unexpected: Vec<&String> = seen.difference(&expected).collect();
-    // Sorted so a failure message is stable between runs (a HashSet has no
-    // order, and an unstable diff makes "which line was lost" unreadable).
+    // 排序是为了让失败信息在多次运行之间保持稳定（HashSet 没有
+    // 顺序，而不稳定的 diff 会让"丢的是哪一行"变得没法读）。
     missing.sort();
     unexpected.sort();
     assert!(
@@ -596,27 +587,26 @@ fn concurrent_ui_error_reports_keep_every_line() {
 }
 
 /* ------------------------------------------------------------------ */
-/* timeouts                                                            */
+/* timeouts —— 超时                                                    */
 /* ------------------------------------------------------------------ */
 
-/// Accept one connection, read the request, then say nothing at all.
+/// 接受一个连接，读完请求，然后完全不说话。
 ///
-/// Returns the base URL. The thread is detached and dies with the process; it
-/// holds the socket open, which is the whole point — a peer that answers
-/// slowly is a different case from a peer that never answers.
+/// 返回 base URL。线程是分离的，随进程一起死掉；它
+/// 一直握着那个 socket，这正是重点 —— 一个回答很慢的对端
+/// 与一个永不回答的对端是两种不同的情况。
 fn silent_server() -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let base = format!("http://{}", listener.local_addr().unwrap());
     std::thread::spawn(move || {
-        // The accepted stream must be *held*: `let _ = accept()` drops it
-        // immediately, which closes the socket and shows up as WSAECONNABORTED
-        // (10053) instead of the read timeout this test is about — it cost one
-        // debugging round to notice, because "connection aborted" reads like a
-        // timeout until you look at the elapsed time.
+        // 被接受的流必须被*持有*：`let _ = accept()` 会立刻把它丢掉，
+        // 那会关闭 socket，表现为 WSAECONNABORTED
+        // (10053) 而不是本测试要测的读超时 —— 这花了一轮调试才注意到，
+        // 因为"连接被中止"读起来像超时，直到你去看耗时。
         match listener.accept() {
             Ok(stream) => {
-                // One connection is enough: the client under test gives up on
-                // it; sleeping holds the socket open without answering.
+                // 一个连接就够：被测客户端会放弃它；
+                // 睡眠让 socket 保持打开而不作回答。
                 std::thread::sleep(std::time::Duration::from_secs(30));
                 drop(stream);
             }
@@ -626,16 +616,16 @@ fn silent_server() -> String {
     base
 }
 
-/// The registry query path must give up on a silent peer instead of hanging the
-/// caller forever.
+/// 注册表查询路径必须对一个沉默的对端放弃，而不是把调用方
+/// 永远挂住。
 ///
-/// Timeouts are the only reason a dead network cannot turn into a frozen
-/// `search_registry`: the command runs in `spawn_blocking`, so without a
-/// deadline the request would park one blocking-pool thread *forever* — the UI
-/// keeps painting, but Discover never answers and every later search queues
-/// behind the same dead socket. The 400 ms deadline here is shorter than the
-/// production 6 s on purpose (the test would otherwise spend 6 s proving the
-/// same branch); the policy value itself is asserted separately.
+/// 超时是让一个死掉的网络不至于变成一个卡死的
+/// `search_registry` 的唯一原因：该命令运行在 `spawn_blocking` 中，
+/// 所以没有截止时间的话这个请求会把一个阻塞池线程*永远*占住 —— UI
+/// 还在继续绘制，但 Discover 永不回答，之后每次搜索都排在
+/// 同一个死 socket 后面。这里的 400 ms 截止时间故意比
+/// 生产环境的 6 s 短（否则测试要花 6 s 来证明
+/// 同一个分支）；策略值本身另有一处断言。
 #[test]
 fn a_silent_peer_times_out_the_registry_query() {
     let base = silent_server();
@@ -650,10 +640,10 @@ fn a_silent_peer_times_out_the_registry_query() {
     );
 }
 
-/// Same peer, the updater's request path. `request_with_route` sets the phases
-/// (`connect` / `read` / `write`) explicitly rather than one total deadline,
-/// because the download must survive a slow 600 MB transfer; without the read
-/// phase a silent peer blocks the check until the OS TCP timeout (~2 min).
+/// 同一个对端，走更新器的请求路径。`request_with_route` 明确设定各阶段
+/// （`connect` / `read` / `write`）而不是给一个总的截止时间，
+/// 因为下载必须能扛住一次缓慢的 600 MB 传输；没有 read
+/// 阶段，一个沉默的对端会把这次检查阻塞到 OS 的 TCP 超时（约 2 分钟）。
 #[test]
 fn a_silent_peer_times_out_the_update_request() {
     let base = silent_server();
@@ -674,21 +664,21 @@ fn a_silent_peer_times_out_the_update_request() {
 }
 
 /* ------------------------------------------------------------------ */
-/* the production deadlines are explicit, not defaults                  */
+/* 生产环境的截止时间是显式的，不是默认值                               */
 /* ------------------------------------------------------------------ */
 
-/// Guard against the "it works because ureq's default happens to be short"
-/// reading: both call sites pass a deadline of their own.
+/// 防止"它能工作是因为 ureq 的默认超时恰好比较短"这种解读：
+/// 两个调用点都传了自己的截止时间。
 #[test]
 fn every_outbound_call_names_its_own_deadline() {
-    // 6 s is the fixed policy value; a default would drift silently.
+    // 6 s 是固定的策略值；用默认值会悄悄漂移。
     assert_eq!(
         agentkeeper_shell_lib::core::discover::SEARCH_TIMEOUT_MS,
         6000
     );
-    // The updater allows 30 s per API call and 60 s per download phase; both
-    // must stay explicit — `download_to_file` would otherwise inherit a default
-    // that a dependency bump can change.
+    // 更新器允许每次 API 调用 30 s、每个下载阶段 60 s；两者
+    // 都必须保持显式 —— 否则 `download_to_file` 会继承一个
+    // 可能因依赖升级而改变的默认值。
     assert_eq!(
         agentkeeper_shell_lib::core::update::manager::NETWORK_TIMEOUT_MS,
         30_000
@@ -699,8 +689,8 @@ fn every_outbound_call_names_its_own_deadline() {
     );
 }
 
-/// `settings::audit` is what keeps the journal appendable from many threads:
-/// asserting the line count is the visible half, this is the why.
+/// `settings::audit` 是让 journal 能被多线程追加的原因：
+/// 断言行数是看得见的那一半，这里说的是"为什么"。
 #[test]
 fn the_journal_is_a_plain_appendable_jsonl_file() {
     let fx = Fixture::new("journal");
@@ -712,24 +702,22 @@ fn the_journal_is_a_plain_appendable_jsonl_file() {
 }
 
 /* ------------------------------------------------------------------ */
-/* IPC thread budget (which commands may block the UI thread)          */
+/* IPC 线程预算（哪些命令可以阻塞 UI 线程）                            */
 /* ------------------------------------------------------------------ */
 
-/// The commands whose IO is *not* bounded by the store schema must be
-/// `async` + `spawn_blocking`; the ones that only touch one small JSON document
-/// (or one file the editor already holds) must stay synchronous.
+/// 那些 IO 不受 store schema 限制的命令必须是
+/// `async` + `spawn_blocking`；而那些只碰一份小的 JSON 文档
+/// （或一个编辑器已经打开的文件）的命令必须保持同步。
 ///
-/// This is a source-shape assertion on purpose. The property being guaranteed —
-/// "the window keeps painting while this runs" — cannot be observed from an
-/// integration test (there is no window, and the commands are private), and the
-/// failure it prevents is invisible anyway: a synchronous heavy command still
-/// returns the right answer, it just freezes the app while doing it. The same
-/// reasoning as `scripts/check.js`'s bridge gate: assert the shape that is
-/// visible, because that is where the bug lives.
+/// 这是一次刻意的源码形态断言。所保证的性质 ——
+/// "这件事在跑的时候窗口还在继续绘制" —— 从集成测试里是观察不到的
+/// （根本没有窗口，而且这些命令是私有的），而它防住的那个失败
+/// 本来也是看不见的：一个同步的重命令照样返回正确答案，
+/// 只是过程中把应用冻住了。与 `scripts/check.js` 的 bridge 关卡
+/// 是同一个道理：断言那个看得见的形态，因为 bug 就住在那里。
 ///
-/// The list is not a wish list — it is the set of commands that walk a directory
-/// tree, parse the whole journal, open a socket or spawn a process (the
-/// criterion is written out above `bootstrap` in `lib.rs`).
+/// 这份清单不是许愿清单 —— 它是那些会遍历目录树、解析整个 journal、
+/// 打开 socket 或启动进程的命令集合（判据写在 `lib.rs` 中 `bootstrap` 之上）。
 #[test]
 fn heavy_commands_are_async_and_light_commands_are_not() {
     const LIB: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"));
@@ -763,7 +751,7 @@ fn heavy_commands_are_async_and_light_commands_are_not() {
         "ui_error",
     ];
 
-    // `(attribute..fn name)` + the body up to the next attribute.
+    // `(attribute..fn name)` + 直到下一个 attribute 之前的函数体。
     let block = |name: &str| -> String {
         let marker = format!("fn {}(", name);
         let at = LIB

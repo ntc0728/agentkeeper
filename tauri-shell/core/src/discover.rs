@@ -1,22 +1,20 @@
-//! Discover & install.
+//! 发现与安装。
 //!
-//! Search the public Agent Skills registry and install skills from GitHub repos
-//! through the same safety pipeline as everything else (validate -> security
-//! scan -> transaction).
+//! 搜索公开的 Agent Skills 注册表，并从 GitHub 仓库安装 skill，走与其他一切
+//! 相同的安全管道（校验 -> 安全扫描 -> 事务）。
 //!
-//! Split of responsibilities, deliberately:
+//! 职责的划分是刻意的：
 //!
-//! * [`normalize_repo`], [`search_url`], [`shape_registry_response`] and
-//!   [`find_skill_dirs`] are pure (or filesystem-only) and carry all the
-//!   语义风险 — 切片、`Number(x) || default` 的钳制、
+//! * [`normalize_repo`]、[`search_url`]、[`shape_registry_response`] 和
+//!   [`find_skill_dirs`] 是纯函数（或只碰文件系统），承载了全部
+//!   语义风险 —— 切片、`Number(x) || default` 的钳制、
 //!   `URLSearchParams` 编码。每一条都有单元测试钉住。
-//! * [`collect_candidates`] takes the validator and security scanner as
-//!   closures. That keeps this module free of a dependency on `validate.rs`
-//!   and `security.rs`, and lets the skip/finding logic be tested without
-//!   building a fake keeper.
-//! * [`install_from_repo`] is the clone + `store.transaction` glue on top of
-//!   it; the post-clone half is split out as [`install_from_clone`] so it can
-//!   be tested against a fixture directory without `git` or the network.
+//! * [`collect_candidates`] 把校验器和安全扫描器作为闭包接收。这让本模块不必
+//!   依赖 `validate.rs` 和 `security.rs`，也让跳过/发现的逻辑可以在不搭一个
+//!   假 keeper 的情况下被测试。
+//! * [`install_from_repo`] 是在它之上的克隆 + `store.transaction` 粘合层；克隆
+//!   之后的那一半被拆成 [`install_from_clone`]，好让它能对着一个 fixture 目录
+//!   被测试，而不需要 `git` 或网络。
 
 use serde_json::{json, Map, Value};
 use std::io::Read;
@@ -30,19 +28,17 @@ use super::store::{rmrf, Op};
 
 pub const REGISTRY_URL: &str = "https://agentskills.codes/api/v1/skills";
 
-/// Deadline for the registry search — the value the reference `AbortController`
-/// used. Named rather than inlined at the call site so "does the query path
-/// have an explicit deadline?" is answerable by reading one constant, and so
-/// `tests/boundary.rs` can assert the policy rather than a literal it reads out
-/// of the implementation.
+/// 注册表搜索的截止时间 —— 参考实现中 `AbortController` 使用的值。给它起名字
+/// 而不是内联在调用点，是为了让"查询路径有没有一个明确的截止时间？"这个问题
+/// 通过读一个常量就能回答，也让 `tests/boundary.rs` 能断言这条策略，而不是去
+/// 实现里读出一个字面量。
 pub const SEARCH_TIMEOUT_MS: u64 = 6000;
 
 pub const CLONE_TIMEOUT_MS: u64 = 90_000;
 pub const MAX_SKILLS_PER_REPO: usize = 20;
 pub const MAX_FILES: usize = 500;
 
-/// Directories the clone walk refuses to descend into — shared with the
-/// store's directory walks.
+/// 克隆遍历拒绝进入的目录 —— 与 store 的目录遍历共用。
 const SKIP_DIRS: [&str; 8] = [
     "node_modules",
     ".git",
@@ -55,26 +51,26 @@ const SKIP_DIRS: [&str; 8] = [
 ];
 
 // ---------------------------------------------------------------------------
-// repo normalisation
+// 仓库规范化
 // ---------------------------------------------------------------------------
 
-/// `owner/repo` from a GitHub URL or a bare `owner/repo` string.
+/// 从一个 GitHub URL 或一个裸的 `owner/repo` 字符串中取出 `owner/repo`。
 ///
 /// 两条正则的形状是固定的：
 /// 1. `^https?://(?:www\.)?github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/?$`
-///    (case-insensitive) — returns `owner/repo` rebuilt from the capture
-///    groups, so a lowercased host is normalised away.
-/// 2. `^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$` — returns the input **verbatim**
-///    (already trimmed and `.git`-stripped), not a rebuild.
+///    （大小写不敏感）—— 返回由捕获组重建的 `owner/repo`，所以一个被小写化的
+///    主机名会被规范化掉。
+/// 2. `^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$` —— 返回输入**逐字不变**
+///    （已经 trim 过且去掉了 `.git`），而不是重建。
 ///
-/// `String(input || '')` means a falsy input becomes `''` and then `null`.
-/// Only ONE trailing `.git` is stripped (`/\\.git$/` has no `g` flag).
+/// `String(input || '')` 意味着一个 falsy 输入会变成 `''`，然后是 `null`。
+/// 只去掉**一个**结尾的 `.git`（`/\\.git$/` 没有 `g` 标志）。
 pub fn normalize_repo(input: &str) -> Option<String> {
     let trimmed = input.trim();
     let raw = trimmed.strip_suffix(".git").unwrap_or(trimmed);
 
     if let Some(rest) = strip_github_prefix(raw) {
-        // rest == "owner/repo" possibly with a trailing slash
+        // rest == "owner/repo"，可能带一个结尾的斜杠
         let rest = rest.strip_suffix('/').unwrap_or(rest);
         if let Some((owner, repo)) = rest.split_once('/') {
             if is_repo_segment(owner) && is_repo_segment(repo) {
@@ -84,8 +80,8 @@ pub fn normalize_repo(input: &str) -> Option<String> {
     }
 
     if let Some((owner, repo)) = raw.split_once('/') {
-        // `^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$` — exactly one slash, so a
-        // third segment leaves `repo` containing '/', failing the check below.
+        // `^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$` —— 恰好一个斜杠，所以第三段
+        // 会让 `repo` 里含有 '/'，从而通不过下面的检查。
         if is_repo_segment(owner) && is_repo_segment(repo) {
             return Some(raw.to_string());
         }
@@ -93,9 +89,8 @@ pub fn normalize_repo(input: &str) -> Option<String> {
     None
 }
 
-/// Case-insensitive match of `https?://(?:www\.)?github\.com/`, returning the
-/// remainder. Written by hand instead of with a regex so the `(?i)` scope is
-/// obvious.
+/// 对 `https?://(?:www\.)?github\.com/` 的大小写不敏感匹配，返回其余部分。
+/// 手工写而不用正则，好让 `(?i)` 的作用范围一目了然。
 fn strip_github_prefix(raw: &str) -> Option<&str> {
     let lower = raw.to_ascii_lowercase();
     let after_scheme = if lower.starts_with("https://") {
@@ -119,7 +114,7 @@ fn strip_github_prefix(raw: &str) -> Option<&str> {
     }
 }
 
-/// `[A-Za-z0-9_.-]+` — one or more, no empty match.
+/// `[A-Za-z0-9_.-]+` —— 一个或多个，不会匹配空串。
 fn is_repo_segment(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
@@ -127,14 +122,14 @@ fn is_repo_segment(s: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// registry search
+// 注册表搜索
 // ---------------------------------------------------------------------------
 
 /// `Number(x)` 的语义，用于 IPC 层可能给出的形状。
 ///
-/// Deliberate gap: `Number([]) === 0` and `Number([5]) === 5` in the reference
-/// implementation, but the renderer only ever sends numbers here (`limit: 30`),
-/// so arrays fall through to `NaN`. Documented rather than silently wrong.
+/// 刻意的缺口：参考实现里 `Number([]) === 0` 且 `Number([5]) === 5`，但渲染层
+/// 在这里只会发送数字（`limit: 30`），所以数组会落到 `NaN`。这一点被记录下来，
+/// 而不是悄悄地错。
 fn js_number(v: Option<&Value>) -> f64 {
     match v {
         None | Some(Value::Null) => 0.0,
@@ -158,8 +153,7 @@ fn js_number(v: Option<&Value>) -> f64 {
     }
 }
 
-/// `Number(x) || fallback` — NaN and 0 both fall back (0 is falsy in the
-/// as specified).
+/// `Number(x) || fallback` —— NaN 和 0 都会退回（按规格 0 是 falsy）。
 fn js_number_or(v: Option<&Value>, fallback: f64) -> f64 {
     let n = js_number(v);
     if n.is_nan() || n == 0.0 {
@@ -169,7 +163,7 @@ fn js_number_or(v: Option<&Value>, fallback: f64) -> f64 {
     }
 }
 
-/// `String(n)` for a finite f64: integral values print without `.0`.
+/// 一个有限 f64 的 `String(n)`：整数值打印时不含 `.0`。
 fn num_str(n: f64) -> String {
     if n.fract() == 0.0 && n.abs() < 1e21 {
         format!("{}", n as i64)
@@ -178,9 +172,9 @@ fn num_str(n: f64) -> String {
     }
 }
 
-/// `URLSearchParams` serialisation: space -> `+`, everything outside
-/// `[A-Za-z0-9*-._]` percent-encoded as UTF-8 bytes. This matters because the
-/// registry is queried with the user's free-text search term.
+/// `URLSearchParams` 的序列化：空格 -> `+`，`[A-Za-z0-9*-._]` 之外的一切按
+/// UTF-8 字节百分号编码。这一点很重要，因为注册表是用用户自由输入的搜索词
+/// 查询的。
 fn form_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.as_bytes() {
@@ -195,10 +189,10 @@ fn form_encode(s: &str) -> String {
     out
 }
 
-/// The exact request URL `searchRegistry` would build.
+/// `searchRegistry` 会构造出的那个确切请求 URL。
 ///
-/// Param order is insertion order (q, cat, limit, offset) — `q` and `cat` are
-/// omitted when falsy, and both are `.slice()`-capped in UTF-16 units.
+/// 参数顺序就是插入顺序（q、cat、limit、offset）—— `q` 和 `cat` 在 falsy 时
+/// 被省略，而且两者都按 UTF-16 单元做 `.slice()` 截断。
 pub fn search_url(opts: &Value) -> String {
     let mut parts: Vec<String> = Vec::new();
     let q = opts.get("q");
@@ -228,11 +222,11 @@ pub fn search_url(opts: &Value) -> String {
     format!("{}?{}", REGISTRY_URL, parts.join("&"))
 }
 
-/// Map a registry response body to the shape the renderer consumes.
+/// 把一个注册表响应体映射成渲染层消费的形状。
 ///
-/// Every string is `String(x || y || '').slice(0, n)`; `installs` is
-/// `Number(x) || 0`; `repo` is the normalised `sourceUrl`. At most 100 raw
-/// entries are considered, mirroring `.slice(0, 100)`.
+/// 每个字符串都是 `String(x || y || '').slice(0, n)`；`installs` 是
+/// `Number(x) || 0`；`repo` 是规范化过的 `sourceUrl`。最多考虑 100 条原始
+/// 条目，与 `.slice(0, 100)` 一致。
 pub fn shape_registry_response(body: &Value) -> Value {
     let skills: Vec<Value> = body
         .get("skills")
@@ -278,8 +272,8 @@ pub fn shape_registry_response(body: &Value) -> Value {
     json!({ "ok": true, "total": total as i64, "skills": skills })
 }
 
-/// `x || ''` for one field: falsy (null/""/0/false) becomes the empty string,
-/// everything else goes through `String()`.
+/// 某个字段的 `x || ''`：falsy（null/""/0/false）变成空字符串，其余都走
+/// `String()`。
 fn first_truthy(v: &Value) -> String {
     if super::model::js_truthy(v) {
         super::model::js_string(v)
@@ -288,12 +282,12 @@ fn first_truthy(v: &Value) -> String {
     }
 }
 
-/// Search the public registry. Never throws — returns `{ok, ...}` either way,
-/// exactly as specified.
+/// 搜索公开注册表。绝不抛出 —— 无论哪种情况都返回 `{ok, ...}`，
+/// 完全按规格。
 ///
-/// The 6 s deadline matches the reference `AbortController`; the error strings match
-/// its three branches (`registry http <code>` / `registry timeout` /
-/// `registry unreachable: <msg>`) because the Discover page renders them as-is.
+/// 6 秒的截止时间与参考实现的 `AbortController` 一致；错误字符串与它的三个分支
+/// （`registry http <code>` / `registry timeout` /
+/// `registry unreachable: <msg>`）一致，因为发现页面会原样渲染它们。
 pub fn search_registry(opts: &Value) -> Value {
     match super::http::get_json(&search_url(opts), SEARCH_TIMEOUT_MS) {
         Ok(body) => shape_registry_response(&body),
@@ -309,15 +303,14 @@ pub fn search_registry(opts: &Value) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// clone walk
+// 克隆遍历
 // ---------------------------------------------------------------------------
 
-/// Depth-limited walk collecting directories that contain a `SKILL.md`.
+/// 深度受限的遍历，收集含有 `SKILL.md` 的目录。
 ///
-/// Mirrors the reference recursion, including its limits: `depth > 4` stops, at most
-/// 20 hits, `.`-prefixed names and the shared SKIP list are not descended into,
-/// and the existence test is `existsSync` (so a *directory* named `SKILL.md`
-/// also counts, as specified).
+/// 镜像参考实现的递归，包括它的各种限制：`depth > 4` 就停、最多 20 次命中、
+/// 以 `.` 开头的名字和共用的 SKIP 列表都不进入，而且存在性测试是 `existsSync`
+/// （所以一个名叫 `SKILL.md` 的*目录*也算数，按规格如此）。
 pub fn find_skill_dirs(root: &str) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     walk(root, 0, &mut found);
@@ -336,8 +329,8 @@ fn walk(dir: &str, depth: usize, found: &mut Vec<String>) {
             return;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        // `e.isDirectory()` on a Dirent does NOT follow symlinks; `file_type()`
-        // on a DirEntry has the same property.
+        // Dirent 上的 `e.isDirectory()` 不跟随符号链接；DirEntry 上的
+        // `file_type()` 具有同样的性质。
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         if !is_dir || name.starts_with('.') || SKIP_DIRS.contains(&name.as_str()) {
             continue;
@@ -357,31 +350,31 @@ fn walk(dir: &str, depth: usize, found: &mut Vec<String>) {
 }
 
 // ---------------------------------------------------------------------------
-// candidate collection (validate + security, no store)
+// 候选收集（校验 + 安全，不碰 store）
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Default)]
 pub struct Candidates {
-    /// `copyDir` operations ready for `store.transaction`.
+    /// 为 `store.transaction` 准备好的 `copyDir` 操作。
     pub ops: Vec<Value>,
     pub installed: Vec<Value>,
     pub skipped: Vec<Value>,
     pub findings: Vec<Value>,
 }
 
-/// Decide what to install from a cloned repo.
+/// 决定从一个克隆下来的仓库里安装什么。
 ///
-/// `validate` receives the exact `validateByKind('skill', {...})` payload;
-/// `scan` receives the `fieldsFor()` result and returns findings. Both are
-/// injected so this module stays independent of `validate.rs` / `security.rs`.
+/// `validate` 收到的正是 `validateByKind('skill', {...})` 那个负载；`scan` 收到
+/// `fieldsFor()` 的结果并返回发现。两者都是注入的，好让本模块保持独立于
+/// `validate.rs` / `security.rs`。
 ///
-/// Behaviour that must not drift:
-/// * blocking validation issues skip the skill (`reason` = first blocking
-///   message) rather than aborting the whole install;
-/// * security findings are recorded but never block;
-/// * an existing destination skips with `already exists`;
-/// * the `from` string is `owner/repo#relative/path` with forward slashes, or
-///   `owner/repo#.` for the repo root.
+/// 绝不能漂移的行为：
+/// * 阻断性的校验问题会跳过这个 skill（`reason` = 第一条阻断消息），而不是中止
+///   整个安装；
+/// * 安全发现会被记录，但绝不阻断；
+/// * 已存在的目标会以 `already exists` 跳过；
+/// * `from` 字符串是带正斜杠的 `owner/repo#relative/path`，仓库根则是
+///   `owner/repo#.`。
 pub fn collect_candidates<V, S>(
     clone_root: &str,
     target_dir: &str,
@@ -417,7 +410,7 @@ where
             raw_name.trim().to_string()
         };
 
-        // `{...data, name}` — name wins, everything else keeps its place.
+        // `{...data, name}` —— name 优先，其余各就各位。
         let mut payload_data = match data.clone() {
             Value::Object(m) => m,
             _ => Map::new(),
@@ -438,7 +431,7 @@ where
             continue;
         }
 
-        // `data.description || ''` — falsy becomes an empty string.
+        // `data.description || ''` —— falsy 变成空字符串。
         let desc = match data.get("description") {
             Some(v) if super::model::js_truthy(v) => v.clone(),
             _ => json!(""),
@@ -471,7 +464,7 @@ where
     out
 }
 
-/// `path.relative(from, to)` with `\` normalised to `/`; empty becomes `.`.
+/// `path.relative(from, to)`，其中 `\` 被规范化为 `/`；空则变成 `.`。
 fn relative_posix(from: &str, to: &str) -> String {
     let norm = |s: &str| s.replace('\\', "/");
     let f = norm(from).trim_end_matches('/').to_string();
@@ -485,9 +478,8 @@ fn relative_posix(from: &str, to: &str) -> String {
     t
 }
 
-/// The one message the reference emits for both an unknown agent and one whose
-/// adapter declares no global skills path: `skillDirFor()` returns `undefined`
-/// either way.
+/// 参考实现对一个未知 agent 和一个其适配器没有声明全局 skills 路径的 agent
+/// 发出的那一条消息：`skillDirFor()` 在两种情况下都返回 `undefined`。
 fn no_skills_dir(agent_id: &str) -> Value {
     json!({
         "ok": false,
@@ -502,11 +494,10 @@ fn now_millis() -> u128 {
         .unwrap_or(0)
 }
 
-/// Four base36 characters — `Math.random().toString(36).slice(2, 6)`.
+/// 四个 base36 字符 —— `Math.random().toString(36).slice(2, 6)`。
 ///
-/// There is no `rand` dependency in the tree and uniqueness inside one temp
-/// directory is the whole requirement, so the same xorshift the store uses for
-/// transaction ids is reused with the nanosecond clock as its seed.
+/// 依赖树里没有 `rand`，而需求只是在一个临时目录内唯一，所以这里复用了 store
+/// 用于事务 id 的同一个 xorshift，只是把纳秒时钟当作它的种子。
 fn random_suffix() -> String {
     const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     let nanos = SystemTime::now()
@@ -533,9 +524,9 @@ fn temp_clone_dir() -> std::path::PathBuf {
     ))
 }
 
-/// `(stderr || error || '').trim().split('\n').pop() || 'unknown'` — the
-/// detail the reference appends to `git clone failed: `. A clone writes its progress
-/// to stderr, so the last line is the part a human can act on.
+/// `(stderr || error || '').trim().split('\n').pop() || 'unknown'` —— 参考实现
+/// 追加到 `git clone failed: ` 后面的那个细节。克隆会把它的进度写到 stderr，
+/// 所以最后一行才是人可以据以行动的部分。
 fn clone_detail(stderr: &str, error: &str) -> String {
     let trimmed = stderr.trim();
     let src = if trimmed.is_empty() {
@@ -551,16 +542,14 @@ fn clone_detail(stderr: &str, error: &str) -> String {
     }
 }
 
-/// `spawnFile('git', ['clone','--depth','1',url,tmp], { timeoutMs })`.
+/// `spawnFile('git', ['clone','--depth','1',url,tmp], { timeoutMs })`。
 ///
-/// `Command::output()` cannot be bounded, and a clone that hangs (a proxy
-/// prompt, a dead host) would pin the IPC thread forever, so the child is
-/// spawned and polled every 50 ms and killed at [`CLONE_TIMEOUT_MS`]. Both
-/// pipes are drained on reader threads: a clone that fills the 64 KB pipe
-/// buffer would otherwise block on write and only ever "time out", losing the
-/// real error.
+/// `Command::output()` 无法设上界，而一次挂起的克隆（一个代理提示、一个死掉
+/// 的主机）会永远钉住 IPC 线程，所以子进程被 spawn 出来、每 50 ms 轮询一次，
+/// 并在 [`CLONE_TIMEOUT_MS`] 处被杀掉。两条管道都在读取线程上被排空：一个填满
+/// 64 KB 管道缓冲的克隆否则会阻塞在写入上、只会"超时"，从而丢掉真正的错误。
 ///
-/// Returns the detail for `git clone failed: ` (see [`clone_detail`]).
+/// 返回 `git clone failed: ` 的细节（见 [`clone_detail`]）。
 fn git_clone(repo_norm: &str, dest: &str) -> Result<(), String> {
     let url = format!("https://github.com/{}.git", repo_norm);
     let mut child = match Command::new("git")
@@ -570,7 +559,7 @@ fn git_clone(repo_norm: &str, dest: &str) -> Result<(), String> {
         .spawn()
     {
         Ok(c) => c,
-        // No `git` on PATH at all — `spawnFile` reports this as `error`.
+        // PATH 上根本没有 `git` —— `spawnFile` 把它报告为 `error`。
         Err(e) => return Err(clone_detail("", &e.to_string())),
     };
 
@@ -616,21 +605,20 @@ fn git_clone(repo_norm: &str, dest: &str) -> Result<(), String> {
     }
 }
 
-/// `installFromRepo(keeper, { repo, agentId })` — clone, validate, write.
+/// `installFromRepo(keeper, { repo, agentId })` —— 克隆、校验、写入。
 ///
-/// Contract: `Err` never crosses this boundary; the return value is always the
-/// `{ ok, installed, skipped, findings, note }` envelope the Discover
-/// page renders. A failure is `{ ok: false, error }` — never a pretend success,
-/// which would tell the Discover page an install worked when nothing was
-/// written.
+/// 契约：`Err` 绝不跨越这条边界；返回值始终是发现页面所渲染的
+/// `{ ok, installed, skipped, findings, note }` 信封。失败是
+/// `{ ok: false, error }` —— 绝不是一次假成功，那会告诉发现页面安装成功了，
+/// 而其实什么都没写。
 ///
-/// The temp clone is removed on every path, success included.
+/// 临时克隆目录在每一条路径上都会被删除，成功也不例外。
 pub fn install_from_repo(keeper: &super::keeper::Keeper, repo: &str, agent_id: &str) -> Value {
     let Some(repo_norm) = normalize_repo(repo) else {
         return json!({ "ok": false, "error": "repo must be owner/repo or a github.com URL" });
     };
-    // `skillDirFor` first, exactly as specified: an agent that cannot receive
-    // skills is reported before a 90 s clone is even started.
+    // 先 `skillDirFor`，完全按规格：一个无法接收 skill 的 agent 会在 90 秒的
+    // 克隆启动之前就被报告出来。
     let target = json!({ "agentId": agent_id, "scope": "global" });
     if keeper.skill_dir_for(&target).is_none() {
         return no_skills_dir(agent_id);
@@ -653,12 +641,11 @@ pub fn install_from_repo(keeper: &super::keeper::Keeper, repo: &str, agent_id: &
     out
 }
 
-/// Everything `installFromRepo` does *after* the clone succeeded.
+/// `installFromRepo` 在克隆成功之后所做的*一切*。
 ///
-/// `root` is the clone root — the walk's starting point and the base for the
-/// `owner/repo#<path>` provenance strings. `tmp` is the scratch directory to
-/// remove on the way out; `install_from_repo` passes the same path for both,
-/// and a test can pass a fixture root it owns.
+/// `root` 是克隆根目录 —— 遍历的起点，也是 `owner/repo#<path>` 来源字符串的
+/// 基准。`tmp` 是离开时要删除的临时目录；`install_from_repo` 对两者传同一条
+/// 路径，而一个测试可以传它自己拥有的 fixture 根目录。
 pub fn install_from_clone(
     keeper: &super::keeper::Keeper,
     repo_norm: &str,
@@ -683,8 +670,8 @@ fn install_from_clone_body(
     };
 
     let clone_root = root.to_string_lossy().into_owned();
-    // `find_skill_dirs` already stops at MAX_SKILLS_PER_REPO (20) — no second
-    // cap is needed here.
+    // `find_skill_dirs` 已经在 MAX_SKILLS_PER_REPO（20）处停下 —— 这里不需要
+    // 第二个上限。
     let dirs = find_skill_dirs(&clone_root);
     if dirs.is_empty() {
         return json!({
@@ -739,8 +726,8 @@ fn install_from_clone_body(
     );
     if tx.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
         keeper.invalidate();
-        // Provenance: the journal's transaction record has no free-form field,
-        // so the source repo gets its own audit line tied to the txId.
+        // 来源信息：日志里的事务记录没有自由格式字段，所以源仓库会得到它自己
+        // 的一条审计行，并与 txId 关联。
         super::settings::audit(
             keeper.store.root_str(),
             &json!({
@@ -753,8 +740,8 @@ fn install_from_clone_body(
         );
     }
 
-    // `{ ...tx, installed, skipped, findings, note }` — key order is part of
-    // what the Discover page renders.
+    // `{ ...tx, installed, skipped, findings, note }` —— 键的顺序是发现页面所
+    // 渲染内容的一部分。
     if let Value::Object(m) = &mut tx {
         m.insert("installed".to_string(), json!(c.installed));
         m.insert("skipped".to_string(), json!(c.skipped));
@@ -801,7 +788,7 @@ mod tests {
         assert_eq!(normalize_repo("owner/repo/extra"), None);
         assert_eq!(normalize_repo("https://gitlab.com/a/b"), None);
         assert_eq!(normalize_repo("https://github.com/owner"), None);
-        // A path segment is one-or-more of [A-Za-z0-9_.-]; a space is out.
+        // 路径段是一个或多个 [A-Za-z0-9_.-]；空格不在其中。
         assert_eq!(normalize_repo("own er/repo"), None);
     }
 
@@ -815,7 +802,7 @@ mod tests {
             search_url(&json!({"q": "pdf parser", "limit": 30})),
             "https://agentskills.codes/api/v1/skills?q=pdf+parser&limit=30&offset=0"
         );
-        // 0 is falsy, so `Number(0) || 24` is 24 — not 1.
+        // 0 是 falsy，所以 `Number(0) || 24` 是 24 —— 不是 1。
         assert_eq!(
             search_url(&json!({"limit": 0, "offset": 0})),
             "https://agentskills.codes/api/v1/skills?limit=24&offset=0"
@@ -854,13 +841,13 @@ mod tests {
         assert_eq!(out["total"], json!(1251));
         let s = out["skills"].as_array().unwrap();
         assert_eq!(s.len(), 3);
-        // slug falls back to name
+        // slug 回退到 name
         assert_eq!(s[0]["slug"], json!("no-slug"));
         assert_eq!(s[0]["description"].as_str().unwrap().len(), 500);
         assert_eq!(s[0]["repo"], json!("o/r"));
-        // installs is Number(x) || 0
+        // installs 是 Number(x) || 0
         assert_eq!(s[1]["installs"], json!(12));
-        // sourceUrl that is not a repo maps to null, not ""
+        // 不是仓库的 sourceUrl 映射为 null，而不是 ""
         assert_eq!(s[1]["repo"], Value::Null);
         assert_eq!(s[2]["installs"], json!(0));
         assert_eq!(s[2]["author"], json!(""));
@@ -913,8 +900,8 @@ mod tests {
     }
 
     /* --------------------------------------------------------------- */
-    /* install — no git, no network: `install_from_clone` takes the     */
-    /* place of a real clone.                                           */
+    /* 安装 —— 不用 git、不用网络：`install_from_clone` 顶替一次真      */
+    /* 的克隆。                                                          */
     /* --------------------------------------------------------------- */
 
     use std::path::PathBuf;
@@ -945,7 +932,7 @@ mod tests {
         )
     }
 
-    /// A directory that looks like a cloned repo: `<root>/<folder>/SKILL.md`.
+    /// 一个看起来像克隆下来的仓库的目录：`<root>/<folder>/SKILL.md`。
     fn write_skill(root: &Path, folder: &str, frontmatter: &str, body: &str) -> PathBuf {
         let d = root.join(folder);
         std::fs::create_dir_all(&d).unwrap();
@@ -990,7 +977,7 @@ mod tests {
         let home = temp_dir("repo-agent-home");
         let keeper = keeper_at(&root, &home);
 
-        // `warp` exists but declares no global skills path.
+        // `warp` 存在，但没有声明全局 skills 路径。
         let out = install_from_repo(&keeper, "owner/repo", "warp");
         assert_eq!(out["ok"], json!(false));
         assert_eq!(
@@ -998,8 +985,8 @@ mod tests {
             json!("agent \"warp\" has no global skills directory")
         );
 
-        // An unknown id fails the same check — `skillDirFor` runs before the
-        // clone, so neither case ever shells out to git.
+        // 一个未知的 id 同样过不了这个检查 —— `skillDirFor` 在克隆之前运行，
+        // 所以两种情况都绝不会去 shell 调 git。
         let out = install_from_repo(&keeper, "owner/repo", "ghost");
         assert_eq!(
             out["error"],
@@ -1038,7 +1025,7 @@ mod tests {
             dest.join("helper.py").is_file(),
             "the whole folder is copied, not just SKILL.md"
         );
-        // Provenance: the source repo gets its own audit line.
+        // 来源信息：源仓库会得到它自己的一条审计行。
         let audit = std::fs::read_to_string(keeper.store.audit_file()).unwrap();
         assert!(audit.contains("install-source"), "{}", audit);
         assert!(audit.contains("owner/repo"), "{}", audit);
@@ -1064,7 +1051,7 @@ mod tests {
         std::fs::create_dir_all(&dest).unwrap();
 
         let out = install_from_clone(&keeper, "owner/repo", "claude-code", &clone, &clone);
-        // One candidate, nothing installable: the reference reports that as a failure.
+        // 一个候选、没什么可安装的：参考实现把这报告为一次失败。
         assert_eq!(out["ok"], json!(false), "{}", out);
         assert_eq!(out["error"], json!("nothing installable"));
         assert_eq!(out["skipped"][0]["name"], json!("pdf-tools"));
@@ -1084,10 +1071,10 @@ mod tests {
         let home = temp_dir("invalid-home");
         let clone = temp_dir("invalid-clone");
         let keeper = keeper_at(&root, &home);
-        // No description -> blocking; the name check passes.
+        // 没有 description -> 阻断；name 检查通过。
         write_skill(&clone, "no-desc", "name: no-desc\n", "Body.");
-        // No name at all -> `{...data, name}` fills in the folder name and it
-        // still validates, exactly as specified.
+        // 完全没有 name -> `{...data, name}` 会填上文件夹名，而且它仍然通过
+        // 校验，完全按规格。
         write_skill(
             &clone,
             "auto-name",

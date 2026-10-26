@@ -1,36 +1,33 @@
-//! The stdio MCP server.
+//! stdio MCP 服务器。
 //!
-//! An agent launches `agentkeeper-mcp.exe` and speaks MCP over stdin/stdout:
-//! newline-delimited JSON-RPC 2.0. It exposes the same tools as the reference build so
-//! an agent's existing tool list keeps working, and every mutating tool goes
-//! through [`super::keeper::Keeper`] — the same transaction layer the UI uses,
-//! with the same validation, audit and failure-undo guarantees.
+//! agent 启动 `agentkeeper-mcp.exe` 并通过 stdin/stdout 讲 MCP：换行分隔的
+//! JSON-RPC 2.0。它暴露与参考构建相同的工具，好让 agent 现有的工具列表继续
+//! 可用，而每一个会改动内容的工具都走 [`super::keeper::Keeper`] —— 与 UI 使用的
+//! 同一层事务，具备相同的校验、审计和失败撤销保证。
 //!
-//! ## Contract an agent relies on
+//! ## agent 所依赖的契约
 //!
-//! * stdout carries **exactly** one compact JSON object per line; anything
-//!   else corrupts the stream. Diagnostics go to stderr only.
-//! * `initialize` / `ping` / `tools/list` / `tools/call` and silence for
-//!   `notifications/*`, with the JSON-RPC error codes the spec names
-//!   (`-32601` unknown method, `-32602` unknown tool, `-32603` internal).
-//! * A panic inside a handler becomes a `-32603` response, never a process
-//!   exit: [`dispatch`] runs behind `catch_unwind`, mirroring the `try/catch`
-//!   that wraps `handle()` in a way that can never die this way. It works
-//!   in release builds too — see [`dispatch`] on `panic = "unwind"`.
-//! * Tool results are `{ content: [{ type: "text", text }] }`, where `text` is
-//!   pretty-printed JSON — so the strings inside it are matched by other
-//!   agents' prompts and must not be reworded.
+//! * stdout 每行携带**恰好**一个紧凑的 JSON 对象；任何别的东西都会破坏这个流。
+//!   诊断信息只走 stderr。
+//! * `initialize` / `ping` / `tools/list` / `tools/call`，以及对
+//!   `notifications/*` 保持沉默，并使用规格所命名的 JSON-RPC 错误码
+//!   （`-32601` 未知方法、`-32602` 未知工具、`-32603` 内部错误）。
+//! * handler 内部的 panic 会变成一个 `-32603` 响应，绝不是进程退出：
+//!   [`dispatch`] 跑在 `catch_unwind` 之后，以一种永远不会以这种方式死掉的方式
+//!   镜像了包住 `handle()` 的 `try/catch`。它在 release 构建下同样有效 —— 见
+//!   [`dispatch`] 关于 `panic = "unwind"` 的说明。
+//! * 工具结果是 `{ content: [{ type: "text", text }] }`，其中 `text` 是
+//!   pretty-print 过的 JSON —— 所以里面的字符串会被其他 agent 的 prompt 匹配，
+//!   绝不能改写措辞。
 //!
-//! ## Three deliberate differences from the plainest reading of the spec
+//! ## 与规格最朴素读法的三处刻意差异
 //!
-//! * A malformed line answers with `-32700 parse error` instead of being
-//!   silently dropped: `handle_line` must never return `None` for a line an
-//!   agent actually sent, or the agent waits forever on a reply that will not
-//!   come. Blank lines still produce nothing (they are line-ending noise).
-//! * A tool result with `ok: false` carries `isError: true` (see
-//!   [`is_tool_error`]): without it, spec-following clients report
-//!   "asset not found" as a successful answer. Nothing internal branches on
-//!   the shape; MCP clients are external and the spec is the contract.
+//! * 格式错误的行以 `-32700 parse error` 作答，而不是被悄悄丢弃：
+//!   `handle_line` 绝不能对 agent 确实发来的那一行返回 `None`，否则 agent 会
+//!   永远等待一个永远不会到来的回复。空行仍然不产生任何东西（它们只是行尾噪声）。
+//! * 带 `ok: false` 的工具结果会带上 `isError: true`（见 [`is_tool_error`]）：
+//!   没有它，遵循规格的客户端会把"未找到资产"报告成一次成功应答。内部没有任何
+//!   东西会基于这个形状分支；MCP 客户端是外部的，而规格就是契约。
 
 use serde_json::{json, Map, Value};
 use std::io::{BufRead, Write};
@@ -45,23 +42,23 @@ use super::scan;
 use super::settings;
 use super::store::Store;
 
-/// What `initialize` answers, and what the reference answers verbatim.
+/// `initialize` 的应答内容，也是参考构建逐字给出的内容。
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "agentkeeper";
 
-/// `agentkeeper`'s version, as `package.json` reports it in the reference build.
+/// `agentkeeper` 的版本号，与参考构建中 `package.json` 报告的一致。
 fn server_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// `discover.noInstalledAgent` — shared by `create_skill` and `install_skill`.
+/// `discover.noInstalledAgent` —— 由 `create_skill` 和 `install_skill` 共用。
 const NO_INSTALLED_AGENT: &str = "no installed agent found; pass agentId explicitly";
 
-/// `read_asset` truncates the file body at 60 000 characters.
+/// `read_asset` 会把文件正文截断到 60 000 个字符。
 const READ_CONTENT_LIMIT: usize = 60_000;
 
 /* ------------------------------------------------------------------ */
-/* tool definitions                                                    */
+/* 工具定义                                                             */
 /* ------------------------------------------------------------------ */
 
 fn s(desc: &str) -> Value {
@@ -76,11 +73,10 @@ fn b(desc: &str) -> Value {
     json!({ "type": "boolean", "description": desc })
 }
 
-/// The declared tool list, as `tools/list` returns it.
+/// 声明的工具列表，也就是 `tools/list` 返回的内容。
 ///
-/// Every entry mirrors the tool table below — same names, same
-/// descriptions, same `inputSchema`. An agent matches on those strings, so a
-/// rename here is a breaking change to a published API.
+/// 每一个条目都镜像下面的工具表 —— 相同的名字、相同的描述、相同的 `inputSchema`。
+/// agent 会匹配这些字符串，所以在这里改名就是对一个已发布 API 的破坏性变更。
 pub fn tools() -> Vec<Value> {
     vec![
         json!({
@@ -191,10 +187,10 @@ pub fn tools() -> Vec<Value> {
 }
 
 /* ------------------------------------------------------------------ */
-/* JSON-shaped helpers                                                 */
+/* JSON 形状的辅助函数                                                   */
 /* ------------------------------------------------------------------ */
 
-/// `String(args.x || '')` — the coercion every handler in the reference applies.
+/// `String(args.x || '')` —— 参考实现中每个 handler 都做的强制转换。
 fn arg_str(args: &Value, key: &str) -> String {
     match args.get(key) {
         Some(v) if js_truthy(v) => js_string(v),
@@ -202,8 +198,8 @@ fn arg_str(args: &Value, key: &str) -> String {
     }
 }
 
-/// `Number(v)`，falsy-zero 口径：`Number(x) || default` also falls back
-/// on `0`, which is what `Math.max(1, Number(args.limit) || 100)` relies on.
+/// `Number(v)`，falsy-zero 口径：`Number(x) || default` 在 `0` 上同样会退回
+/// 默认值，而这正是 `Math.max(1, Number(args.limit) || 100)` 所依赖的。
 fn js_number(v: Option<&Value>) -> f64 {
     match v {
         Some(Value::Number(x)) => x.as_f64().unwrap_or(f64::NAN),
@@ -220,8 +216,8 @@ fn js_number(v: Option<&Value>) -> f64 {
     }
 }
 
-/// `Math.min(Math.max(1, Number(args[key]) || default), max)` — the clamp
-/// `list_assets` and `search_registry` share.
+/// `Math.min(Math.max(1, Number(args[key]) || default), max)` —— `list_assets`
+/// 和 `search_registry` 共用的钳位。
 fn clamp_count(args: &Value, key: &str, fallback: f64, max: f64) -> usize {
     let raw = js_number(args.get(key));
     let v = if raw.is_nan() || raw == 0.0 {
@@ -232,7 +228,7 @@ fn clamp_count(args: &Value, key: &str, fallback: f64, max: f64) -> usize {
     v.max(1.0).min(max) as usize
 }
 
-/// `payload[key]` as a slice — no clone of an array that can hold ~1000 rows.
+/// `payload[key]` 以切片形式返回 —— 不去克隆一个可能装着约 1000 行的数组。
 fn arr_of<'a>(payload: &'a Value, key: &str) -> &'a [Value] {
     payload
         .get(key)
@@ -245,8 +241,8 @@ fn str_of(v: &Value, key: &str) -> String {
     v.get(key).map(js_string).unwrap_or_default()
 }
 
-/// Insert only when the value is not already `undefined`:
-/// `JSON.stringify` drops `undefined` values, so the key disappears entirely.
+/// 只有当该值还不是 `undefined` 时才插入：`JSON.stringify` 会丢弃 `undefined`
+/// 值，于是那个键就整个消失了。
 fn put(m: &mut Map<String, Value>, key: &str, v: Option<&Value>) {
     if let Some(v) = v {
         if !v.is_null() {
@@ -255,7 +251,7 @@ fn put(m: &mut Map<String, Value>, key: &str, v: Option<&Value>) {
     }
 }
 
-/// `x || undefined` — falsy values drop the key too.
+/// `x || undefined` —— falsy 值同样会让这个键消失。
 fn put_truthy(m: &mut Map<String, Value>, key: &str, v: Option<&Value>) {
     if let Some(v) = v {
         if js_truthy(v) {
@@ -265,18 +261,17 @@ fn put_truthy(m: &mut Map<String, Value>, key: &str, v: Option<&Value>) {
 }
 
 /* ------------------------------------------------------------------ */
-/* MCP content envelope                                                */
+/* MCP 内容信封                                                          */
 /* ------------------------------------------------------------------ */
 
-/// Wrap a tool result as MCP text content.
+/// 把工具结果包装成 MCP 文本内容。
 ///
-/// `errors.attach` runs here so every tool failure that reaches an MCP client
-/// carries a stable `code` next to the English message — an agent can branch on
-/// `asset.notFound` instead of matching prose.
+/// `errors.attach` 在这里运行，所以每一个抵达 MCP 客户端的工具失败都带着一个
+/// 稳定的 `code`，与英文消息并列 —— agent 可以基于 `asset.notFound` 分支，而不必
+/// 去匹配散文。
 fn text(result: Value) -> Value {
-    // Read before `result` is consumed: the flag belongs on the *wrapper*
-    // (`result.isError` in the JSON-RPC response), while `ok` lives on the
-    // payload that gets serialised into `content[0].text`.
+    // 在 `result` 被消费之前读取：这个标志属于*包装层*（JSON-RPC 响应里的
+    // `result.isError`），而 `ok` 位于会被序列化进 `content[0].text` 的负载上。
     let failed = is_tool_error(&result);
     let body = match result {
         Value::String(s) => s,
@@ -291,13 +286,11 @@ fn text(result: Value) -> Value {
     out
 }
 
-/// Resolve an English message back to a code.
+/// 把一条英文消息反查回一个 code。
 ///
-/// Only the messages the MCP surface can produce are indexed (the full table
-/// covers the IPC layer too). Two lookup rules, same as the reference
-/// implementation: an exact match first, then the longest parameterised prefix
-/// whose stem is at least 12 characters — a shorter stem would match prose
-/// that merely starts the same way.
+/// 这里只索引 MCP 表面可能产生的消息（完整表格还覆盖了 IPC 层）。两条查找规则，
+/// 与参考实现相同：先精确匹配，然后是最长的参数化前缀，且其骨架至少 12 个字符 ——
+/// 更短的骨架会匹配到仅仅开头相同的散文。
 fn attach(result: Value) -> Value {
     let Value::Object(mut m) = result else {
         return result;
@@ -358,7 +351,7 @@ const EXACT_CODES: [(&str, &str); 16] = [
     (NO_INSTALLED_AGENT, "discover.noInstalledAgent"),
 ];
 
-/// (prefix, code) — longest prefix wins, so this list is ordered by length.
+/// (前缀, code) —— 最长前缀胜出，所以这个列表按长度排序。
 const PREFIX_CODES: [(&str, &str); 12] = [
     (
         "config file is corrupt, refusing to overwrite",
@@ -387,8 +380,8 @@ fn code_of(message: &str) -> Option<(&'static str, Vec<String>)> {
         if !message.starts_with(prefix) {
             continue;
         }
-        // `text.indexOf(':', prefix.length - 1)` — the parameter is whatever
-        // follows the first colon at or after the stem.
+        // `text.indexOf(':', prefix.length - 1)` —— 参数就是骨架处或之后第一个
+        // 冒号之后的全部内容。
         let from = prefix.len().saturating_sub(1);
         let tail = match message[from..].find(':') {
             Some(i) => message[from + i + 1..].trim().to_string(),
@@ -401,7 +394,7 @@ fn code_of(message: &str) -> Option<(&'static str, Vec<String>)> {
     None
 }
 
-/// The row shape `list_assets` and `read_asset` return for one asset.
+/// `list_assets` 和 `read_asset` 为单个资产返回的行形状。
 fn brief_asset(a: &Value) -> Value {
     let mut m = Map::new();
     put(&mut m, "id", a.get("id"));
@@ -412,7 +405,7 @@ fn brief_asset(a: &Value) -> Value {
     put(&mut m, "scope", a.get("scope"));
     put_truthy(&mut m, "project", a.get("projectName"));
     put(&mut m, "size", a.get("size"));
-    // `a.meta?.estTokens` — 0 is kept, a missing `meta` drops the key.
+    // `a.meta?.estTokens` —— 0 会保留，缺失的 `meta` 会让这个键消失。
     let tokens = a.get("meta").and_then(|meta| meta.get("estTokens"));
     put(&mut m, "tokens", tokens);
     put(&mut m, "writable", a.get("writable"));
@@ -444,15 +437,14 @@ fn brief_asset(a: &Value) -> Value {
 }
 
 /* ------------------------------------------------------------------ */
-/* context                                                             */
+/* 上下文                                                               */
 /* ------------------------------------------------------------------ */
 
-/// The store root — same resolution as the GUI (`AK_STORE_ROOT` first).
+/// 存储根目录 —— 与 GUI 相同的解析方式（先看 `AK_STORE_ROOT`）。
 ///
-/// Identical to `src/lib.rs`: `AK_STORE_ROOT`, else
-/// `<APPDATA>\AgentKeeper\agentkeeper`. The MCP server and the GUI must land
-/// on the same directory or an agent's writes are invisible to the human
-/// reading the transaction journal.
+/// 与 `src/lib.rs` 完全一致：`AK_STORE_ROOT`，否则
+/// `<APPDATA>\AgentKeeper\agentkeeper`。MCP 服务器和 GUI 必须落在同一个目录，
+/// 否则 agent 的写入对阅读事务日志的人来说就是不可见的。
 fn store_root() -> String {
     if let Ok(explicit) = std::env::var("AK_STORE_ROOT") {
         return explicit;
@@ -474,17 +466,16 @@ fn user_home() -> String {
         .unwrap_or_default()
 }
 
-/// `buildContext()` — one keeper for the life of the process, exactly as the
-/// 在 `main()` 里构建一次。
+/// `buildContext()` —— 进程生命周期内只有一个 keeper，与在 `main()` 里构建一次
+/// 完全相同。
 fn context() -> &'static Keeper {
     static CTX: OnceLock<Keeper> = OnceLock::new();
     CTX.get_or_init(|| Keeper::new(Store::new(&store_root()), &user_home()))
 }
 
-/// `keeper.lastScan` — the scan cache, held in an `Arc` so a tool that only
-/// reads it costs nothing. The naive version re-scanned ~1000 assets (plus the
-/// security pass) on EVERY tool call — 3–8 s per call for an agent
-/// conversation.
+/// `keeper.lastScan` —— 扫描缓存，用 `Arc` 持有，所以只读它的工具不花任何代价。
+/// 天真的版本会在**每一次**工具调用时重新扫描约 1000 个资产（再加上安全检查）
+/// —— 对一段 agent 对话来说每次调用 3–8 秒。
 fn last_scan() -> &'static Mutex<Option<Arc<Value>>> {
     static LAST: OnceLock<Mutex<Option<Arc<Value>>>> = OnceLock::new();
     LAST.get_or_init(|| Mutex::new(None))
@@ -498,7 +489,7 @@ fn scan_now(keeper: &Keeper) -> Arc<Value> {
     payload
 }
 
-/// `freshScan()` — scan once, then reuse until a mutation invalidates it.
+/// `freshScan()` —— 扫一次，然后复用直到某次改动让它失效。
 fn fresh_scan(keeper: &Keeper) -> Arc<Value> {
     if let Some(cached) = last_scan()
         .lock()
@@ -510,13 +501,13 @@ fn fresh_scan(keeper: &Keeper) -> Arc<Value> {
     scan_now(keeper)
 }
 
-/// `invalidate()` — the scan must not outlive a write.
+/// `invalidate()` —— 扫描结果的寿命不能超过一次写入。
 fn invalidate(keeper: &Keeper) {
     *last_scan().lock().unwrap_or_else(|e| e.into_inner()) = None;
     keeper.invalidate();
 }
 
-/// `keeper.scan().effective || keeper.scan().assets`
+/// 有效资产优先：`keeper.scan().effective || keeper.scan().assets`
 fn effective_or_assets(payload: &Value) -> &[Value] {
     let effective = arr_of(payload, "effective");
     if effective.is_empty() {
@@ -526,8 +517,8 @@ fn effective_or_assets(payload: &Value) -> &[Value] {
     }
 }
 
-/// `(id, fingerprint)` over the scan's `assets` — the input `baselineDiff` /
-/// `setBaseline` take.
+/// 扫描 `assets` 上的 `(id, fingerprint)` —— `baselineDiff` / `setBaseline`
+/// 所接受的输入。
 fn fingerprints(payload: &Value) -> Vec<(String, String)> {
     arr_of(payload, "assets")
         .iter()
@@ -538,8 +529,8 @@ fn fingerprints(payload: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The first installed agent, or `""` — the default target of `create_skill`
-/// and `install_skill`.
+/// 第一个已安装的 agent，或 `""` —— `create_skill` 和 `install_skill` 的默认
+/// 目标。
 fn first_installed_agent(keeper: &Keeper) -> String {
     let payload = fresh_scan(keeper);
     arr_of(&payload, "agents")
@@ -554,7 +545,7 @@ fn first_installed_agent(keeper: &Keeper) -> String {
 }
 
 /* ------------------------------------------------------------------ */
-/* tool implementations                                                */
+/* 工具实现                                                             */
 /* ------------------------------------------------------------------ */
 
 fn list_assets(keeper: &Keeper, args: &Value) -> Value {
@@ -727,7 +718,7 @@ fn create_skill(keeper: &Keeper, args: &Value) -> Value {
         put(&mut m, "issues", r.get("issues"));
         return text(Value::Object(m));
     }
-    invalidate(keeper); // the new file must show up in the next read
+    invalidate(keeper); // 新文件必须出现在下一次读取里
     text(json!({
         "ok": true,
         "txId": r.get("txId").cloned().unwrap_or(Value::Null),
@@ -736,8 +727,8 @@ fn create_skill(keeper: &Keeper, args: &Value) -> Value {
     }))
 }
 
-/// The `{ ok: false, error, blocked, issues }` envelope `create_skill` and
-/// `update_asset` return on a refused write.
+/// `create_skill` 和 `update_asset` 在写入被拒绝时返回的
+/// `{ ok: false, error, blocked, issues }` 信封。
 fn refused(r: &Value) -> Value {
     let mut m = Map::new();
     m.insert("ok".to_string(), Value::Bool(false));
@@ -756,10 +747,9 @@ fn update_asset(keeper: &Keeper, args: &Value) -> Value {
         return refused(&r);
     }
     invalidate(keeper);
-    // `files` mirrors `r.written`: when the keeper
-    // did not report what it wrote, `undefined` is dropped by `JSON.stringify`
-    // and the key is absent. Emitting `files: []` here would tell an agent
-    // "nothing was written" when the truth is "not reported".
+    // `files` 镜像 `r.written`：当 keeper 没有报告它写了什么时，`undefined` 会被
+    // `JSON.stringify` 丢弃、这个键就不存在。在这里发出 `files: []` 会告诉 agent
+    // "什么都没写"，而事实是"未报告"。
     let mut out = Map::new();
     out.insert("ok".to_string(), json!(true));
     out.insert(
@@ -773,8 +763,8 @@ fn update_asset(keeper: &Keeper, args: &Value) -> Value {
 }
 
 fn delete_asset(keeper: &Keeper, args: &Value) -> Value {
-    // keeper.delete_asset dispatches MCP configs to delete_mcp internally —
-    // passing an mcp asset here deletes the config entry, never the shared file.
+    // keeper.delete_asset 会在内部把 MCP 配置转交给 delete_mcp —— 在这里传一个
+    // mcp 资产只会删除配置条目，绝不会删除那个共享文件。
     let r = keeper.delete_asset(&arg_str(args, "assetId"));
     if r.get("ok").and_then(|v| v.as_bool()) == Some(true) {
         invalidate(keeper);
@@ -852,17 +842,17 @@ fn install_skill(keeper: &Keeper, args: &Value) -> Value {
     }
     let r = discover::install_from_repo(keeper, &repo, &agent_id);
     if r.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-        invalidate(keeper); // the write must show up in the next read
+        invalidate(keeper); // 这次写入必须出现在下一次读取里
     }
     text(r)
 }
 
 /* ------------------------------------------------------------------ */
-/* JSON-RPC plumbing                                                   */
+/* JSON-RPC 管道                                                         */
 /* ------------------------------------------------------------------ */
 
 fn respond(id: Option<Value>, result: Value) -> Value {
-    // `JSON.stringify({ id: undefined, … })` drops `id`; so do we.
+    // `JSON.stringify({ id: undefined, … })` 会丢弃 `id`；我们也这么做。
     let mut m = Map::new();
     m.insert("jsonrpc".to_string(), json!("2.0"));
     if let Some(id) = id {
@@ -872,7 +862,7 @@ fn respond(id: Option<Value>, result: Value) -> Value {
     Value::Object(m)
 }
 
-/// `fail(code, message)` — a notification's error is dropped.
+/// `fail(code, message)` —— 通知的错误会被丢弃。
 fn fail(id: Option<Value>, code: i32, message: String) -> Value {
     let Some(id) = id else {
         return Value::Null;
@@ -925,47 +915,43 @@ fn call_tool(keeper: &Keeper, req: &Value) -> Value {
     out
 }
 
-/// `ok: false` on a tool result, per the MCP `tools/call` contract.
+/// 工具结果上的 `ok: false`，依据 MCP 的 `tools/call` 契约。
 ///
-/// A business failure (`{ ok: false, error }`) is marked `isError: true` here.
-/// Only marking *thrown* handlers would let a spec-compliant client render
-/// "asset not found" as a successful answer.
+/// 业务失败（`{ ok: false, error }`）在这里被标记 `isError: true`。如果只标记
+/// *抛出*的 handler，就会让遵循规格的客户端把"未找到资产"渲染成一次成功应答。
 ///
-/// A business failure is not a behaviour worth preserving: the consumers are
-/// third-party MCP clients, and the spec says a tool execution failure must be
-/// flagged.
-/// See the module header.
+/// 业务失败不是一个值得保留的行为：消费者是第三方 MCP 客户端，而规格规定工具
+/// 执行失败必须被标记。
+/// 见模块头部。
 fn is_tool_error(result: &Value) -> bool {
     result.is_object() && result.get("ok").and_then(|v| v.as_bool()) == Some(false)
 }
 
-/// The pure request handler.
+/// 纯粹的请求处理器。
 ///
-/// Returns the JSON-RPC response object, or `Value::Null` when the request
-/// must not be answered at all (a `notifications/*` message, or an error on a
-/// request that carried no `id`). `handle_line` turns `Null` into `None`.
+/// 返回 JSON-RPC 响应对象，或在请求根本不该被应答时返回 `Value::Null`（一条
+/// `notifications/*` 消息，或一个没有携带 `id` 的请求上的错误）。`handle_line`
+/// 把 `Null` 变成 `None`。
 ///
-/// The body runs inside [`guarded`] — the equivalent of the `try { … } catch`
-/// around `handle()`. Without it a single `unwrap()`
-/// or slice out of bounds kills the process mid-stream, and the agent sees a
-/// dropped transport rather than an error it can report.
+/// 函数体跑在 [`guarded`] 之内 —— 它等价于包住 `handle()` 的 `try { … } catch`。
+/// 没有它，一次 `unwrap()` 或切片越界就会在流中途杀死进程，而 agent 看到的是
+/// 一个被丢弃的传输，而不是它可以报告的错误。
 ///
-/// **Why `[profile.release]` no longer says `panic = "abort"`:** `catch_unwind`
-/// can only catch a panic that *unwinds*, so under `abort` this guard would do
-/// nothing exactly where it matters — in the shipped binary. `Cargo.toml` now
-/// keeps unwinding for the release profile on purpose; the few hundred KB of
-/// unwind tables buy a server that answers `-32603` instead of dying mid-
-/// stream. Unwinding is still the last resort, not a design: a handler that
-/// panics has already failed the request.
+/// **为什么 `[profile.release]` 不再写 `panic = "abort"`：** `catch_unwind` 只能
+/// 捕获*展开*的 panic，所以在 `abort` 下这个守卫恰好在最要紧的地方 —— 在发布的
+/// 二进制里 —— 什么也做不了。`Cargo.toml` 现在刻意为 release profile 保留展开；
+/// 那几百 KB 的展开表换来的是一个会回答 `-32603` 而不是中途死掉的服务器。展开
+/// 仍然是最后手段，而不是一种设计：一个 panic 的 handler 其实已经让这个请求
+/// 失败了。
 pub fn dispatch(keeper: &super::keeper::Keeper, req: &Value) -> Value {
     let id = req.get("id").cloned();
     guarded(id, || dispatch_inner(keeper, req))
 }
 
-/// Run `f`, turning a panic into a `-32603 internal error` response.
+/// 运行 `f`，把一次 panic 变成一个 `-32603 internal error` 响应。
 ///
-/// The response keeps the request's `id`, so the client can still match it; an
-/// `id`-less request answers `Null`, like every other failure here.
+/// 响应保留请求的 `id`，所以客户端仍然能匹配上；没有 `id` 的请求回答 `Null`，
+/// 与这里其他每一种失败一样。
 fn guarded(id: Option<Value>, f: impl FnOnce() -> Value) -> Value {
     match panic::catch_unwind(AssertUnwindSafe(f)) {
         Ok(resp) => resp,
@@ -973,9 +959,9 @@ fn guarded(id: Option<Value>, f: impl FnOnce() -> Value) -> Value {
     }
 }
 
-/// The panic payload as text. `panic!("literal")` carries a `&str`,
-/// `panic!("{}", x)` a `String`; anything else falls back to the fixed
-/// message this implementation answers with.
+/// panic 的负载转成文本。`panic!("literal")` 携带一个 `&str`，
+/// `panic!("{}", x)` 携带一个 `String`；其它一切都退回这个实现所应答的固定
+/// 消息。
 fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         return (*s).to_string();
@@ -1010,11 +996,11 @@ fn dispatch_inner(keeper: &super::keeper::Keeper, req: &Value) -> Value {
     }
 }
 
-/// Read one JSON-RPC request and return one response, or `None` when the line
-/// carries nothing to answer (blank, or a notification).
+/// 读取一条 JSON-RPC 请求并返回一个响应，或在这一行没有需要应答的内容时返回
+/// `None`（空行，或一条通知）。
 ///
-/// One call per line, no batching: the reference server behaves the same way and an
-/// agent client that pipelined requests would break on it either way.
+/// 每行一次调用，不做批量：参考服务器行为相同，而一个会流水线化请求的 agent
+/// 客户端无论哪种实现都会出问题。
 pub fn handle_line(line: &str) -> Option<Value> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -1022,8 +1008,8 @@ pub fn handle_line(line: &str) -> Option<Value> {
     }
     let Ok(msg) = serde_json::from_str::<Value>(trimmed) else {
         eprintln!("[agentkeeper-mcp] bad json line ignored");
-        // The reference drops the line silently; an agent that sent it is waiting for
-        // a reply that will never come, so answer with a parse error instead.
+        // 参考实现会悄悄丢弃这一行；发出它的 agent 正在等待一个永远不会到来的
+        // 回复，所以这里改用一条解析错误作答。
         return Some(json!({
             "jsonrpc": "2.0",
             "id": Value::Null,
@@ -1038,7 +1024,7 @@ pub fn handle_line(line: &str) -> Option<Value> {
     }
 }
 
-/// Run the loop until stdin closes. Returns the process exit code.
+/// 运行循环直到 stdin 关闭。返回进程退出码。
 pub fn serve() -> i32 {
     let keeper = context();
     eprintln!("[agentkeeper-mcp] store: {}", keeper.store.root_str());
@@ -1050,8 +1036,8 @@ pub fn serve() -> i32 {
         let Some(resp) = handle_line(&line) else {
             continue;
         };
-        // One compact line, flushed immediately: an agent reads stdout as a
-        // stream, and pretty-printing here would break its line parser.
+        // 一行紧凑内容，立即刷新：agent 把 stdout 当作流来读，而在这里
+        // pretty-print 会破坏它的行解析器。
         let mut payload = serde_json::to_string(&resp).unwrap_or_default();
         payload.push('\n');
         if out.write_all(payload.as_bytes()).is_err() {
@@ -1088,8 +1074,8 @@ mod tests {
         Keeper::new(Store::new(&root.to_string_lossy()), &home.to_string_lossy())
     }
 
-    /// The scan payload cache is process-global, like `lastScan`; drop
-    /// it so one test never reads another test's scan.
+    /// 扫描负载缓存是进程全局的，就像 `lastScan`；把它丢掉，这样一个测试绝不会
+    /// 读到另一个测试的扫描结果。
     fn clean_slate() {
         *last_scan().lock().unwrap_or_else(|e| e.into_inner()) = None;
         assets::invalidate();
@@ -1107,7 +1093,7 @@ mod tests {
         )
     }
 
-    /// `JSON.parse(result.content[0].text)` — what an MCP client does.
+    /// `JSON.parse(result.content[0].text)` —— MCP 客户端所做的事。
     fn payload_of(resp: &Value) -> Value {
         let raw = resp["result"]["content"][0]["text"]
             .as_str()
@@ -1135,7 +1121,7 @@ mod tests {
             json!(false)
         );
 
-        // ping answers an empty result; a notification answers nothing.
+        // ping 应答一个空结果；通知则什么都不应答。
         let ping = dispatch(&k, &json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" }));
         assert_eq!(ping["result"], json!({}));
         assert!(dispatch(
@@ -1231,7 +1217,7 @@ mod tests {
         });
         assets::remember(std::slice::from_ref(&asset), std::slice::from_ref(&asset));
 
-        // --- read tool --------------------------------------------------
+        // --- 读取工具 --------------------------------------------------
         let out = payload_of(&call(
             &k,
             1,
@@ -1242,11 +1228,11 @@ mod tests {
         assert_eq!(out["asset"]["name"], json!("pdf"));
         assert_eq!(out["asset"]["agent"], json!("Claude Code"));
         assert_eq!(out["asset"]["tokens"], json!(3));
-        // `a.projectName || undefined` — the key is absent, not null.
+        // `a.projectName || undefined` —— 这个键是不存在，而不是 null。
         assert!(out["asset"].get("project").is_none(), "{}", out["asset"]);
         assert_eq!(out["content"], json!("---\nname: pdf\n---\nbody\n"));
 
-        // --- write tool: lands on the real path, one transaction --------
+        // --- 写入工具：落在真实路径上，一个事务 --------
         let out = payload_of(&call(
             &k,
             2,
@@ -1259,11 +1245,10 @@ mod tests {
             }),
         ));
         assert_eq!(out["ok"], json!(true), "{}", out);
-        // The note must not promise an undo: the write path keeps an in-memory
-        // snapshot for the *failure* case only, so "reversible" was a claim the
-        // tool could no longer stand behind.
+        // 这条说明绝不能承诺一次撤销：写入路径只为*失败*情形保留内存快照，所以
+        // "reversible" 是一个这个工具已经无法兑现的说法。
         assert_eq!(out["note"], json!("written directly"));
-        // claude-code keeps global skills in `~/.claude/skills`.
+        // claude-code 把全局 skills 放在 `~/.claude/skills`。
         let target = home.join(".claude").join("skills").join("new-skill");
         assert!(
             target.join("SKILL.md").is_file(),
@@ -1284,7 +1269,7 @@ mod tests {
         let home = temp("err-home");
         let k = keeper_at(&root, &home);
 
-        // unknown tool → -32602
+        // 未知工具 → -32602
         let resp = call(&k, 1, "no_such_tool", json!({}));
         assert_eq!(resp["error"]["code"], json!(-32602));
         assert_eq!(
@@ -1292,7 +1277,7 @@ mod tests {
             json!("unknown tool: no_such_tool")
         );
 
-        // unknown method → -32601
+        // 未知方法 → -32601
         let resp = dispatch(
             &k,
             &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/nope" }),
@@ -1303,15 +1288,15 @@ mod tests {
             json!("method not found: tools/nope")
         );
 
-        // a tool failure is a *result*, not a protocol error, and carries the
-        // stable code `errors.attach` would add.
+        // 工具失败是一个*结果*，而不是协议错误，并且带着 `errors.attach` 会加上
+        // 的那个稳定 code。
         let out = payload_of(&call(&k, 3, "read_asset", json!({ "assetId": "ghost:1" })));
         assert_eq!(out["ok"], json!(false), "{}", out);
         assert_eq!(out["error"], json!("asset not found: ghost:1"));
         assert_eq!(out["code"], json!("asset.notFoundId"));
         assert_eq!(out["params"], json!(["ghost:1"]));
 
-        // malformed line → a JSON-RPC error, never a panic and never silence.
+        // 格式错误的行 → 一个 JSON-RPC 错误，绝不是 panic，也绝不是沉默。
         let bad = handle_line("not json").expect("a malformed line still answers");
         assert_eq!(bad["jsonrpc"], json!("2.0"));
         assert_eq!(bad["error"]["code"], json!(-32700));
@@ -1324,26 +1309,26 @@ mod tests {
 
     #[test]
     fn a_panic_becomes_an_internal_error_response_instead_of_killing_the_loop() {
-        // `guarded` is what `dispatch` runs the handler behind. Without it a
-        // panic unwinds out of `serve()` and the agent's transport just closes.
+        // `guarded` 正是 `dispatch` 运行 handler 时的护栏。没有它，一次 panic 会
+        // 展开逃出 `serve()`，agent 的传输就只是被关掉了。
         let resp = guarded(Some(json!(7)), || panic!("index out of bounds: 3"));
         assert_eq!(resp["jsonrpc"], json!("2.0"));
         assert_eq!(resp["id"], json!(7), "the client must still match the id");
         assert_eq!(resp["error"]["code"], json!(-32603));
         assert_eq!(resp["error"]["message"], json!("index out of bounds: 3"));
 
-        // `panic!("literal")` carries a &str payload, not a String.
+        // `panic!("literal")` 携带的是一个 &str 负载，不是 String。
         let resp = guarded(Some(json!(8)), || panic!("plain payload"));
         assert_eq!(resp["error"]["message"], json!("plain payload"));
 
-        // A non-string payload falls back to the fixed text.
+        // 非字符串负载退回固定文本。
         let resp = guarded(Some(json!(9)), || panic::panic_any(42u32));
         assert_eq!(resp["error"]["message"], json!("internal error"));
 
-        // An error on an id-less request is dropped, like any other failure.
+        // 没有 id 的请求上的错误会被丢弃，与其它任何失败一样。
         assert!(guarded(None, || panic!("no id")).is_null());
 
-        // The normal path is passed through untouched.
+        // 正常路径原样透传。
         assert_eq!(
             guarded(Some(json!(10)), || json!({ "ok": true })),
             json!({ "ok": true })
@@ -1356,7 +1341,7 @@ mod tests {
         let home = temp("guard-home");
         let k = keeper_at(&root, &home);
 
-        // tools/list and an unknown method survive the wrapper unchanged.
+        // tools/list 和一个未知方法原封不动地穿过这层包装。
         let resp = dispatch(
             &k,
             &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
@@ -1377,14 +1362,12 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
-    /// A tool that resolves `{ ok: false }` must still be flagged as a failed
-    /// execution: a spec-compliant client otherwise renders "asset not found"
-    /// as a normal answer. Deliberate — see
-    /// [`is_tool_error`].
+    /// 一个解析出 `{ ok: false }` 的工具仍然必须被标记为一次失败执行：否则遵循
+    /// 规格的客户端会把"未找到资产"渲染成一次正常应答。这是刻意的 —— 见
+    /// [`is_tool_error`]。
     ///
-    /// A *successful* result must not carry the flag: `isError: true` on a
-    /// happy path is worse than missing it, because clients surface the text
-    /// as an error.
+    /// 一个*成功*的结果绝不能带上这个标志：快乐路径上的 `isError: true` 比缺了
+    /// 它更糟，因为客户端会把那段文字当作错误呈现出来。
     #[test]
     fn failed_tool_results_are_flagged_with_is_error() {
         let _guard = assets::lock_for_test();
@@ -1423,9 +1406,9 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
-    /// A skill asset on disk plus its payload form, for the read cache. The
-    /// caller seeds the cache via `assets::remember` — one call per test, since
-    /// `remember` *replaces* the cache and a successful write invalidates it.
+    /// 磁盘上的一个 skill 资产加上它的负载形式，供读取缓存使用。调用方通过
+    /// `assets::remember` 播种缓存 —— 每个测试一次调用，因为 `remember` 会
+    /// *替换*缓存，而一次成功的写入会让它失效。
     fn seed_skill(home: &std::path::Path, body: &str) -> (std::path::PathBuf, Value) {
         let dir = home.join(".claude").join("skills").join("pdf");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1460,7 +1443,7 @@ mod tests {
             &[skill.clone(), plugin.clone()],
         );
 
-        // The delete lands on the real path, inside a reversible transaction.
+        // 删除落在真实路径上，位于一次可撤销的事务之内。
         let out = payload_of(&call(
             &k,
             1,
@@ -1475,8 +1458,8 @@ mod tests {
         );
         assert!(!dir.exists(), "the delete must land on disk");
 
-        // host-owned: the deliberate refusal, with its stable code. (Call 1
-        // invalidated the cache on success, so re-seed both assets.)
+        // 宿主所有：刻意的拒绝，带着它那个稳定的 code。（调用 1 成功后已经让缓存
+        // 失效，所以两个资产都要重新播种。）
         assets::remember(
             &[skill.clone(), plugin.clone()],
             &[skill.clone(), plugin.clone()],
@@ -1494,7 +1477,7 @@ mod tests {
         );
         assert_eq!(out["code"], json!("asset.hostOwnedDelete"));
 
-        // unknown id: `asset not found` exactly.
+        // 未知的 id：精确的 `asset not found`。
         let out = payload_of(&call(
             &k,
             3,
@@ -1505,8 +1488,8 @@ mod tests {
         assert_eq!(out["error"], json!("asset not found"));
         assert_eq!(out["code"], json!("asset.notFound"));
 
-        // Re-creating the folder proves the second call is a real delete, not
-        // a replay of the first one's state.
+        // 重新创建文件夹证明第二次调用是一次真正的删除，而不是第一次调用状态的
+        // 重放。
         let (dir2, skill2) = seed_skill(
             &home,
             "---
@@ -1541,7 +1524,7 @@ body
         let home = temp("dist-home");
         let k = keeper_at(&root, &home);
         let (_, skill) = seed_skill(&home, "---\nname: pdf\n---\nbody\n");
-        // A successful write invalidates the cache, so re-seed before each call.
+        // 一次成功的写入会让缓存失效，所以每次调用前都要重新播种。
         let reseed =
             || assets::remember(std::slice::from_ref(&skill), std::slice::from_ref(&skill));
         reseed();
@@ -1568,7 +1551,7 @@ body
         );
         assert_eq!(out["skipped"], json!([]), "{}", out);
 
-        // same location is skipped, not copied.
+        // 相同位置会被跳过，不会被拷贝。
         reseed();
         let out = payload_of(&call(
             &k,
@@ -1584,7 +1567,7 @@ body
         assert_eq!(out["code"], json!("write.nothingToWrite"));
         assert_eq!(out["skipped"][0]["reason"], json!("same location"));
 
-        // unknown asset.
+        // 未知的资产。
         let out = payload_of(&call(
             &k,
             3,
@@ -1613,8 +1596,7 @@ body
         assets::remember(std::slice::from_ref(&skill), std::slice::from_ref(&skill));
         let out_dir = temp("exp-out");
 
-        // error branches, each with the stable code the reference
-        // implementation's `errors.attach` adds.
+        // 错误分支，每一个都带着参考实现的 `errors.attach` 会加上的那个稳定 code。
         let out = payload_of(&call(
             &k,
             1,
@@ -1635,7 +1617,7 @@ body
         assert_eq!(out["error"], json!("target directory does not exist"));
         assert_eq!(out["code"], json!("write.targetDirMissing"));
 
-        // happy path: manifest.json + files/ under <dir>/agentkeeper-bundle.
+        // 快乐路径：`<dir>/agentkeeper-bundle` 下的 manifest.json + files/。
         let out = payload_of(&call(
             &k,
             3,
@@ -1664,7 +1646,7 @@ body
             manifest
         );
 
-        // import into a *fresh* home — the same slug would be skipped there.
+        // 导入到一个*全新的* home —— 同一个 slug 在那里会被跳过。
         let root2 = temp("imp");
         let home2 = temp("imp-home");
         let k2 = keeper_at(&root2, &home2);
@@ -1688,7 +1670,7 @@ body
             target
         );
 
-        // a folder without a manifest is refused, not guessed at.
+        // 没有 manifest 的文件夹会被拒绝，而不是靠猜。
         let junk = temp("imp-junk");
         let out = payload_of(&call(
             &k2,
@@ -1731,7 +1713,7 @@ body
         });
         assets::remember(&[rule.clone(), locked.clone()], &[rule, locked]);
 
-        // host-owned: the read-only refusal, with its stable code.
+        // 宿主所有：只读拒绝，带着它那个稳定的 code。
         let out = payload_of(&call(
             &k,
             1,
@@ -1745,8 +1727,7 @@ body
         );
         assert_eq!(out["code"], json!("asset.hostOwnedEdit"));
 
-        // A write-through update: the tool answers the new state and no
-        // transaction tooling exists to answer for.
+        // 一次直写更新：工具应答的是新状态，并不存在可供应答的事务工具。
         let out = payload_of(&call(
             &k,
             2,
@@ -1754,7 +1735,7 @@ body
             json!({ "assetId": "rule:a", "content": "new body\n" }),
         ));
         assert_eq!(out["ok"], json!(true), "{}", out);
-        // `txId` stays a correlation id for the audit line, nothing more.
+        // `txId` 仍然只是审计行的关联 id，别无其它。
         let tx_id = out["txId"].as_str().unwrap_or_default().to_string();
         assert!(tx_id.starts_with("tx-"), "{}", out);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "new body\n");
@@ -1765,8 +1746,8 @@ body
             audit.contains(&tx_id),
             "the write must be journalled in audit.jsonl: {audit}"
         );
-        // The retired tools are gone from the surface, not just unregistered: a
-        // name an agent can still call is a capability that still exists.
+        // 退役的工具是从界面上消失的，而不只是被注销：一个 agent 仍能调用的
+        // 名字就是一项仍然存在的能力。
         for gone in ["rollback_transaction", "list_transactions"] {
             let resp = call(&k, 3, gone, json!({ "txId": tx_id, "limit": 50 }));
             assert_eq!(
@@ -1789,9 +1770,9 @@ body
         std::fs::remove_dir_all(&home).ok();
     }
 
-    /// The read tools against a *real* scan of a temp home — no seeded cache —
-    /// so the payload shapes (`stats`, `list_assets`, the baseline pair) are
-    /// checked on what the scanner actually produces.
+    /// 针对一个临时 home 的*真实*扫描来测读取工具 —— 不用播种的缓存 ——
+    /// 这样负载形状（`stats`、`list_assets`、那一对 baseline）是在扫描器真正产出的
+    /// 东西上被检查的。
     #[test]
     fn scan_stats_list_and_baseline_tools_read_a_real_home() {
         let _guard = assets::lock_for_test();
@@ -1830,7 +1811,7 @@ body
             .expect("claude-code in stats.agents");
         assert_eq!(claude["installed"], json!(true), "{}", claude);
 
-        // filters, the case-insensitive search, and the limit clamp.
+        // 过滤器、大小写不敏感的搜索，以及 limit 的钳位。
         let out = payload_of(&call(&k, 3, "list_assets", json!({ "kind": "skill" })));
         assert!(out["total"].as_u64().unwrap_or(0) >= 2, "{}", out);
         let out = payload_of(&call(&k, 4, "list_assets", json!({ "search": "PDF" })));
@@ -1847,7 +1828,7 @@ body
         assert_eq!(out["showing"], json!(1), "{}", out);
         assert_eq!(out["assets"].as_array().unwrap().len(), 1);
 
-        // baseline: anchor, see no drift, then change / add / remove.
+        // baseline：先锚定、看到没有漂移，然后改动 / 新增 / 移除。
         let out = payload_of(&call(&k, 7, "set_baseline", json!({})));
         assert_eq!(out["ok"], json!(true), "{}", out);
         assert!(out["count"].as_u64().unwrap_or(0) >= 2, "{}", out);
@@ -1869,7 +1850,7 @@ body
             "---\nname: extra\ndescription: extra\n---\nbody\n",
         );
         std::fs::remove_dir_all(home.join(".claude").join("skills").join("excel")).unwrap();
-        let _ = payload_of(&call(&k, 9, "scan", json!({}))); // rescan, so the diff sees it
+        let _ = payload_of(&call(&k, 9, "scan", json!({}))); // 重新扫描，好让差异能看见它
         let out = payload_of(&call(&k, 10, "baseline_diff", json!({})));
         let ids = |key: &str| {
             out[key]

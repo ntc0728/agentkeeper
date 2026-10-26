@@ -1,33 +1,33 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * Build the two release artifacts from one command.
+ * 用一条命令构建两份发布产物。
  *
- *   release/AgentKeeper_<ver>_x64-setup.exe        NSIS installer (currentUser)
- *   release/AgentKeeper_<ver>_x64-portable.zip     install-free archive
+ *   release/AgentKeeper_<ver>_x64-setup.exe        NSIS 安装包（currentUser）
+ *   release/AgentKeeper_<ver>_x64-portable.zip     免安装压缩包
  *
- * Why this exists instead of putting `"targets": ["nsis", "portable"]` in
- * tauri.conf.json: tauri-bundler 2.x has no `portable` package type on Windows —
- * the supported set is exactly `nsis` and `msi`
- * (tauri-bundler-2.10.3/src/bundle/settings.rs:67-74). Writing `portable` into
- * `bundle.targets` is a config error, not a shorthand, so the archive is
- * assembled here instead of being faked as a config value.
+ * 为什么不把 `"targets": ["nsis", "portable"]` 直接写进
+ * tauri.conf.json：tauri-bundler 2.x 在 Windows 上没有 `portable` 这种包类型——
+ * 支持的集合恰好只有 `nsis` 和 `msi`
+ * （tauri-bundler-2.10.3/src/bundle/settings.rs:67-74）。把 `portable` 写进
+ * `bundle.targets` 是一个配置错误，而不是某种简写，所以压缩包
+ * 在这里自己组装，而不是伪装成一个配置值。
  *
- * The two artifacts are the same files; only the delivery differs:
- *   installer → %LOCALAPPDATA%\AgentKeeper + shortcuts + uninstall entry
- *   portable  → unzip anywhere and run agentkeeper-shell.exe, nothing installed
+ * 两份产物是同一批文件，只有交付方式不同：
+ *   installer → %LOCALAPPDATA%\AgentKeeper + 快捷方式 + 卸载项
+ *   portable  → 随便解压到哪都能运行 agentkeeper-shell.exe，什么都不安装
  *
- * Both carry the MCP sidecar, because `docs/MCP-SERVER.md` tells users to point
- * their agent config at `agentkeeper-mcp.exe` next to the shell. A portable copy
- * resolves it the same way (sibling file), which is why the zip ships it too.
+ * 两者都带上 MCP sidecar，因为 `docs/MCP-SERVER.md` 让用户把
+ * agent 配置指向 shell 旁边的 `agentkeeper-mcp.exe`。便携版副本
+ * 用同样的方式解析它（同级文件），所以 zip 里也带上它。
  *
- * Usage:
- *   npm run tauri:bundle                  # sync + sidecar + build + stage
- *   node scripts/package-release.js       # same, run directly
- *   node scripts/package-release.js --no-build   # stage existing artifacts only
+ * 用法：
+ *   npm run tauri:bundle                  # 同步 + sidecar + 构建 + 归集
+ *   node scripts/package-release.js       # 同上，直接运行
+ *   node scripts/package-release.js --no-build   # 只归集已有产物
  *   node scripts/package-release.js --portable-only
  *
- * Exit 0 = both requested artifacts exist in release/ and were verified.
+ * 退出码 0 = 要求的产物都存在于 release/ 且已校验。
  */
 
 const fs = require('fs');
@@ -35,16 +35,16 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-/** `tauri-shell/` — the Rust workspace root. */
+/** `tauri-shell/` —— Rust 工作区根目录。 */
 const WORKSPACE = path.join(ROOT, 'tauri-shell');
 const SRC_TAURI = path.join(WORKSPACE, 'src-tauri');
 /**
- * The workspace's shared target directory. It sits at the workspace root, not
- * under `src-tauri/`, because `core/` and `src-tauri/` are two members of one
- * workspace — cargo builds them into one `target/`.
+ * 工作区共享的 target 目录。它位于工作区根，而不是
+ * `src-tauri/` 下面，因为 `core/` 和 `src-tauri/` 是同一个工作区的
+ * 两个成员——cargo 把它们构建进同一个 `target/`。
  */
 const TARGET = path.join(WORKSPACE, 'target', 'release');
-/** Where the sidecars are staged for `bundle.externalBin`. */
+/** sidecar 为 `bundle.externalBin` 归集到的位置。 */
 const STAGED = path.join(SRC_TAURI, 'binaries');
 const OUT_DIR = path.join(ROOT, 'release');
 const CONF = path.join(SRC_TAURI, 'tauri.conf.json');
@@ -52,9 +52,9 @@ const CONF = path.join(SRC_TAURI, 'tauri.conf.json');
 const SHELL_EXE = 'agentkeeper-shell.exe';
 const MCP_EXE = 'agentkeeper-mcp.exe';
 const SCAN_EXE = 'ak-scan.exe';
-/** Shipped beside the shell so the documented MCP path exists in both forms. */
+/** 随 shell 一起出货，好让文档里写的 MCP 路径在两种形态下都存在。 */
 const SIDECARS = [MCP_EXE, SCAN_EXE];
-/** The triple tauri.conf.json's `bundle.externalBin` entries resolve against. */
+/** tauri.conf.json 里 `bundle.externalBin` 条目所解析的三元组。 */
 const TRIPLE = 'x86_64-pc-windows-msvc';
 
 const argv = process.argv.slice(2);
@@ -69,21 +69,21 @@ function fail(m) {
   process.exit(1);
 }
 
-/* ------------------------------------------------------------------ config */
+/* ------------------------------------------------------------------ 配置 */
 
 function version() {
   try {
     const conf = JSON.parse(fs.readFileSync(CONF, 'utf8'));
     if (conf.version) return conf.version;
   } catch (_e) {
-    /* fall through to package.json */
+    /* 落到 package.json */
   }
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
   if (!pkg.version) fail('cannot determine the version (tauri.conf.json and package.json)');
   return pkg.version;
 }
 
-/* ------------------------------------------------------------------- build */
+/* ------------------------------------------------------------------- 构建 */
 
 function run(cmd, args, opts) {
   const r = spawnSync(cmd, args, { stdio: 'inherit', ...opts });
@@ -96,19 +96,19 @@ function node(script, args, cwd) {
 }
 
 function buildAll() {
-  // Three steps, in this order:
-  //   1. dist — `src/renderer` is compiled into the executable by tauri-build
-  //   2. core binaries — `agentkeeper-mcp` and `ak-scan` live in the
-  //      `agentkeeper-core` crate, so `cargo tauri build` cannot see them
-  //      (it collects binaries from the crate it builds). They are staged as
-  //      sidecars for `bundle.externalBin`.
-  //   3. cargo tauri build — builds the shell and bundles the sidecars.
+  // 三步，顺序如下：
+  //   1. dist —— `src/renderer` 由 tauri-build 编译进可执行文件
+  //   2. core 二进制 —— `agentkeeper-mcp` 和 `ak-scan` 住在
+  //      `agentkeeper-core` crate 里，所以 `cargo tauri build` 看不见它们
+  //      （它只从自己构建的那个 crate 收集二进制）。它们被归集为
+  //      `bundle.externalBin` 的 sidecar。
+  //   3. cargo tauri build —— 构建 shell 并把 sidecar 打进包里。
   //
-  // Step 2 is not circular. It used to be, when the sidecars were `[[bin]]`
-  // targets of the shell crate itself: `tauri-build` runs as that crate's
-  // build script for every target, so a clean `target/` could not build a
-  // sidecar the build script insisted already existed. The core crate has no
-  // build script, so the sidecar is built by something that does not care.
+  // 第 2 步不是循环依赖。它曾经是——那时 sidecar 是 shell crate 自己的
+  // `[[bin]]` 目标：`tauri-build` 会作为那个 crate 的构建脚本对每个目标运行，
+  // 于是一个干净的 `target/` 没法构建出一个构建脚本坚持要求「已经存在」的
+  // sidecar。core crate 没有构建脚本，所以 sidecar 是由一个不在乎这件事的
+  // 东西构建出来的。
   log('sync frontend');
   node('tauri-shell/copy-frontend.js');
   log('stage core binaries');
@@ -125,14 +125,14 @@ function buildAll() {
   });
 }
 
-/* ---------------------------------------------------------------- collect */
+/* ---------------------------------------------------------------- 收集 */
 
 function must(p, label) {
   if (!fs.existsSync(p)) fail(`${label} missing: ${p}`);
   return p;
 }
 
-/** Copy a file and prove the copy is byte-identical. */
+/** 复制一个文件，并证明这份副本字节完全一致。 */
 function copyVerified(from, to) {
   fs.copyFileSync(from, to);
   const a = fs.statSync(from).size;
@@ -147,9 +147,9 @@ function stageInstaller(ver) {
   const exact = path.join(dir, want);
   let src = exact;
   if (!fs.existsSync(src)) {
-    // A version bump in Cargo.toml without re-running the build leaves a
-    // differently-named installer here. Take it, but say so — silently
-    // publishing the old name is how a release ships the previous binary.
+    // 在 Cargo.toml 里改了版本号却没重新构建，会在这里留下一个
+    // 名字不同的安装包。我们把它取用，但要说出来——悄无声息地
+    // 发布旧名字，正是发布出货上一个二进制的做法。
     const found = fs.existsSync(dir)
       ? fs.readdirSync(dir).filter((n) => n.toLowerCase().endsWith('.exe'))
       : [];
@@ -170,13 +170,13 @@ function stageInstaller(ver) {
 }
 
 /**
- * Locate a sidecar by its installed name (`agentkeeper-mcp.exe`).
+ * 按安装后的名字（`agentkeeper-mcp.exe`）定位一个 sidecar。
  *
- * The staged copy is named `agentkeeper-mcp-<triple>.exe` because that is what
- * `bundle.externalBin` resolves against; the installer renames it on the way
- * in. The portable zip has to carry the plain name, so the triple is stripped
- * here. The build output is the fallback for a `--no-build` run whose staging
- * directory was cleared.
+ * 归集后的副本名为 `agentkeeper-mcp-<triple>.exe`，因为那正是
+ * `bundle.externalBin` 所解析的名字；安装包会在装入时改名。
+ * 便携 zip 必须带上不带三元组的那个名字，所以这里把它剥掉。
+ * 对于一次 `--no-build` 运行、而归集目录又已被清空的情况，
+ * 构建输出是兜底。
  */
 function findSidecar(name) {
   const staged = path.join(STAGED, `${name.replace(/\.exe$/, '')}-${TRIPLE}.exe`);
@@ -232,16 +232,16 @@ function stagePortable(ver) {
 
   const zip = path.join(OUT_DIR, `AgentKeeper_${ver}_x64-portable.zip`);
   fs.rmSync(zip, { force: true });
-  // Zip creation uses Windows' bundled bsdtar by ABSOLUTE path.
+  // 打 zip 用的是 Windows 自带的 bsdtar，靠绝对路径调用。
   //
-  // Not `tar` off PATH: in Git Bash that resolves to GNU tar 1.35 (/usr/bin/tar),
-  // where `-a` does not select the archive format for `.zip` and the result is a
-  // plain tar with a .zip name (verified: signature 'A','g' instead of 'P','K').
-  // bsdtar 3.8+ ships with Windows 10 1803+ and does write a real deflate zip.
+  // 不用 PATH 上的 `tar`：在 Git Bash 里那解析到 GNU tar 1.35（/usr/bin/tar），
+  // 它那里 `-a` 不会为 `.zip` 选择归档格式，结果是一个顶着 .zip 名字的
+  // 普通 tar（实测：签名是 'A','g' 而不是 'P','K'）。
+  // bsdtar 3.8+ 随 Windows 10 1803+ 一起提供，确实会写出真正的 deflate zip。
   //
-  // `-f` gets the bare filename: bsdtar reads a drive-letter argument as a
-  // remote `host:path` spec and fails with "Cannot connect to <drive>:".
-  // cwd is OUT_DIR, so a relative name is also unambiguous.
+  // `-f` 传的是纯文件名：bsdtar 会把带盘符的参数当成远程
+  // `host:path` 规格，然后失败并报 "Cannot connect to <drive>:"。
+  // cwd 是 OUT_DIR，所以相对名字同样没有歧义。
   const tarExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
   if (!fs.existsSync(tarExe)) {
     fail(`need ${tarExe} (Windows 10 1803+) to create the portable zip`);
@@ -265,7 +265,7 @@ function stagePortable(ver) {
   return zip;
 }
 
-/* ------------------------------------------------------------------- main */
+/* ------------------------------------------------------------------- 主流程 */
 
 function main() {
   const ver = version();

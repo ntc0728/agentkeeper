@@ -1,50 +1,49 @@
-//! The software-update pipeline: `check → download → progress → cancel →
-//! install`, the scheduler, the `ak:update-*` payload guard, and the version
-//! maths.
+//! 软件更新流水线：`check → download → progress → cancel →
+//! install`，调度器、`ak:update-*` 载荷守卫，以及版本运算。
 //!
-//! * pipeline — end-to-end cover for the update pipeline: channels, download,
-//!   install guards. The
-//!   mock server here stands up a localhost GitHub API and drives
-//!   the *real* manager through it, which is what proves headers, asset
-//!   selection, streaming, progress, cancellation and the install guards
-//!   together. `manager.rs`'s unit tests cannot do that: they replace the
-//!   `fetch` / `downloader` closures with in-process fakes, so the sockets,
-//!   `ureq`, `Content-Length` handling and the byte-level progress accounting are
-//!   never executed there.
+//! * pipeline —— 更新流水线的端到端覆盖：渠道、下载、
+//!   安装守卫。这里的
+//!   模拟服务器会架起一个本地 GitHub API 并驱动
+//!   *真实的* manager 走一遍，正是这才证明了请求头、资产
+//!   选择、流式传输、进度、取消和安装守卫
+//!   能协同工作。`manager.rs` 的单元测试做不到这一点：它们把
+//!   `fetch` / `downloader` 闭包换成进程内的假实现，所以 socket、
+//!   `ureq`、`Content-Length` 处理和字节级的进度核算在那里
+//!   从未被执行。
 //!
-//!   Two rules that half follows: no test touches the network, DNS or GitHub
-//!   (everything goes to `127.0.0.1:<ephemeral>`), and no test executes a
-//!   downloaded file — `install()` is asserted through the `Options::launcher`
-//!   seam, which production leaves as `None`. The `OnceLock` singleton
-//!   (`ensure_manager`) is deliberately unused: it pins the first root for the
-//!   whole process, so every test builds its own `UpdateManager` with
-//!   `with_options` and each owns a private temp root.
-//! * ipc guard — the two
-//!   `ak:update-*` IPC surface rules: the "clear token"
-//!   button and the five settings validations. Both live in
-//!   `core::update::manager` as pure functions (`token_arg`,
-//!   `validate_settings_patch`) so the *rules* are testable without a WebView;
-//!   `lib.rs` is only the adapter that calls them. Each rule matches the
-//!   reference expression it mirrors, which is why each
-//!   assertion is paired with that expression. Deliberately not
-//!   claimed here: the Tauri argument→parameter mapping (that `{token:null}`
-//!   reaches `Request` intact — `tauri::ipc::InvokeMessage`'s fields are
-//!   `pub(crate)`, so an integration test cannot build one) and the renderer half
-//!   (`app.js`).
-//! * version semantics — the version helpers compared against fixed
-//!   expectations. `version.rs`'s unit tests
-//!   and the pipeline above already prove the *semantics* of the version maths —
-//!   but with their own fixtures, not the reference ones. That is the right way to test
-//!   behaviour and the wrong way to detect drift: a shape only one of them
-//!   exercises can diverge with both suites green. That half therefore mirrors
-//!   literal for literal: the same strings, the same expected values, in
-//!   the same order as the reference. The redundancy is the point. Everything
-//!   there is a pure function: no HTTP, no manager, no singleton, no real DPAPI,
-//!   no filesystem.
+//!   这一半遵守两条规则：没有测试接触网络、DNS 或 GitHub
+//!   （一切都发往 `127.0.0.1:<ephemeral>`），也没有测试执行
+//!   下载得到的文件 —— `install()` 是通过 `Options::launcher`
+//!   这个接缝来断言的，而生产环境把它留作 `None`。`OnceLock` 单例
+//!   （`ensure_manager`）被刻意不用：它会把第一个根目录钉死给
+//!   整个进程，所以每个测试都自己用
+//!   `with_options` 构造 `UpdateManager`，各自拥有一份私有临时根目录。
+//! * ipc guard —— 两条
+//!   `ak:update-*` IPC 表层规则："清除令牌"
+//!   按钮，以及五条设置校验。两者都以纯函数的形式住在
+//!   `core::update::manager` 里（`token_arg`、
+//!   `validate_settings_patch`），这样*规则*无需 WebView 也能被测试；
+//!   `lib.rs` 只是调用它们的适配器。每条规则都对应它所镜像的那个
+//!   参考表达式，这就是为什么每条
+//!   断言都与那个表达式配对。这里刻意不去
+//!   断言的部分：Tauri 的参数→形参映射（也就是 `{token:null}`
+//!   能否完整抵达 `Request` —— `tauri::ipc::InvokeMessage` 的字段是
+//!   `pub(crate)`，所以集成测试造不出一个）以及渲染器那一半
+//!   （`app.js`）。
+//! * version semantics —— 版本辅助函数与固定
+//!   期望值的对比。`version.rs` 的单元测试
+//!   和上面的流水线已经证明了版本运算的*语义* ——
+//!   但用的是它们自己的夹具，而不是参考实现那套。这是测试
+//!   行为的正确方式，却是不适合发现漂移的方式：一种只有其中
+//!   一套会走到的形状，在两套都绿的情况下也能各自偏离。所以那一半
+//!   逐字镜像：相同的字符串、相同的期望值，
+//!   顺序也与参考实现相同。这种冗余正是重点。那里的
+//!   一切都是纯函数：没有 HTTP、没有 manager、没有单例、没有真的 DPAPI、
+//!   没有文件系统。
 //!
-//! The reference returns `1 / -1 / 0 / null` while Rust returns
-//! `Option<Ordering>`; the version comparison itself is covered by
-//! `agentkeeper-core`'s unit tests, which compare `Ordering` directly.
+//! 参考实现返回 `1 / -1 / 0 / null`，而 Rust 返回
+//! `Option<Ordering>`；版本比较本身由
+//! `agentkeeper-core` 的单元测试覆盖，它们直接比较 `Ordering`。
 
 use agentkeeper_shell_lib::core::settings;
 use agentkeeper_shell_lib::core::update::manager::{
@@ -62,30 +61,30 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /* ------------------------------------------------------------------ */
-/* check → download → install over real HTTP                           */
-/* a GitHub-shaped mock server                                         */
+/* 通过真实 HTTP 的 check → download → install                          */
+/* 一个 GitHub 形状的模拟服务器                                        */
 /* ------------------------------------------------------------------ */
 
-/// Everything the server thread needs. Built once, then shared immutably.
+/// 服务器线程需要的一切。构造一次，然后不可变地共享。
 struct MockConfig {
     base: String,
     payload: Vec<u8>,
-    /// `/releases/latest` answers 404 (a repository with no release yet).
+    /// `/releases/latest` 返回 404（一个还没有任何 release 的仓库）。
     no_release: bool,
-    /// What `/releases?per_page=30` returns.
+    /// `/releases?per_page=30` 返回什么。
     list: Vec<Value>,
-    /// Status for `/releases?per_page=…`; 200 answers `list`.
+    /// `/releases?per_page=…` 的状态码；200 表示返回 `list`。
     list_status: Option<u16>,
-    /// Declare this `Content-Length` on `/dl/` instead of the real size.
+    /// 在 `/dl/` 上声明这个 `Content-Length`，而不是真实大小。
     oversized: Option<u64>,
-    /// Status for `/dl/`; 200 streams the payload.
+    /// `/dl/` 的状态码；200 表示流式发送载荷。
     dl_status: u16,
-    /// Split the payload into chunks of this size, pausing `chunk_delay_ms`
-    /// between them. 0 = one write.
+    /// 把载荷切成这个大小的块，块之间暂停 `chunk_delay_ms`
+    /// 毫秒。0 = 一次写完。
     chunk: usize,
     chunk_delay_ms: u64,
-    /// Answer `/dl/` with `Transfer-Encoding: chunked` and no `Content-Length`,
-    /// so the byte ceiling can only be discovered from the stream itself.
+    /// 用 `Transfer-Encoding: chunked` 且不带 `Content-Length` 来
+    /// 响应 `/dl/`，这样字节上限只能从流本身发现。
     chunked: bool,
 }
 
@@ -115,7 +114,7 @@ impl MockConfig {
     }
 }
 
-/// The GitHub mock server, in Rust.
+/// 用 Rust 写的 GitHub 模拟服务器。
 struct MockGitHub {
     base: String,
     stop: Arc<AtomicBool>,
@@ -188,7 +187,7 @@ impl MockGitHub {
         self.requests.lock().unwrap().clone()
     }
 
-    /// Flip the server into 403 mode to exercise the cooldown.
+    /// 把服务器切到 403 模式以演练冷却期。
     fn set_rate_limited(&self, on: bool) {
         self.rate_limited.store(on, AtomicOrdering::SeqCst);
     }
@@ -210,22 +209,23 @@ fn serve(
     requests: Arc<Mutex<Vec<String>>>,
     rate_limited: Arc<AtomicBool>,
 ) {
-    // Non-blocking so `stop` is checked without a connection to unblock it.
+    // 设成非阻塞，这样不用等一个连接来解除 `stop` 的阻塞。
     listener.set_nonblocking(true).expect("nonblocking");
     let deadline = Instant::now() + Duration::from_secs(120);
     while !stop.load(AtomicOrdering::SeqCst) && Instant::now() < deadline {
         match listener.accept() {
             Ok((mut stream, _)) => {
-                // Windows makes an accepted socket inherit the listener's
-                // non-blocking mode, and a non-blocking socket ignores
-                // SO_RCVTIMEO — the exact defect already documented and fixed in
-                // `core::http::tests::serve` and `core::update::http::tests::serve`,
-                // but missed here. `read_request` then got `WouldBlock(10035)` on
-                // its first read whenever the client's bytes had not arrived yet,
-                // returned an empty request line, and `respond` fell through to
-                // its 404 branch: a healthy product op reported "404" and this
-                // test failed ~8 % of the time (measured 4/50 runs, all inside
-                // 0.02 s, which already ruled out the 2 s read timeout).
+                // Windows 会让被接受的 socket 继承监听器的
+                // 非阻塞模式，而非阻塞 socket 会忽略
+                // SO_RCVTIMEO —— 这正是 `core::http::tests::serve` 和
+                // `core::update::http::tests::serve` 里已经
+                // 记录并修复过的那个缺陷，却在这里被漏掉了。
+                // 于是 `read_request` 在第一次读时拿到 `WouldBlock(10035)`
+                // —— 只要客户端的字节还没到，
+                // 它就返回一条空的请求行，`respond` 于是落进
+                // 它的 404 分支：一次健康的操作上报了"404"，而这个
+                // 测试大约每 8 % 失败一次（实测 50 次里 4 次，全都在
+                // 0.02 s 之内，这已经排除了 2 s 的读超时）。
                 stream.set_nonblocking(false).expect("blocking connection");
                 stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
                 let request = read_request(&mut stream);
@@ -247,8 +247,8 @@ fn serve(
     }
 }
 
-/// The request line only; the body is never sent by these requests, but the
-/// header block is drained so the client is not writing into a closed socket.
+/// 只要请求行；这些请求从不发送请求体，但
+/// 头部块会被读空，好让客户端不会往一个已关闭的 socket 里写。
 fn read_request(stream: &mut TcpStream) -> String {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
@@ -261,9 +261,9 @@ fn read_request(stream: &mut TcpStream) -> String {
                     break;
                 }
             }
-            // Belt and braces for the non-blocking inheritance described at the
-            // accept site: a `WouldBlock` is "no bytes yet", never "empty
-            // request", so it must not end the read.
+            // 双保险，针对 accept 处描述的非阻塞继承：
+            // `WouldBlock` 意味着"还没到字节"，绝不是"空
+            // 请求"，所以它不该结束这次读。
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
             Err(_) => break,
         }
@@ -329,9 +329,9 @@ fn respond(stream: &mut TcpStream, request: &str, cfg: &MockConfig, rate_limited
         return;
     }
     if is_repo_path && path.contains("/releases?") {
-        // A status other than 200 turns this branch into the failure fixture the
-        // changelog test needs (`GitHub returned HTTP 500`), without a second
-        // mock: the transport branch below is already exercised elsewhere.
+        // 一个非 200 的状态码就把这个分支变成变更日志测试
+        // 需要的失败夹具（`GitHub returned HTTP 500`），而不需要第二个
+        // 模拟服务器：下面的传输分支已经在别处被演练过了。
         let status = cfg.list_status.unwrap_or(200);
         let body = serde_json::to_vec(&cfg.list).unwrap();
         write_head(
@@ -349,12 +349,12 @@ fn respond(stream: &mut TcpStream, request: &str, cfg: &MockConfig, rate_limited
             let _ = stream.write_all(b"boom");
             return;
         }
-        // A declared length that lies is the whole point of the ceiling test:
-        // the guard must trip on the header, before the first byte lands.
+        // 一个撒谎的声明长度正是上限测试的全部要点：
+        // 守卫必须在头部上触发，在第一个字节落地之前。
         let declared = cfg.oversized.unwrap_or(cfg.payload.len() as u64) as usize;
         if cfg.chunked {
-            // No `Content-Length` at all: the ceiling can only be discovered
-            // from the stream, which is the other half of the guard.
+            // 完全没有 `Content-Length`：上限只能
+            // 从流里发现，这是该守卫的另一半。
             let _ = stream.write_all(
                 b"HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\n\
                   Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
@@ -405,7 +405,7 @@ fn respond(stream: &mut TcpStream, request: &str, cfg: &MockConfig, rate_limited
 }
 
 /* ------------------------------------------------------------------ */
-/* fixtures                                                            */
+/* fixtures —— 夹具                                                   */
 /* ------------------------------------------------------------------ */
 
 struct Fixture {
@@ -436,7 +436,7 @@ impl Fixture {
         settings::save(&self.root_str(), &patch);
     }
 
-    /// A manager on `win32`/`x64`, pinned to this fixture's download directory.
+    /// 一个跑在 `win32`/`x64` 上的 manager，钉在这个夹具的下载目录里。
     fn manager(&self, app_version: &str) -> UpdateManager {
         self.manager_with(app_version, None, 0)
     }
@@ -457,7 +457,7 @@ impl Fixture {
         UpdateManager::with_options(&self.root_str(), options)
     }
 
-    /// Point the manager at the mock and turn on auto-check.
+    /// 把 manager 指向模拟服务器并打开自动检查。
     fn use_mock(&self, base: &str) {
         self.save(json!({
             "updateRepo": "acme/keeper",
@@ -475,7 +475,7 @@ impl Drop for Fixture {
     }
 }
 
-/// Poll `progress()` until the task stops being active.
+/// 轮询 `progress()` 直到任务不再处于活跃状态。
 fn wait_inactive(manager: &UpdateManager) -> Value {
     for _ in 0..10_000 {
         let task = manager.progress();
@@ -495,13 +495,13 @@ fn now_ms() -> i64 {
 }
 
 /* ------------------------------------------------------------------ */
-/* the asset name the real release pipeline produces                     */
+/* 真实发布流水线产出的资产名                                          */
 /* ------------------------------------------------------------------ */
 
-/// `pick_installer` is the one function between a published release and an
-/// upgrade that actually happens. The release pipeline names the NSIS installer
-/// `AgentKeeper_<version>_x64-setup.exe` (underscores, `-setup` suffix), which
-/// no other fixture covers — so pin the real artefact name here.
+/// `pick_installer` 是一个已发布的 release 与真正发生的升级之间
+/// 唯一的那道关卡。发布流水线把 NSIS 安装包命名为
+/// `AgentKeeper_<version>_x64-setup.exe`（下划线、`-setup` 后缀），而
+/// 没有别的夹具覆盖这一点 —— 所以在这里把真实的产物名钉住。
 #[test]
 fn the_real_tauri_installer_name_is_selected() {
     let assets = json!([
@@ -516,13 +516,13 @@ fn the_real_tauri_installer_name_is_selected() {
     assert_eq!(picked["name"], json!("AgentKeeper_0.2.0_x64-setup.exe"));
     assert_eq!(picked["url"], json!("u-setup"));
 
-    // A real release ships several artefacts. Read this carefully: only two of
-    // them ever compete. `allowed_installer_suffixes("win32")` is `["exe"]`, so
-    // `…_en-US.msi` and `…_setup.exe.sig` are not "beaten by the installer" —
-    // they never enter `candidates` at all. Of the two `.exe`s, `-setup.exe`
-    // wins on the `setup|install` pattern and `-portable.exe` is filtered out
-    // by `is_non_installer_asset` (portable builds install nothing). The
-    // `.tar.gz` is excluded on the same count.
+    // 一次真实的 release 会附带好几个产物。仔细读这一段：真正
+    // 彼此竞争的只有两个。`allowed_installer_suffixes("win32")` 是 `["exe"]`，所以
+    // `…_en-US.msi` 和 `…_setup.exe.sig` 并不是"被安装包击败了" ——
+    // 它们根本进不了 `candidates`。在那两个 `.exe` 之中，`-setup.exe`
+    // 凭 `setup|install` 模式胜出，而 `-portable.exe` 被
+    // `is_non_installer_asset` 滤掉（便携版什么都不安装）。那个
+    // `.tar.gz` 出于同样的理由被排除。
     let full = json!([
         { "name": "AgentKeeper_0.2.0_x64-setup.exe", "size": 1, "browser_download_url": "u-setup" },
         { "name": "AgentKeeper_0.2.0_x64_en-US.msi", "size": 2, "browser_download_url": "u-msi" },
@@ -533,13 +533,13 @@ fn the_real_tauri_installer_name_is_selected() {
     let picked = version::pick_installer(&full, "win32", "x64").expect("installer");
     assert_eq!(picked["name"], json!("AgentKeeper_0.2.0_x64-setup.exe"));
 
-    // The silent failure mode behind the line above: on win32 the suffix
-    // whitelist is `["exe"]` alone, so an `.msi`-only release is invisible.
-    // `bundle.targets` is nsis-only today; adding `msi` would publish an
-    // installer the updater can never see (`asset: null` →
-    // `downloadSupported: false` → "update available, cannot install").
-    // Pinned so the day someone adds the target, this fails loudly here
-    // instead of quietly in the field.
+    // 上面那一行背后的静默失败模式：在 win32 上后缀
+    // 白名单只有 `["exe"]`，所以一个只有 `.msi` 的 release 是看不见的。
+    // `bundle.targets` 如今只有 nsis；加上 `msi` 会发布一个
+    // 更新器永远看不到的安装包（`asset: null` →
+    // `downloadSupported: false` →"有可用更新，但无法安装"）。
+    // 在这里钉住，是为了等到有人加上那个 target 时，
+    // 这里会响亮地失败，而不是在现场悄无声息地出问题。
     let msi_only = json!([
         { "name": "AgentKeeper_0.2.0_x64_en-US.msi", "size": 1, "browser_download_url": "u-msi" }
     ]);
@@ -548,7 +548,7 @@ fn the_real_tauri_installer_name_is_selected() {
         None,
         ".msi is not in allowed_installer_suffixes(\"win32\")"
     );
-    // Mixed: the .exe must still win and the .msi must not shadow it.
+    // 混合情况：.exe 必须仍然胜出，.msi 不得遮蔽它。
     let mixed = json!([
         { "name": "AgentKeeper_0.2.0_x64_en-US.msi", "size": 1, "browser_download_url": "u-msi" },
         { "name": "AgentKeeper_0.2.0_x64-setup.exe", "size": 2, "browser_download_url": "u-setup" }
@@ -556,8 +556,8 @@ fn the_real_tauri_installer_name_is_selected() {
     let picked = version::pick_installer(&mixed, "win32", "x64").expect("installer");
     assert_eq!(picked["name"], json!("AgentKeeper_0.2.0_x64-setup.exe"));
 
-    // And the update panel's download guard accepts it: the name survives
-    // `safe_file_name`, and the installer check requires the product keyword.
+    // 更新面板的下载守卫也接受它：这个名字能通过
+    // `safe_file_name`，而安装包检查要求含产品关键词。
     assert_eq!(
         version::safe_file_name("AgentKeeper_0.2.0_x64-setup.exe", "win32"),
         "AgentKeeper_0.2.0_x64-setup.exe"
@@ -568,7 +568,7 @@ fn the_real_tauri_installer_name_is_selected() {
 }
 
 /* ------------------------------------------------------------------ */
-/* the release repository is built in                                    */
+/* 发布仓库是内置的                                                    */
 /* ------------------------------------------------------------------ */
 
 #[test]
@@ -576,13 +576,13 @@ fn the_release_repository_is_built_in() {
     let fx = Fixture::new("repo");
     let manager = fx.manager("1.0.0");
 
-    // Nothing to type, and it must equal the
-    // repository in package.json (`ntc0728/agentkeeper`).
+    // 无需输入任何东西，而且它必须等于
+    // package.json 里的那个仓库（`ntc0728/agentkeeper`）。
     assert_eq!(manager.status()["repo"], json!(BUILT_IN_REPO));
     assert_eq!(manager.status()["repo"], json!("ntc0728/agentkeeper"));
 
-    // An unusable value falls back instead of disabling
-    // updates. `normalize_repo` rejects it, so `Cfg::repo` takes the default.
+    // 一个不可用的值会回退，而不是禁用
+    // 更新。`normalize_repo` 拒绝了它，所以 `Cfg::repo` 取默认值。
     fx.save(json!({ "updateRepo": "not a repo" }));
     assert_eq!(manager.status()["repo"], json!(BUILT_IN_REPO));
 
@@ -591,7 +591,7 @@ fn the_release_repository_is_built_in() {
 }
 
 /* ------------------------------------------------------------------ */
-/* 17b. check → download → install, over real HTTP                     */
+/* 17b. check → download → install，通过真实 HTTP                       */
 /* ------------------------------------------------------------------ */
 
 #[test]
@@ -605,7 +605,7 @@ fn check_finds_the_newer_release_over_http() {
     assert_eq!(found["ok"], json!(true), "{}", found);
     assert_eq!(found["hasUpdate"], json!(true), "{}", found);
     assert_eq!(found["latest"], json!("9.9.9"), "{}", found);
-    // Notes and the release page survive the round trip.
+    // 说明与发布页面在往返中完好无损。
     assert_eq!(found["notes"], json!("Release notes body"));
     assert!(
         found["pageUrl"]
@@ -615,8 +615,8 @@ fn check_finds_the_newer_release_over_http() {
         "{}",
         found["pageUrl"]
     );
-    // The NSIS setup beats the portable exe, even though
-    // the bare exe is listed first.
+    // NSIS setup 胜过便携版 exe，即使
+    // 那个裸 exe 排在前面。
     let asset = found["asset"].clone();
     assert!(
         asset["name"].as_str().unwrap_or("").contains("Setup"),
@@ -640,7 +640,7 @@ fn a_second_manual_check_inside_the_gap_reuses_the_result() {
     assert_eq!(manager.check(true)["latest"], json!("9.9.9"));
     let before = mock.request_count();
 
-    // No second request inside the 60 s minimum gap.
+    // 60 s 最小间隔之内不会有第二次请求。
     let throttled = manager.check(true);
     assert_eq!(throttled["reason"], json!("throttled"), "{}", throttled);
     assert_eq!(mock.request_count(), before);
@@ -671,8 +671,8 @@ fn download_streams_to_completion_and_reaches_100_percent() {
     assert_eq!(task["received"], json!(payload.len()), "{}", task);
     assert_eq!(task["total"], json!(payload.len()), "{}", task);
 
-    // The bytes on disk are the bytes that were served,
-    // and the file landed inside the managed directory.
+    // 磁盘上的字节就是被发出来的字节，
+    // 而且文件落在了受管的目录里。
     let path = task["path"].as_str().expect("task path").to_string();
     assert_eq!(std::fs::read(&path).unwrap(), payload);
     let canonical = std::fs::canonicalize(&path).unwrap();
@@ -684,14 +684,14 @@ fn download_streams_to_completion_and_reaches_100_percent() {
         dir.display()
     );
 
-    // The finished task is part of `status()`, which is what the panel polls.
+    // 已完成的任务是 `status()` 的一部分，而面板轮询的正是它。
     assert_eq!(manager.status()["task"]["done"], json!(true));
 }
 
 #[test]
 fn progress_reports_partial_bytes_while_the_transfer_runs() {
-    // 8 chunks of 8 KiB with a pause: long enough to observe a mid-flight
-    // snapshot, short enough to stay well inside the 60 s socket timeout.
+    // 8 块 8 KiB 并带一次暂停：长到足以观察到一个飞行中的
+    // 快照，短到仍稳稳落在 60 s 的 socket 超时之内。
     let payload = vec![b'P'; 64 * 1024];
     let fx = Fixture::new("progress");
     let mock = MockGitHub::start(MockOptions {
@@ -708,7 +708,7 @@ fn progress_reports_partial_bytes_while_the_transfer_runs() {
         .start_download(&url, Some("AgentKeeper-Setup-9.9.9.exe"))
         .expect("start");
 
-    // Watch for a snapshot that is neither the first nor the last one.
+    // 盯着一个既不是第一个也不是最后一个的快照。
     let mut saw_partial = false;
     for _ in 0..5_000 {
         let task = manager.progress();
@@ -737,7 +737,7 @@ fn progress_reports_partial_bytes_while_the_transfer_runs() {
 
 #[test]
 fn cancel_stops_the_transfer_and_reports_canceled() {
-    // A slow server: cancel has to land while bytes are still in flight.
+    // 一个慢速服务器：取消必须在字节仍在传输中落地。
     let payload = vec![b'C'; 512 * 1024];
     let fx = Fixture::new("cancel");
     let mock = MockGitHub::start(MockOptions {
@@ -755,8 +755,8 @@ fn cancel_stops_the_transfer_and_reports_canceled() {
         .expect("start");
     let path = started["path"].as_str().expect("path").to_string();
 
-    // Wait until the first chunk has been counted, so the partial file exists
-    // and the cancellation is observably mid-transfer.
+    // 等到第一块被计入，这样部分文件已经存在，
+    // 取消也明显发生在传输途中。
     for _ in 0..5000 {
         let task = manager.progress();
         if task["received"].as_u64().unwrap_or(0) > 0 || task["active"] != Value::Bool(true) {
@@ -772,8 +772,8 @@ fn cancel_stops_the_transfer_and_reports_canceled() {
     assert_eq!(task["canceled"], json!(true), "{}", task);
     assert_eq!(task["done"], json!(false), "{}", task);
     assert_eq!(task["active"], json!(false), "{}", task);
-    // The cancel path resolves before the `catch` that unlinks the file, so
-    // a partial installer survives — and the task reports no usable path.
+    // 取消路径在那个删除文件的 `catch` 之前就返回了，所以
+    // 一个部分下载的安装包会留存下来 —— 而任务报告没有可用的路径。
     assert_eq!(task["path"], Value::Null, "{}", task);
     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     assert!(
@@ -791,7 +791,7 @@ fn cancel_without_an_active_task_is_a_no_op() {
     let manager = fx.manager("1.0.0");
     assert_eq!(manager.cancel()["canceled"], json!(false));
 
-    // A finished task is not active either.
+    // 一个已完成的任务同样不算活跃。
     let mock = MockGitHub::start(MockOptions::default());
     fx.use_mock(&mock.base);
     let manager = fx.manager("1.0.0");
@@ -821,8 +821,8 @@ fn a_second_start_download_while_one_is_active_returns_the_running_task() {
         .start_download(&first_url, Some("AgentKeeper-Setup-9.9.9.exe"))
         .expect("start");
 
-    // A different URL (and no name at all): the running task wins, and the
-    // second URL is never even validated.
+    // 一个不同的 URL（而且根本没有名字）：正在运行的任务胜出，
+    // 第二个 URL 连校验都不会经过。
     let second = manager
         .start_download("https://example.com/other.exe", None)
         .expect("second start must not fail validation");
@@ -845,9 +845,9 @@ fn download_refuses_a_url_outside_the_allow_list() {
     fx.use_mock(&mock.base);
     let manager = fx.manager("1.0.0");
 
-    // The engine speaks English and `src/renderer/engine-zh.js` maps it to the
-    // Chinese directly, so the assertion is on the engine string —
-    // the parity section below pins the mapping side.
+    // 引擎用英语，而 `src/renderer/engine-zh.js` 会把它直接映射成
+    // 中文，所以断言落在引擎字符串上 ——
+    // 下面的对照一节钉住映射那一侧。
     let error = manager
         .start_download("https://evil.example/a.exe", Some("AgentKeeper-a.exe"))
         .expect_err("a foreign host must be refused");
@@ -857,13 +857,13 @@ fn download_refuses_a_url_outside_the_allow_list() {
         error
     );
 
-    // Plain http is refused unless it is the mirror itself.
+    // 除非它就是那个镜像本身，否则明文 http 会被拒绝。
     let error = manager
         .start_download("http://github.com/a.exe", Some("AgentKeeper-a.exe"))
         .expect_err("plain http must be refused");
     assert!(error.message().contains("https"), "{}", error);
 
-    // The configured mirror is allowed (that is the whole point of the setting).
+    // 配置的镜像被允许（那正是这个设置的全部意义）。
     let url = format!("{}/dl/AgentKeeper-Setup-9.9.9.exe", mock.base);
     assert!(manager.start_download(&url, None).is_ok());
     wait_inactive(&manager);
@@ -896,13 +896,13 @@ fn a_failed_download_removes_the_partial_file() {
 #[test]
 fn an_oversized_installer_is_refused_before_anything_is_written() {
     let fx = Fixture::new("oversized");
-    // Declares 50 MB, sends a few bytes: the ceiling has to trip on the header.
+    // 声明 50 MB 却只发几个字节：上限必须在头部上就触发。
     let mock = MockGitHub::start(MockOptions {
         oversized: Some(50 * 1024 * 1024),
         ..Default::default()
     });
     fx.use_mock(&mock.base);
-    // A small `maxBytes` so the guard is reachable.
+    // 一个很小的 `maxBytes`，好让守卫够得着。
     let manager = fx.manager_with("1.0.0", None, 1024);
 
     let url = format!("{}/dl/AgentKeeper-big.exe", mock.base);
@@ -920,9 +920,9 @@ fn an_oversized_installer_is_refused_before_anything_is_written() {
 
 #[test]
 fn a_stream_that_outgrows_the_ceiling_is_cut_off_and_unlinked() {
-    // Chunked transfer: there is no `Content-Length` to reject up front, so the
-    // ceiling is discovered mid-stream — after chunks have already reached the
-    // file. That is the failure branch whose unlink nothing else exercises.
+    // 分块传输：没有 `Content-Length` 可以事先拒绝，所以
+    // 上限是在传输中途才被发现的 —— 也就是在若干块已经到达
+    // 文件之后。那正是别处都不演练的失败分支。
     let fx = Fixture::new("overrun");
     let mock = MockGitHub::start(MockOptions {
         payload: Some(vec![b'X'; 256 * 1024]),
@@ -949,9 +949,9 @@ fn a_stream_that_outgrows_the_ceiling_is_cut_off_and_unlinked() {
 
 #[test]
 fn a_truncated_download_leaves_no_installer_behind() {
-    // Declares four times the bytes it actually sends and then closes: the
-    // transfer fails *after* chunks have reached the file, which is the only
-    // way to exercise the unlink in `runDownload`'s failure branch.
+    // 声明了四倍的字节数却只发了实际那么多就关闭：这次
+    // 传输是在若干块已经到达文件之后才失败的，而这是唯一
+    // 能演练 `runDownload` 失败分支里那个 unlink 的办法。
     let payload = vec![b'T'; 8 * 1024];
     let fx = Fixture::new("truncated");
     let mock = MockGitHub::start(MockOptions {
@@ -983,10 +983,10 @@ fn a_truncated_download_leaves_no_installer_behind() {
 
 #[test]
 fn the_transport_layer_refuses_an_oversized_declaration_before_writing() {
-    // The ceiling is enforced twice: here, on the `Content-Length` header, and
-    // again in `run_download`'s progress callback with the same wording. This
-    // test drives `download_to_file` alone so the header guard is pinned
-    // independently of the manager's copy of it.
+    // 上限被强制了两次：一次在这里，在 `Content-Length` 头上，
+    // 另一次在 `run_download` 的进度回调里，措辞相同。这个
+    // 测试单独驱动 `download_to_file`，好让头部守卫
+    // 独立于 manager 里的那份被钉住。
     let fx = Fixture::new("transport");
     let mock = MockGitHub::start(MockOptions {
         oversized: Some(50 * 1024 * 1024),
@@ -1013,11 +1013,11 @@ fn the_transport_layer_refuses_an_oversized_declaration_before_writing() {
         "{}",
         error.describe()
     );
-    // Refused on the header: `on_progress` never ran and nothing was written.
+    // 在头部上就被拒绝：`on_progress` 从未运行，也没有写入任何东西。
     assert!(calls.is_empty(), "on_progress must not run: {:?}", calls);
     assert!(!dest.exists(), "{} must not exist", dest.display());
 
-    // The same download within the ceiling succeeds.
+    // 同一次下载在上限之内则成功。
     let plain = MockGitHub::start(MockOptions::default());
     let ok = agentkeeper_shell_lib::core::http::download_to_file(
         &format!("{}/dl/AgentKeeper-direct.exe", plain.base),
@@ -1032,7 +1032,7 @@ fn the_transport_layer_refuses_an_oversized_declaration_before_writing() {
 }
 
 /* ------------------------------------------------------------------ */
-/* 17c. install guards                                                 */
+/* 17c. 安装守卫                                                      */
 /* ------------------------------------------------------------------ */
 
 #[test]
@@ -1045,7 +1045,7 @@ fn install_refuses_a_file_outside_the_download_directory() {
     let error = manager
         .verify_installer(&outside.to_string_lossy())
         .expect_err("a file outside the download directory");
-    // Engine string; `engine-zh.js:211` renders it as 安装包不在受控的下载目录内.
+    // 引擎字符串；`engine-zh.js:211` 把它渲染为 安装包不在受控的下载目录内。
     assert!(
         error
             .message()
@@ -1066,7 +1066,7 @@ fn install_refuses_a_non_installer_extension() {
     let error = manager
         .verify_installer(&notes.to_string_lossy())
         .expect_err("a non-installer extension");
-    // Engine string; `engine-zh.js:307` renders it as 只允许运行 §1 安装包.
+    // 引擎字符串；`engine-zh.js:307` 把它渲染为 只允许运行 §1 安装包。
     assert!(
         error.message().contains("installers may be run"),
         "{}",
@@ -1084,7 +1084,7 @@ fn install_refuses_another_projects_installer() {
     let error = manager
         .verify_installer(&foreign.to_string_lossy())
         .expect_err("another product's installer");
-    // Engine string; `engine-zh.js:308` renders it as 疑似来自其他项目.
+    // 引擎字符串；`engine-zh.js:308` 把它渲染为 疑似来自其他项目。
     assert!(error.message().contains("another project"), "{}", error);
 }
 
@@ -1111,13 +1111,13 @@ fn install_refuses_a_relative_or_missing_path() {
         error
     );
 
-    // A directory with an installer's name is not a file.
+    // 一个带着安装包名字的目录不是一个文件。
     let as_dir = fx.dir.join("AgentKeeper-dir.exe");
     std::fs::create_dir_all(&as_dir).unwrap();
     let error = manager
         .verify_installer(&as_dir.to_string_lossy())
         .expect_err("a directory");
-    // Engine string; `engine-zh.js:210` renders it as 安装包不存在或不是文件.
+    // 引擎字符串；`engine-zh.js:210` 把它渲染为 安装包不存在或不是文件。
     assert!(
         error.message().contains("missing or is not a file"),
         "{}",
@@ -1141,8 +1141,8 @@ fn install_launches_the_verified_file_and_reports_the_mode() {
     let target = fx.dir.join("AgentKeeper-Setup-9.9.9.exe");
     std::fs::write(&target, "MZ").unwrap();
 
-    // The launcher receives the *real* path, and the
-    // `silent` setting is read on every install, not captured at construction.
+    // 启动器收到的是*真实的*路径，而且
+    // `silent` 设置每次安装时都重新读取，而不是在构造时被捕获。
     let installed = manager.install(&target.to_string_lossy()).expect("install");
     assert_eq!(installed["ok"], json!(true), "{}", installed);
     assert_eq!(installed["mode"], json!("fake"), "{}", installed);
@@ -1161,7 +1161,7 @@ fn install_launches_the_verified_file_and_reports_the_mode() {
     assert_eq!(calls[0].0, expected, "the launcher saw {:?}", calls);
     assert_eq!(calls[0].1, true, "silent install is on by default");
 
-    // Turning it off is honoured on the next install.
+    // 关掉它会在下一次安装时被尊重。
     fx.save(json!({ "updateInstallSilent": false }));
     manager.install(&target.to_string_lossy()).expect("install");
     assert_eq!(launched.lock().unwrap()[1].1, false);
@@ -1197,9 +1197,9 @@ fn install_refuses_while_a_download_is_active() {
         .start_download(&url, Some("AgentKeeper-Setup-9.9.9.exe"))
         .expect("start");
 
-    // `startDownload` unlinks any previous copy before the transfer starts, so
-    // wait until the first chunk has landed: only then is there a real file
-    // whose execution the active-task guard can refuse.
+    // `startDownload` 会在传输开始前删除先前的副本，所以
+    // 要等到第一块落地：只有那时才有一个真实文件，
+    // 其执行才能被活跃任务守卫拒绝。
     for _ in 0..5000 {
         if manager.progress()["received"].as_u64().unwrap_or(0) > 0 {
             break;
@@ -1214,13 +1214,13 @@ fn install_refuses_while_a_download_is_active() {
     assert!(error.message().contains("still downloading"), "{}", error);
 
     wait_inactive(&manager);
-    // The download overwrote the file; the guard is gone afterwards.
+    // 下载覆盖了那个文件；事后守卫就消失了。
     assert!(manager.install(&target.to_string_lossy()).is_ok());
     assert_eq!(*launched.lock().unwrap(), 1);
 }
 
 /* ------------------------------------------------------------------ */
-/* 17i. the ak:update-* payload guard                                  */
+/* 17i. ak:update-* 载荷守卫                                           */
 /* ------------------------------------------------------------------ */
 #[test]
 fn clearing_the_token_goes_through_the_guard_and_empties_it() {
@@ -1229,8 +1229,8 @@ fn clearing_the_token_goes_through_the_guard_and_empties_it() {
     let fx = Fixture::new("clear");
     let manager = fx.manager("1.0.0");
     if manager.status()["encryption"] != json!(true) {
-        // No DPAPI here: `set_token` refuses either way and the guard is what
-        // this test is about, so only the guard's shape is asserted.
+        // 这里没有 DPAPI：`set_token` 无论哪种情况都会拒绝，而守卫才是
+        // 本测试的主题，所以这里只断言守卫的形状。
         assert_eq!(token_arg(&json!({ "token": null })), Ok(None));
         return;
     }
@@ -1243,7 +1243,7 @@ fn clearing_the_token_goes_through_the_guard_and_empties_it() {
         .to_string();
     assert!(raw.starts_with("enc1:"), "{}", raw);
 
-    // What the IPC layer does with the renderer's `null`: guard → clear.
+    // IPC 层如何处理渲染器发来的 `null`：守卫 → 清除。
     let cleared = token_arg(&json!({ "token": null })).expect("null is a clear request");
     assert_eq!(cleared, None, "`null` must become `set_token(None)`");
     manager.set_token(cleared.as_deref()).expect("clear");
@@ -1254,12 +1254,12 @@ fn clearing_the_token_goes_through_the_guard_and_empties_it() {
         Some(""),
         "the envelope must be gone from settings.json"
     );
-    // And it stays gone across a restart.
+    // 而且它在重启之后也依然不在。
     assert_eq!(fx.manager("1.0.0").token_status()["filled"], json!(false));
 }
 
 /* ------------------------------------------------------------------ */
-/* 17d. skip / unskip                                                  */
+/* 17d. 跳过 / 取消跳过                                                */
 /* ------------------------------------------------------------------ */
 
 #[test]
@@ -1275,14 +1275,14 @@ fn skip_survives_a_restart_and_unskip_clears_it() {
     assert_eq!(skipped["skipped"], json!(true), "{}", skipped);
     assert_eq!(skipped["skippedVersion"], json!("9.9.9"), "{}", skipped);
 
-    // A second manager (a restart) reads the state file.
+    // 第二个 manager（即一次重启）读取状态文件。
     assert_eq!(fx.manager("1.0.0").status()["skipped"], json!(true));
     assert_eq!(manager.unskip()["skipped"], json!(false));
     assert_eq!(fx.manager("1.0.0").status()["skipped"], json!(false));
 }
 
 /* ------------------------------------------------------------------ */
-/* 17e. token storage                                                  */
+/* 17e. 令牌存储                                                      */
 /* ------------------------------------------------------------------ */
 
 #[test]
@@ -1291,11 +1291,11 @@ fn the_token_is_stored_as_an_encrypted_envelope() {
     let manager = fx.manager("1.0.0");
 
     if manager.status()["encryption"] != json!(true) {
-        // No DPAPI on this host: the only correct behaviour is a clean refusal.
+        // 本机没有 DPAPI：唯一正确的行为是干脆利落地拒绝。
         let error = manager
             .set_token(Some("ghp_testtoken123"))
             .expect_err("refusal");
-        // Engine string; `engine-zh.js:231` renders it as
+        // 引擎字符串；`engine-zh.js:231` 把它渲染为
         // 本机安全存储不可用，已拒绝以明文保存令牌.
         assert!(
             error.message().contains("secure storage on this machine"),
@@ -1315,8 +1315,8 @@ fn the_token_is_stored_as_an_encrypted_envelope() {
     assert_eq!(saved["token"]["filled"], json!(true), "{}", saved);
     assert_eq!(saved["token"]["origin"], json!("stored"), "{}", saved);
 
-    // The plaintext never reaches settings.json, and the
-    // value that does is the `enc1:` envelope.
+    // 明文永远到不了 settings.json，而
+    // 真正落盘的是那个 `enc1:` 信封。
     let raw = settings::read(&fx.root_str())["updateToken"]
         .as_str()
         .expect("updateToken")
@@ -1326,7 +1326,7 @@ fn the_token_is_stored_as_an_encrypted_envelope() {
 
     assert_eq!(manager.token_status()["filled"], json!(true));
 
-    // Garbage ciphertext reports an error, not "empty".
+    // 垃圾密文会报出一个错误，而不是"空"。
     fx.save(json!({ "updateToken": "enc1:bm90LWEtcmVhbC1lbnZlbG9wZQ==" }));
     let status = manager.token_status();
     assert!(
@@ -1340,7 +1340,7 @@ fn the_token_is_stored_as_an_encrypted_envelope() {
 }
 
 /* ------------------------------------------------------------------ */
-/* 17f. channels: beta, rate limit, no release                         */
+/* 17f. 渠道：beta、限流、没有 release                                   */
 /* ------------------------------------------------------------------ */
 
 #[test]
@@ -1357,8 +1357,8 @@ fn the_beta_channel_queries_the_release_list() {
     fx.use_mock(&mock.base);
     fx.save(json!({ "updateBeta": true }));
 
-    // A beta user sees the next beta, and the request went
-    // to `/releases?per_page=`, not `/releases/latest`.
+    // 一个 beta 用户看到下一个 beta，而且请求发往
+    // `/releases?per_page=`，而不是 `/releases/latest`。
     let on_beta = fx.manager("9.9.9-beta.1");
     let status = on_beta.check(true);
     assert_eq!(status["latest"], json!("9.9.9-beta.2"), "{}", status);
@@ -1386,7 +1386,7 @@ fn a_final_release_user_on_the_beta_channel_takes_the_highest_overall() {
     fx.use_mock(&mock.base);
     fx.save(json!({ "updateBeta": true }));
 
-    // `onlyPrerelease` is off for a final-release install.
+    // 对一个正式版安装来说 `onlyPrerelease` 是关的。
     let status = fx.manager("9.8.0").check(true);
     assert_eq!(status["latest"], json!("9.9.9"), "{}", status);
 }
@@ -1408,13 +1408,13 @@ fn a_rate_limit_is_a_cooldown_not_a_failed_check() {
         retry_at
     );
 
-    // A cooled-down manager answers without asking again.
+    // 一个处于冷却期的 manager 不再发问就作答。
     let before = mock.request_count();
     let again = manager.check(true);
     assert_eq!(again["reason"], json!("cooldown"), "{}", again);
     assert_eq!(mock.request_count(), before);
 
-    // ... and the deadline survives a restart (it lives in the state file).
+    // …… 而且这个截止时间在重启后依然有效（它存在状态文件里）。
     let revived = fx.manager("1.0.0");
     assert_eq!(revived.check(true)["reason"], json!("cooldown"));
 }
@@ -1429,7 +1429,7 @@ fn a_repository_with_no_release_is_not_a_failed_check() {
     fx.use_mock(&mock.base);
     let manager = fx.manager("1.0.0");
 
-    // 404 means "nothing to upgrade to".
+    // 404 意味着"没有可升级的东西"。
     let status = manager.check(true);
     assert_ne!(status["ok"], json!(false), "{}", status);
     assert_eq!(status["hasUpdate"], Value::Null, "{}", status);
@@ -1437,7 +1437,7 @@ fn a_repository_with_no_release_is_not_a_failed_check() {
 }
 
 /* ------------------------------------------------------------------ */
-/* 17g. scheduler                                                      */
+/* 17g. 调度器                                                        */
 /* ------------------------------------------------------------------ */
 
 #[test]

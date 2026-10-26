@@ -1,33 +1,33 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * Run only the tests a change can affect.
+ * 只跑一次改动可能影响到的测试。
  *
- * `cargo test --workspace` takes ~7 s and runs 317 tests. During iteration
- * that is the wrong default: changing one module of the core should not
- * re-run the update-subsystem's 39 integration tests.
+ * `cargo test --workspace` 要花约 7 s，跑 317 个测试。迭代过程中
+ * 那是错误的默认值：改 core 里的一个模块不该把更新子系统那 39 个集成测试
+ * 重跑一遍。
  *
- * This maps the files that changed to the test targets that cover them:
+ * 这里把改动的文件映射到覆盖它们的测试目标：
  *
- *   core/src/update/**   →  core unit tests (update module) + tests/update.rs
- *                          + tests/boundary.rs (it drives the update manager)
- *   core/src/store.rs    →  core unit tests (store) + every integration suite
- *                          (the store is the substrate they all write through)
- *   src-tauri/src/lib.rs →  the shell's own unit tests + every integration suite
- *   src/renderer/**      →  no Rust test; the renderer gates (npm run check)
+ *   core/src/update/**   →  core 单元测试（update 模块）+ tests/update.rs
+ *                          + tests/boundary.rs（它在驱动更新管理器）
+ *   core/src/store.rs    →  core 单元测试（store）+ 每一个集成套件
+ *                          （store 是它们全都写穿过去的那层基底）
+ *   src-tauri/src/lib.rs →  shell 自己的单元测试 + 每一个集成套件
+ *   src/renderer/**      →  没有 Rust 测试；由渲染进程的那些关口负责（npm run check）
  *
- * With no arguments it runs everything, so it is safe to use as a default.
- * With `--changed <ref>` it diffs against a git ref instead of the working
- * tree, which is what CI wants.
+ * 不带参数时它会跑全部，所以拿来当默认值是安全的。
+ * 带 `--changed <ref>` 时它对着一个 git ref 做 diff 而不是对着工作区，
+ * 这正是 CI 想要的。
  *
- * Usage:
- *   node scripts/test-affected.js                 # everything
- *   node scripts/test-affected.js                 # affected by uncommitted changes
+ * 用法：
+ *   node scripts/test-affected.js                 # 全部
+ *   node scripts/test-affected.js                 # 受未提交改动影响的
  *   node scripts/test-affected.js --changed HEAD~1
- *   node scripts/test-affected.js --all           # ignore the mapping, run all
- *   node scripts/test-affected.js --list          # print the plan, run nothing
+ *   node scripts/test-affected.js --all           # 忽略映射，跑全部
+ *   node scripts/test-affected.js --list          # 只打印计划，什么都不跑
  *
- * Exit 0 = the selected tests passed; non-zero = a test failed.
+ * 退出码 0 = 选中的测试都通过；非零 = 有测试失败。
  */
 
 const fs = require('fs');
@@ -48,22 +48,22 @@ const RUN_ALL = has('--all');
 const LIST_ONLY = has('--list');
 const CHANGED_REF = opt('--changed');
 
-/* --------------------------------------------------------------- the map */
+/* --------------------------------------------------------------- 映射表 */
 
 /**
- * Which test target covers which source area.
+ * 哪个测试目标覆盖哪块源码区域。
  *
- * `core` unit tests are the crate's own `#[cfg(test)]` modules — cargo can
- * only run them as a whole (`-p agentkeeper-core --lib`), so the finest
- * granularity available for the core is "the core's unit tests".
+ * `core` 单元测试是这个 crate 自己的 `#[cfg(test)]` 模块——cargo 只能
+ * 整体运行它们（`-p agentkeeper-core --lib`），所以 core 这边能拿到的
+ * 最细粒度就是"core 的单元测试"。
  *
- * The integration suites are separate binaries and can be selected
- * individually with `--test <name>`.
+ * 集成套件是各自独立的二进制，可以用 `--test <name>`
+ * 单独选中。
  */
 const AREAS = [
   {
     name: 'core',
-    // Files whose change can break the core's own unit tests.
+    // 改动这些文件可能会弄坏 core 自己的单元测试。
     match: (f) => f.startsWith('tauri-shell/core/src/'),
     tests: [{ pkg: 'agentkeeper-core', args: ['--lib'] }],
   },
@@ -87,7 +87,7 @@ const AREAS = [
   {
     name: 'store',
     match: (f) => /tauri-shell\/core\/src\/store\.rs$/.test(f),
-    // The store is the substrate every integration suite writes through.
+    // store 是每一个集成套件写穿过去的那层基底。
     tests: [
       { pkg: 'agentkeeper-core', args: ['--lib'] },
       { pkg: 'agentkeeper-shell', args: ['--test', 'contract'] },
@@ -130,7 +130,7 @@ const AREAS = [
   {
     name: 'renderer',
     match: (f) => f.startsWith('src/renderer/') || f.startsWith('tauri-shell/dist/'),
-    // No Rust test covers the renderer; the static gates do.
+    // 没有 Rust 测试覆盖渲染进程；那些静态关口负责。
     tests: [],
   },
 ];
@@ -145,7 +145,7 @@ const ALL_TESTS = [
   { pkg: 'agentkeeper-shell', args: ['--test', 'write_path'] },
 ];
 
-/* ------------------------------------------------------------- changed files */
+/* ------------------------------------------------------------- 改动的文件 */
 
 function changedFiles() {
   if (CHANGED_REF) {
@@ -167,14 +167,14 @@ function changedFiles() {
   const out = [];
   for (const line of r.stdout.split('\n')) {
     if (!line.trim()) continue;
-    // "XY path" — the path starts after the 3-char status field.
+    // "XY path"——路径从 3 个字符的状态字段之后开始。
     const p = line.slice(3).trim().replace(/^"|"$/g, '');
     if (p) out.push(p);
   }
   return out;
 }
 
-/** A change to the manifest, the lockfile or a build script can break anything. */
+/** 改动清单文件、锁文件或构建脚本，可能弄坏任何东西。 */
 function isGlobalChange(f) {
   return (
     /Cargo\.toml$/.test(f) ||
@@ -185,7 +185,7 @@ function isGlobalChange(f) {
   );
 }
 
-/* ------------------------------------------------------------------ plan */
+/* ------------------------------------------------------------------ 计划 */
 
 function planFor(files) {
   if (RUN_ALL) return { tests: ALL_TESTS, areas: ['all'], gates: false, global: true };
@@ -214,7 +214,7 @@ function planFor(files) {
   if (areas.size === 0) {
     return { tests: [], areas: [], gates: false, global: false };
   }
-  // de-duplicate, keep order
+  // 去重，保留顺序
   const seen = new Set();
   const uniq = [];
   for (const t of tests) {
@@ -226,7 +226,7 @@ function planFor(files) {
   return { tests: uniq, areas: [...areas], gates, global: false };
 }
 
-/* ------------------------------------------------------------------- run */
+/* ------------------------------------------------------------------- 运行 */
 
 function key(t) {
   return t.pkg + ' ' + t.args.join(' ');
@@ -269,8 +269,8 @@ function main() {
   }
 
   if (plan.gates) {
-    // The renderer changed, so `dist/` is stale until it is regenerated — and
-    // the `dist` gate would fail on exactly that. Sync first, then gate.
+    // 渲染进程变了，所以在它被重新生成之前 `dist/` 是过期的——
+    // 而 `dist` 那道关口正好会因此失败。先同步，再过关。
     console.log('=== npm run tauri:sync (the renderer changed) ===');
     const s = spawnSync('npm', ['run', 'tauri:sync'], { cwd: ROOT, stdio: 'inherit' });
     if (s.status !== 0) failed++;

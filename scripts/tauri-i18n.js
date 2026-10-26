@@ -1,36 +1,31 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * Rust-engine i18n audit — the Tauri half of the no-degradation guarantee.
+ * Rust 引擎的 i18n 审计——「不许降级」保证的 Tauri 那一半。
  *
- * Policy: with the UI in Chinese, every sentence the engine puts on screen
- * must render in Chinese. Proper nouns / protocol words are the only allowed
- * exceptions.
+ * 策略：既然 UI 是中文的，引擎放到屏幕上的每一句话都必须渲染成中文。
+ * 只有专有名词 / 协议词汇是允许的例外。
  *
- * The engine is `tauri-shell/src-tauri/src/**\/*.rs`, and every Rust message
- * reaches the renderer as `{ ok:false, error:"…" }`, a `reason` field, a
- * validation issue or a `const &str`. The script scrapes all string literals,
- * filters out the ones that cannot reach the screen (see `looksSentence`) and
- * asserts each survivor has a dictionary entry; it also audits the dictionary
- * *back towards* the engine (ORPHAN), so dead entries and mis-targeted
- * additions surface instead of piling up silently.
+ * 引擎是 `tauri-shell/src-tauri/src/**\/*.rs`，而每一条 Rust 消息
+ * 都以 `{ ok:false, error:"…" }`、一个 `reason` 字段、一条
+ * 校验问题或一个 `const &str` 的形式抵达渲染进程。这个脚本刮取所有字符串字面量，
+ * 过滤掉那些到不了屏幕的（见 `looksSentence`），并断言每一条幸存者都有词典条目；
+ * 它还会把词典*反向*对回引擎做审计（ORPHAN），这样死条目和加错位置的
+ * 条目会浮出来，而不是悄无声息地堆积。
  *
- * Dependencies: `src/renderer/engine-zh.js` and the Rust sources only.
- * ORPHAN is judged purely against the Rust engine, which is the only thing
- * that emits sentences in the shipped build.
+ * 依赖：只有 `src/renderer/engine-zh.js` 和 Rust 源码。
+ * ORPHAN 完全只对着 Rust 引擎判定，因为出货构建里只有它会发出句子。
  *
- * It also checks the two things a dictionary can get wrong without ever
- * showing up as a MISS:
- *   CODE-MISS  a `code` literal the Rust engine emits that CODE_ZH cannot
- *              translate (the user then sees a raw English code);
- *   CJK-KEY    Chinese sitting in an EXACT / PATTERNS *key*, i.e. a slot that
- *              must hold the engine's English.
- *              in Rust.
+ * 它还检查词典可能弄错、却永远不会以 MISS 形式暴露的两件事：
+ *   CODE-MISS  Rust 引擎发出、而 CODE_ZH 翻译不了的 `code` 字面量
+ *              （这时用户看到的是一段生硬的英文代码）；
+ *   CJK-KEY    出现在 EXACT / PATTERNS *键* 位置上的中文，也就是一个
+ *              必须放着引擎英文的位置。
  *
- *   node scripts/tauri-i18n.js             gate: exit 1 on MISS/AMBIGUOUS
- *   node scripts/tauri-i18n.js --report    print every bucket, always exit 0
+ *   node scripts/tauri-i18n.js             关口：命中 MISS/AMBIGUOUS 时退出 1
+ *   node scripts/tauri-i18n.js --report    打印每一个桶，始终退出 0
  *
- * Exit codes: 0 clean, 1 MISS / AMBIGUOUS / CODE-MISS / CJK-KEY, 2 could not run.
+ * 退出码：0 干净，1 MISS / AMBIGUOUS / CODE-MISS / CJK-KEY，2 跑不起来。
  */
 
 const fs = require('fs');
@@ -38,12 +33,11 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 /**
- * Every Rust source tree that can put a sentence on screen.
+ * 每棵能把句子放到屏幕上的 Rust 源码树。
  *
- * The engine lives in the `agentkeeper-core` crate; the Tauri shell has its
- * own tree. Both are scanned — a gate that only looked at one of them would
- * let half the English sentences through unnoticed, and the crate split moved
- * most of them into the other one.
+ * 引擎住在 `agentkeeper-core` crate 里；Tauri shell 有自己
+ * 的一棵树。两棵都扫——只看其中一棵的关口会漏掉一半英文句子还不被察觉，
+ * 而那次 crate 拆分把大部分句子搬到了另一棵里。
  */
 const RUST_SRC_DIRS = [
   path.join(ROOT, 'tauri-shell', 'core', 'src'),
@@ -67,13 +61,12 @@ const DICT_SRC = fs.readFileSync(DICT, 'utf8');
 const reportOnly = process.argv.includes('--report');
 
 /* ------------------------------------------------------------------ */
-/* 1. Judgement rules                                                  */
+/* 1. 判定规则                                                          */
 
 /**
- * Does this string look like a sentence an English speaker would read?
- * Same regex (incl. the 140-char cap) and same two extra conditions as the
- * so a string that passed the same rule in the previous implementation passes
- * here too.
+ * 这个字符串看起来像一句英语使用者会读出来的句子吗？
+ * 同一个正则（含 140 字符上限）和同样那两个额外条件，
+ * 所以在上一版实现里通过同一条规则的字符串，在这里也照样通过。
  */
 function looksSentence(s) {
   return /^[A-Za-z][A-Za-z0-9 ,.:;'‘’"()%`[\]{}\-—&+!?/\\_§]{4,140}$/.test(s)
@@ -84,15 +77,15 @@ function looksSentence(s) {
 const CJK = /[\u4e00-\u9fff]/;
 
 /* ------------------------------------------------------------------ */
-/* 2. Rust source → production (non-test) lines                        */
+/* 2. Rust 源码 → 生产代码（非测试）行                          */
 
 /**
- * Drop every line inside a `#[cfg(test)] mod … { … }` block.
+ * 丢掉 `#[cfg(test)] mod … { … }` 块里的每一行。
  *
- * Test bodies are fixtures and assertion labels; they never reach the WebView,
- * and they hold ~300 of the crate's sentence-like literals. Depth is tracked on
- * a copy of the line with string literals blanked, so braces inside `"` do not
- * skew the count.
+ * 测试体是夹具和断言标签；它们永远到不了 WebView，
+ * 而且装着这个 crate 里约 300 条像句子的字面量。深度是在一份
+ * 把字符串字面量抹空后的行副本上跟踪的，所以 `"` 里面的花括号不会
+ * 把计数带偏。
  */
 function productionLines(src) {
   const out = [];
@@ -136,15 +129,15 @@ function productionLines(src) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 3. Literal extraction + normalisation                               */
+/* 3. 字面量提取 + 归一化                               */
 
-/** Rust `{}` / `{name}` / `{:?}` / `{:#?}` / `{0}` → §1..§n, in order. */
+/** Rust 的 `{}` / `{name}` / `{:?}` / `{:#?}` / `{0}` → 按顺序的 §1..§n。 */
 function normalizePlaceholders(s) {
   let n = 0;
   return s.replace(/\{[^{}]*\}/g, () => `§${++n}`);
 }
 
-/** Undo the escapes the scanner also undid, so quoting matches the dictionary. */
+/** 撤销扫描器同样撤销过的转义，好让引号写法与词典一致。 */
 function unescape(s) {
   return s.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
 }
@@ -152,52 +145,50 @@ function unescape(s) {
 const STRING_LITERAL = /"((?:[^"\\\n]|\\.)*)"/g;
 
 /*
- * Call sites whose literal is NOT text the user reads. All of them are
- * structural (a call site kind), never a wording allowlist.
+ * 那些字面量并非用户所读文本的调用点。它们全都是
+ * 结构性的（某一类调用点），绝不是按措辞开的白名单。
  *
- *   .expect(…) / panic!(…) / assert*!   abort the process; the WebView never sees it
- *   trace/log/eprintln!/…               developer diagnostics on stderr
- *   .contains/.starts_with/…            the literal is an INPUT matcher on a
- *                                       foreign error string, not text we emit
+ *   .expect(…) / panic!(…) / assert*!   会中止进程；WebView 根本看不到
+ *   trace/log/eprintln!/…               写到 stderr 的开发者诊断信息
+ *   .contains/.starts_with/…            该字面量是对一条外来错误串的
+ *                                       INPUT 匹配器，不是我们发出的文本
  */
 const PANIC_SITE = /(?:^|[^\w])(?:panic!|\.expect|assert_eq!|assert_ne!|assert!)\(\s*(?:&)?(?:format!\()?\s*$/;
 const DIAGNOSTIC_SITE = /\b(?:trace|log|debug|info|warn|eprintln!|println!|print!|dbg!)\(\s*(?:&)?(?:format!\()?\s*$/;
 const INPUT_MATCHER = /\.(?:contains|starts_with|ends_with|find|replace|replacen|split|trim_start_matches|trim_end_matches|strip_prefix|strip_suffix)\(\s*$/;
 
 /*
- * Log-surface sink, exempted by OUTPUT CHANNEL — never by file, so
- * `core/update/manager.rs` stays audited for everything that is not a log
- * line.
+ * 日志面的 sink，按 OUTPUT CHANNEL 豁免——绝不按文件豁免，这样
+ * `core/update/manager.rs` 里所有不是日志
+ * 行的东西仍然会被审计。
  *
- * The update manager routes progress lines through an injected
- * `type LogFn = Arc<dyn Fn(&str) + Send + Sync>` whose production value is
- * `Arc::new(|_| {})` — a no-op. Nothing outside the crate's tests ever
- * installs a real sink, so these strings reach neither the WebView nor a
- * terminal, and translating them would only make the log harder to grep.
+ * 更新管理器把进度行路由到一个注入进来的
+ * `type LogFn = Arc<dyn Fn(&str) + Send + Sync>`，它在生产环境下的值是
+ * `Arc::new(|_| {})`——一个空操作。除了这个 crate 的测试之外，
+ * 没有任何地方会装上真正的 sink，所以这些字符串既到不了 WebView，也到不了
+ * 终端，翻译它们只会让日志更难 grep。
  *
- * Matched two ways, because rustfmt puts a long `format!` on its own line:
- *   LOG_SITE     the literal sits on the same line as the sink call
- *   LOG_SINK     the sink call opens here; the literal is on a following line
- * `logSurface` is always counted and listed in full, so growth is visible.
+ * 两种方式匹配，因为 rustfmt 会把一个很长的 `format!` 单独放一行：
+ *   LOG_SITE     字面量与 sink 调用在同一行
+ *   LOG_SINK     sink 调用在这里打开；字面量在后面某一行
+ * `logSurface` 永远被计数并完整列出，所以增长是看得见的。
  */
 const LOG_SITE = /(?:^|[^\w.])(?:self\s*\.\s*log|logger|log::\w+|(?:log|info|warn|error|debug|trace)!)\s*\(\s*(?:&)?(?:format!\()?\s*$/;
 const LOG_SINK = /(?:^|[^\w.])(?:self\s*\.\s*log|logger|log::\w+|(?:log|info|warn|error|debug|trace)!)\s*\(\s*(?:&)?(?:format!\()?/;
-/** Progress lines the update manager tags with a channel prefix. */
+/** 更新管理器打上通道前缀的进度行。 */
 const LOG_PREFIXES = ['[update]'];
 
 /**
- * The ONE place that answers "does this English belong to the log surface
- * rather than the UI?".
+ * 唯一一处回答「这句英文属于日志面而不是 UI 吗」的地方。
  *
- * It is used twice — while scraping (row.log) and while judging dictionary
- * entries (ORPHAN) — because the two checks must never return
- * opposite verdicts for the same string: "the engine emits it, but not to the
- * screen" and "nobody uses it, delete it" cannot both be true.
+ * 它被用了两次——刮取时（row.log）和判定词典条目时（ORPHAN）——因为
+ * 这两处检查绝不能对同一个字符串给出相反的结论：「引擎发出了它，但没发到
+ * 屏幕」和「没人用它，删掉它」不可能同时成立。
  *
- * Only the PREFIX half is shareable. The other half of the scrape-side test
- * (LOG_SITE / inLogCall) is a call-site property, and a dictionary entry has
- * no call site; a log line whose text carries no channel prefix is therefore
- * recognised by the scrape, not by this predicate.
+ * 只有 PREFIX 这一半是可以共享的。刮取侧检验的另一半
+ * （LOG_SITE / inLogCall）是调用点的属性，而词典条目
+ * 没有调用点；所以一条文本里不带通道前缀的日志行，是由刮取
+ * 认出来的，而不是由这个谓词。
  */
 function isLogSurface(s) {
   return LOG_PREFIXES.some((p) => s.replace(/^\^/, '').startsWith(p));
@@ -208,16 +199,16 @@ function extract(file) {
   const src = fs.readFileSync(file, 'utf8');
   const rel = path.relative(ROOT, file).replace(/\\/g, '/');
 
-  // Blank out raw strings (r#"…"#, r##"…"##, r"…") first: they hold regexes
-  // and JSON fixtures, never prose, and their embedded quotes (and stray `}`
-  // at column 0) otherwise wreck both the literal scan and the brace counter.
-  // `\b` matters: without it a word ending in "r" directly before a quote
-  // ("…frontmatter"") would be read as the start of a raw string.
+  // 先把原始字符串（r#"…"#, r##"…"##, r"…"）抹空：它们装的是正则
+  // 和 JSON 夹具，绝不是散文，而且它们内嵌的引号（以及第 0 列上
+  // 偶尔出现的 `}`）否则会同时毁掉字面量扫描和花括号计数。
+  // `\b` 很重要：没有它，一个紧挨在引号前、以 "r" 结尾的单词
+  // （"…frontmatter""）会被当成原始字符串的开头。
   const noRaw = src.replace(/\br(#*)"([\s\S]*?)"\1/g, '""');
 
-  // Depth of a log-sink call whose argument list is still open. rustfmt puts a
-  // long `format!(…)` on its own line, so the literal is often several lines
-  // below the sink that owns it.
+  // 一个参数列表仍然打开着的日志 sink 调用的深度。rustfmt 会把一个
+  // 很长的 `format!(…)` 单独放一行，所以字面量常常在拥有它的
+  // sink 下面好几行。
   let logDepth = 0;
 
   for (const [line, text] of productionLines(noRaw)) {
@@ -236,14 +227,13 @@ function extract(file) {
       const norm = normalizePlaceholders(raw);
       if (!norm) continue;
       /*
-       * Log surface is tested BEFORE DIAGNOSTIC_SITE, and that order is the
-       * whole point. `self.log("…")` leaves `before` ending in `log(`, which
-       * DIAGNOSTIC_SITE also matches; with diagnostics checked first those
-       * literals were dropped before the log test ever ran — excluded from
-       * MISS yet absent from every bucket, invisible. The dictionary entries
-       * translating them were then reported as ORPHANs: one string, two
-       * opposite verdicts. Only rustfmt-wrapped calls (literal on a following
-       * line, caught by inLogCall) would otherwise escape this.
+       * 日志面的检验在 DIAGNOSTIC_SITE 之前，而这个顺序正是
+       * 全部要点。`self.log("…")` 会让 `before` 以 `log(` 结尾，而
+       * DIAGNOSTIC_SITE 同样匹配它；如果先查诊断信息，这些
+       * 字面量会在日志检验跑起来之前就被丢掉——既不算 MISS，又不出现在任何
+       * 桶里，无影无踪。翻译它们的那些词典条目随后被报成 ORPHAN：
+       * 一个字符串，两种相反的结论。只有被 rustfmt 换行的调用（字面量在下一行，
+       * 由 inLogCall 捕获）才可能逃过这一劫。
        */
       if (LOG_SITE.test(before) || inLogCall || isLogSurface(norm) || isLogSurface(raw)) {
         rows.push({ file: rel, line, s: norm, raw, log: true });
@@ -251,14 +241,14 @@ function extract(file) {
       }
       if (DIAGNOSTIC_SITE.test(before)) continue;
       if (INPUT_MATCHER.test(before)) continue;
-      // `raw` is kept because `{}` is not always a format placeholder: in a
-      // regex quantifier ("{0,63}") it survives verbatim all the way to the
-      // screen, so the dictionary key holds the braces, not a § marker.
+      // 之所以保留 `raw`，是因为 `{}` 不总是格式占位符：在一个
+      // 正则量词（"{0,63}"）里，它会原封不动地一路活到
+      // 屏幕上，所以词典键里装的是花括号，而不是 § 标记。
       rows.push({ file: rel, line, s: norm, raw });
     }
 
-    // Paren balance of the whole line (string literals blanked), so a sink
-    // call spanning several lines keeps `logDepth` open until its `)` lands.
+    // 整行的括号平衡（字符串字面量已抹空），这样跨越多行的 sink
+    // 调用会让 `logDepth` 一直保持打开，直到它的 `)` 落地。
     const bare = code.replace(/"(?:[^"\\]|\\.)*"/g, '""');
     let balance = 0;
     for (const ch of bare) {
@@ -272,47 +262,47 @@ function extract(file) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 4. Buckets — every exclusion has a structural reason                */
+/* 4. 分桶——每一种排除都有结构性的理由                */
 
 /*
- * Buckets the audit deliberately does not judge. These are SCRAPING RULES
- * (what counts as engine prose) and are kept strictly separate from INTERNAL
- * in the dictionary (what IS engine prose but never reaches the screen).
- * Nothing here is a back door for a real miss: every bucket is counted in the
- * report, and the discretionary ones are listed in full.
+ * 审计刻意不去判定的那些桶。它们是刮取规则
+ * （什么算引擎散文），并且与词典里的 INTERNAL 严格分开
+ * （那是引擎散文，但永远到不了屏幕）。
+ * 这里没有任何一条是真漏检的后门：每个桶都在报告里被计数，
+ * 而那些需要人为裁量的桶会完整列出。
  */
 
 /**
- * Standalone CLI binaries (`src/bin/*.rs`): prose goes to a terminal, never to
- * the WebView. File-scoped, and printed in full in the report so growth stays
- * visible — the acknowledged trade-off is that a UI message added to a bin file
- * would be hidden. There is no UI channel in a bin today.
+ * 独立的 CLI 二进制（`src/bin/*.rs`）：散文去终端，永远不会去
+ * WebView。按文件限定，并在报告里完整打印，让增长保持
+ * 可见——这里承认的代价是，往某个 bin 文件里加的 UI 消息
+ * 会被藏起来。今天 bin 里没有 UI 通道。
  */
 const CLI_FILE = /\/bin\/[a-z0-9-]+\.rs$/;
 
 /*
- * MCP stdio protocol surface. `core/mcp.rs` is the MCP server: its JSON-RPC
- * errors and tool-schema descriptions go to the MCP client (an LLM), never to
- * the WebView. Excluded by FILE, not by wording — the acknowledged trade-off
- * is that a real UI message added to mcp.rs would be hidden. mcp.rs has no UI
- * channel today; if it ever gets one, split the file and narrow this rule.
+ * MCP stdio 协议面。`core/mcp.rs` 就是 MCP 服务器：它的 JSON-RPC
+ * 错误和工具 schema 描述发给 MCP 客户端（一个 LLM），永远不会发给
+ * WebView。按 FILE 排除，而不是按措辞——这里承认的代价
+ * 是往 mcp.rs 里加的一条真 UI 消息会被藏起来。今天 mcp.rs 没有 UI
+ * 通道；如果哪天有了，就把文件拆开并把这条规则收窄。
  *
- * The path is matched on the FILE NAME only, not on the directory it sits in:
- * the module moved from `src-tauri/src/core/mcp.rs` to `core/src/mcp.rs` when
- * the core became its own crate, and a rule anchored on the old directory
- * would have silently stopped matching — the gate would then demand Chinese
- * translations for sentences that only ever reach an LLM.
+ * 路径只按文件*名*匹配，不按它所在的目录：
+ * 当 core 独立成自己的 crate 时，模块从 `src-tauri/src/core/mcp.rs` 搬到了
+ * `core/src/mcp.rs`，而一条锚在旧目录上的规则会悄无声息地不再匹配——
+ * 那样关口就会要求为那些只到得了 LLM 的句子准备中文
+ * 翻译。
  */
 const PROTOCOL_FILE = /(^|[\\/])mcp\.rs$/;
 
 function classify(r) {
   if (r.log) return 'logSurface';
   if (CJK.test(r.s)) return 'chinese';
-  // A literal that still contains a backslash after unescaping is a multiline
-  // fixture ("line one\nline two\n"), a regex or a path — not prose.
+  // 解转义之后还含反斜杠的字面量是多行
+  // 夹具（"line one\nline two\n"）、正则或路径——不是散文。
   if (r.s.includes('\\')) return 'escaped';
   if (!looksSentence(r.s)) return 'notProse';
-  // `format!("{}", e)` and friends carry no words of their own.
+  // `format!("{}", e)` 之类本身不带任何词。
   if (!/[A-Za-z]{3}/.test(r.s.replace(/§\d/g, ''))) return 'placeholder';
   if (CLI_FILE.test('/' + r.file)) return 'cli';
   if (PROTOCOL_FILE.test('/' + r.file)) return 'protocol';
@@ -320,14 +310,14 @@ function classify(r) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 5. Coverage, with provenance                                        */
+/* 5. 覆盖率，附带来源                                        */
 
 const compiledPatterns = (zh.PATTERNS || []).map(([p, z]) => ({
   src: p, re: zh.patternToRegExp(p), zh: z, i: -1
 }));
 compiledPatterns.forEach((c, i) => { c.i = i; });
 
-/** Which dictionary entry renders `s`? null = uncovered. */
+/** 哪个词典条目渲染 `s`？null = 没覆盖。 */
 function covering(s) {
   if (Object.prototype.hasOwnProperty.call(zh.EXACT, s)) {
     return { kind: 'EXACT', id: s, zh: zh.EXACT[s] };
@@ -339,7 +329,7 @@ function covering(s) {
   return null;
 }
 
-/** Every entry that *could* render `s` — more than one means ambiguity. */
+/** 所有*可能*渲染 `s` 的条目——多于一个就意味着歧义。 */
 function allCovering(s) {
   const out = [];
   if (Object.prototype.hasOwnProperty.call(zh.EXACT, s)) out.push({ kind: 'EXACT', zh: zh.EXACT[s] });
@@ -348,12 +338,12 @@ function allCovering(s) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 6. Dictionary → engine checks (dead entries / mis-targeted adds)     */
+/* 6. 词典 → 引擎的检查（死条目 / 加错位置的条目）     */
 
 /**
- * English keys that the dictionary declares more than once. `require()` lets
- * a duplicate object key silently win, so this has to be read off the SOURCE,
- * not off the loaded object — that is the whole point of the check.
+ * 词典里被声明了不止一次的英文键。`require()` 会让
+ * 一个重复的对象键悄无声息地胜出，所以这必须从源码上读，
+ * 而不是从加载后的对象上读——这正是这项检查的全部意义。
  */
 function duplicateExactKeys() {
   const from = DICT_SRC.indexOf('const EXACT');
@@ -370,20 +360,20 @@ function duplicateExactKeys() {
 }
 
 /* ------------------------------------------------------------------ */
-/* 6b. Rust `code` literals → CODE_ZH                                  */
+/* 6b. Rust 的 `code` 字面量 → CODE_ZH                                  */
 
 /**
- * Every code literal the Rust engine can put on a wire, extracted from the
- * SOURCE at runtime — never from a hand-copied list. Three structural rules,
- * in descending strength:
+ * Rust 引擎能放到线路上的每一条 code 字面量，全部在运行时从
+ * 源码里提取——绝不来自手抄的清单。三条结构性规则，
+ * 按强度递减排列：
  *
- *   json      `"code": "x"`            built into a Value/map that crosses a
- *                                      boundary — always emitted
- *   table     2nd element of a ("msg", "code") pair inside a `const …CODES`
- *                                      array — the code half of a lookup table
- *   field     `code: "x"` in a struct  only emitted if the struct derives
- *                                      Serialize; otherwise the value cannot
- *                                      reach the renderer at all
+ *   json      `"code": "x"`            构造进一个跨越边界的 Value/map
+ *                                      ——总是被发出
+ *   table     `const …CODES` 数组里 ("msg", "code") 键值的第 2 个元素
+ *                                      ——查表项的 code 那一半
+ *   field     struct 里的 `code: "x"`  只有当该 struct 派生了
+ *                                      Serialize 时才会被发出；否则这个值根本
+ *                                      到不了渲染进程
  */
 function structIsSerialized(text, lineIdx) {
   const lines = text.split('\n');
@@ -404,7 +394,7 @@ function extractCodes(file) {
   const noRaw = src.replace(/\br(#*)"([\s\S]*?)"\1/g, '""');
   const out = [];
 
-  // rule: table — scan the const block, not line by line (pairs wrap).
+  // 规则：table —— 扫整个 const 块，而不是一行一行扫（键值会换行）。
   const tableRe = /const\s+[A-Za-z_]*CODES?[A-Za-z_]*\s*:[^=]*=\s*\[/g;
   let t;
   while ((t = tableRe.exec(noRaw))) {
@@ -435,7 +425,7 @@ function extractCodes(file) {
   return out;
 }
 
-/** Chinese (or any CJK) sitting in a slot that must hold English. */
+/** 出现在「必须放英文」位置上的中文（或任何 CJK）。 */
 const CJK_KEY = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/;
 
 function cjkKeys() {
@@ -450,7 +440,7 @@ function cjkKeys() {
 }
 
 /* ------------------------------------------------------------------ */
-/* 7. Run                                                              */
+/* 7. 运行                                                              */
 
 function rustFiles(dir) {
   const out = [];
@@ -494,21 +484,21 @@ for (const r of rows) {
   else buckets.coveredPattern.push(r);
 }
 
-/* --- dictionary-side findings --------------------------------------- */
+/* --- 词典侧的发现 --------------------------------------- */
 
-// AMBIGUOUS-DUP: the same English key declared more than once in EXACT.
+// AMBIGUOUS-DUP：同一个英文键在 EXACT 里被声明了不止一次。
 const dupKeys = duplicateExactKeys();
 
 /*
- * AMBIGUOUS-MULTI: one sentence, two or more PATTERNS rules that can render
- * it. Which one wins is decided by their order in the list, so deleting or
- * reordering a rule silently swaps the Chinese on screen — that is the trap
- * worth failing the build over.
+ * AMBIGUOUS-MULTI：一个句子，两条或更多 PATTERNS 规则都能渲染
+ * 它。谁胜出由它们在列表里的顺序决定，所以删掉或
+ * 调整一条规则的顺序会悄无声息地换掉屏幕上的中文——这正是值得
+ * 让构建失败的陷阱。
  *
- * Deliberately NOT counted: an EXACT hit that also matches a PATTERNS rule.
- * `zhError()` checks EXACT first, so that is shadowing with a deterministic
- * winner, not ambiguity. Those pairs are reported separately below (EXACT
- * SHADOWING) as a note, so the relationship stays visible.
+ * 刻意不计入：既命中 EXACT、又匹配某条 PATTERNS 规则的条目。
+ * `zhError()` 先查 EXACT，所以那是赢家确定的遮蔽，不是歧义。
+ * 这类配对在下面单独报告（EXACT
+ * SHADOWING）作为一条说明，让这层关系保持可见。
  */
 const multi = [];
 const shadowedByExact = [];
@@ -522,8 +512,8 @@ for (const r of rows) {
   }
 }
 
-// SHADOWED: a PATTERNS entry that can never win, because an earlier rule
-// already matches every sentence it would match.
+// SHADOWED：一条永远不可能胜出的 PATTERNS 条目，因为前面某条规则
+// 已经匹配了它本来能匹配的所有句子。
 const shadowed = [];
 compiledPatterns.forEach((c) => {
   const losers = rows.filter((r) => !classify(r) && c.re.test(r.s) && covering(r.s) !== null
@@ -532,13 +522,13 @@ compiledPatterns.forEach((c) => {
 });
 
 /*
- * ORPHAN: a dictionary entry the Rust engine never actually uses.
+ * ORPHAN：一条 Rust 引擎其实从不使用的词典条目。
  *
- * Measured by USAGE, not by textual presence: an entry is dead when no
- * extracted literal is rendered by it. That avoids false positives such as
- * `asset not found`, which the engine only ever emits interpolated
- * (`asset not found: §1`) and which is therefore rendered by a PATTERNS entry
- * while the bare EXACT key still earns its keep elsewhere.
+ * 按用法（USAGE）衡量，而不是按文本里是否出现：一个条目在没有任何
+ * 抽取到的字面量由它渲染时就是死的。这样就避免了像
+ * `asset not found` 这样的误报——引擎只会以插值形式发出它
+ * （`asset not found: §1`），所以它其实是被某条 PATTERNS 条目渲染的，
+ * 而那条裸的 EXACT 键在别处仍然有用。
  */
 const usage = new Map();                       // "EXACT|<key>" / "PATTERNS|<i>" -> count
 for (const r of rows) {
@@ -549,15 +539,14 @@ for (const r of rows) {
 }
 
 /*
- * Rescue pass — keeps a scraping limitation from faking a dead entry.
+ * 补救轮——不让刮取上的局限伪造出死条目。
  *
- * `looksSentence` (the rule, kept verbatim) only accepts characters from a
- * fixed class, and `^` / `$` are not in it. A message such as
- * `MCP server name must match /^…$/` is therefore never scraped, and usage
- * measured off the scrape alone would report it as an ORPHAN — a false
- * positive that would have deleted a live translation. So an entry also
- * counts as used when some extracted *production literal* renders it, even
- * though that literal was not judged as prose.
+ * `looksSentence`（规则保持原样）只接受一个固定字符类里的字符，
+ * 而 `^` / `$` 不在其中。所以像
+ * `MCP server name must match /^…$/` 这样的消息永远不会被刮到，而只按刮取
+ * 结果衡量的用度会把它报成 ORPHAN——一个会删掉活着的翻译的
+ * 误报。所以当某条抽取到的*生产字面量*能渲染一个条目时，它也
+ * 算被用过，哪怕那个字面量没有被判成散文。
  */
 const literalForms = new Set();
 for (const r of all) { literalForms.add(r.s); if (r.raw) literalForms.add(r.raw); }
@@ -571,9 +560,9 @@ for (const s of literalForms) {
 const orphans = [];
 for (const k of Object.keys(zh.EXACT)) {
   if (usage.get(`EXACT|${k}`)) continue;
-  // Same entry point the coverage check uses to route this string to the log
-  // surface. Skipping it here is what keeps the two checks from disagreeing:
-  // "emitted but not to the screen" and "dead, delete it" cannot both hold.
+  // 覆盖率检查用来把这个字符串路由到日志面的同一个
+  // 入口点。在这里跳过它，正是让这两处检查不会彼此
+  // 分歧的原因：「发出了但没发到屏幕」和「死了，删掉它」不可能同时成立。
   if (isLogSurface(k)) continue;
   orphans.push({ kind: 'EXACT', id: k, zh: zh.EXACT[k] });
 }
@@ -583,11 +572,11 @@ compiledPatterns.forEach((c) => {
   orphans.push({ kind: `PATTERNS#${c.i}`, id: c.src, zh: c.zh });
 });
 
-// ORPHAN is judged against the Rust engine only: an unused entry is simply an
-// ORPHAN.
+// ORPHAN 只对着 Rust 引擎判定：一个没被用到的条目就是
+// 一个 ORPHAN。
 
 /* ------------------------------------------------------------------ */
-/* 7b. code integrity + key-language integrity                         */
+/* 7b. code 完整性 + 键语言完整性                         */
 
 const codeLiterals = [];
 for (const f of files) codeLiterals.push(...extractCodes(f));
@@ -600,9 +589,9 @@ const codes = codeLiterals.filter((c) => {
   return true;
 });
 
-/** A code on a wire the renderer can see: json surface, code table, or a
- *  Serialize'd struct field. Everything else (`code:` on a struct that is
- *  never serialized) is reported separately, not gated. */
+/** 一条渲染进程看得见的线路上的 code：json 面、code 表，或一个
+ *  派生了 Serialize 的 struct 字段。其他一切（`code:` 落在一个永远
+ *  不被序列化的 struct 上）单独上报，不参与把关。 */
 const emittedCodes = codes.filter((c) => c.rule !== 'field' || c.serialized);
 const internalCodes = codes.filter((c) => c.rule === 'field' && !c.serialized);
 
@@ -610,14 +599,13 @@ const codeMiss = emittedCodes.filter((c) => !Object.prototype.hasOwnProperty.cal
 const badKeys = cjkKeys();
 
 /* ------------------------------------------------------------------ */
-/* 8. Report                                                           */
+/* 8. 报告                                                           */
 
 const W = (s) => process.stdout.write(s + '\n');
 const fmt = (r) => `    ${r.file}:${r.line}  "${r.s}"`;
 /**
- * Discretionary buckets (the ones a human judgement put here, rather than a
- * mechanical rule) are always listed in full — even in gate mode — so they
- * cannot quietly grow. Mechanical buckets are count-only unless --report.
+ * 靠人判断放进来的那些桶（而不是机械规则），总是完整列出——哪怕在
+ * 关口模式下——这样它们就不会悄悄变大。机械性的桶只计数，除非加 --report。
  */
 const ALWAYS_LIST = ['cli', 'protocol', 'logSurface', 'chinese'];
 const show = (label, list, extra) => {
@@ -666,7 +654,7 @@ W('');
 W(`  total excluded: ${excluded}   candidates judged: ${rows.length - excluded}`);
 if (!reportOnly) W('  (--report lists every bucket)');
 
-/* --- dictionary-side report ----------------------------------------- */
+/* --- 词典侧报告 ----------------------------------------- */
 W('');
 W('  -- dictionary → engine (report only, nothing is deleted) --');
 W(`  AMBIGUOUS-DUP (same key declared twice in EXACT): ${dupKeys.length}`);
@@ -699,7 +687,7 @@ for (const o of orphans.slice(0, 10)) W(`    ${o.kind}: ${o.id}  →  ${o.zh}`);
 if (orphans.length > 10) W(`    … ${orphans.length - 10} more (--report)`);
 if (reportOnly) for (const o of orphans.slice(10)) W(`    ${o.kind}: ${o.id}  →  ${o.zh}`);
 
-/* --- code / key integrity ------------------------------------------ */
+/* --- code / 键完整性 ------------------------------------------ */
 W('');
 W('  -- code integrity (Rust code literal → CODE_ZH) --');
 W(`  code literals extracted from Rust : ${codes.length}` +
