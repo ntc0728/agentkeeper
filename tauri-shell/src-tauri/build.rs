@@ -1,32 +1,31 @@
-// The Tauri build script.
+// Tauri 构建脚本。
 //
-// `tauri_build::build()` copies the sidecars declared in
-// `bundle.externalBin` next to the compiled binary, and it HARD FAILS when one
-// of them is missing:
+// `tauri_build::build()` 会把 `bundle.externalBin` 中声明的 sidecar
+// 复制到编译产物旁边，一旦其中有缺失就会直接构建失败：
 //
 //   resource path `binaries\agentkeeper-mcp-x86_64-pc-windows-msvc.exe` doesn't exist
 //
-// The two sidecars are the MCP server and the headless scanner. They live in
-// the `agentkeeper-core` crate — a different crate, deliberately, so they do not
-// inherit the WebView dependency graph — and `tauri-shell/stage-core-bins.js`
-// builds and stages them.
+// 两个 sidecar 分别是 MCP 服务器和无头扫描器。它们位于
+// `agentkeeper-core` crate ——刻意放在另一个 crate 里，这样它们就不会
+// 继承 WebView 的依赖图——由 `tauri-shell/stage-core-bins.js`
+// 构建并暂存。
 //
-// That makes this a SEQUENCE requirement, not a circular one:
+// 因此这是一个先后顺序要求，而不是循环依赖：
 //
-//   cargo test / cargo build (shell)   →  needs the sidecars staged
-//   stage-core-bins.js                 →  builds the core crate ONLY
+//   cargo test / cargo build（shell）   →  需要 sidecar 已经暂存
+//   stage-core-bins.js                 →  只构建 core crate
 //
-// The core crate has no build script, so staging it never needs the shell
-// compiled. Run `npm run tauri:core-bins` once after a clone, and the shell
-// compiles from then on.
+// core crate 没有构建脚本，所以暂存它永远不需要 shell
+// 已经编译完成。克隆之后运行一次 `npm run tauri:core-bins`，之后 shell
+// 就能正常编译。
 //
-// The check below turns tauri's terse error into an actionable one. It does
-// not work around anything: if a sidecar is genuinely missing, the build must
-// still fail.
+// 下面的检查把 tauri 简略的错误信息变成可据以行动的提示。它
+// 不是绕过任何东西：如果某个 sidecar 真的缺失，构建仍然必须
+// 失败。
 
 use std::path::Path;
 
-/// What the user has to run, and why.
+/// 用户需要执行什么，以及原因。
 const HINT: &str = "\
 error: the MCP server / headless scanner sidecars are not staged.
 
@@ -43,8 +42,8 @@ fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let binaries = Path::new(&manifest_dir).join("binaries");
 
-    // Only the sidecars this crate's config actually declares are checked, so
-    // the message never points at a file that is not wanted.
+    // 只检查本 crate 配置里真正声明过的 sidecar，这样
+    // 提示信息绝不会指向一个并不需要的文件。
     let declared = ["agentkeeper-mcp", "ak-scan"];
     let missing: Vec<String> = declared
         .iter()
@@ -64,8 +63,8 @@ fn main() {
             println!("cargo:warning={line}");
         }
         println!("{HINT}");
-        // Fail with a message a human can act on rather than tauri's
-        // `resource path ... doesn't exist` further down the log.
+        // 以一条人能据以行动的提示失败，而不是日志更下方
+        // tauri 那句 `resource path ... doesn't exist`。
         std::process::exit(1);
     }
 

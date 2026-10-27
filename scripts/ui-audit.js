@@ -18,9 +18,9 @@ const problems = { i18n: [], interaction: [], theme: [], ux: [] };
 
 /* ---------- 1. 未翻译的字符串 ---------- */
 
-// index.html static text nodes. Text that the runtime replaces on boot is
-// fine to keep in English in the markup: #nav-group-* is rewritten by
-// applyLanguage(), #view-title/#view-sub by render() on every navigation.
+// index.html 里的静态文本节点。运行时会在启动时替换掉的文字，留在标记里是英文也没
+// 关系：#nav-group-* 由 applyLanguage() 重写，#view-title/#view-sub 每次导航都由
+// render() 重写。
 const RUNTIME_OWNED = /id="(nav-group-overview|nav-group-operate|view-title|view-sub|modal-title)"/;
 const RUNTIME_OWNED_CLASS = /class="nav-text"/;
 html.split('\n').forEach((l, i) => {
@@ -33,7 +33,7 @@ html.split('\n').forEach((l, i) => {
   if (a && !/data-i18n/.test(l)) problems.i18n.push(`index.html:${i + 1}  ${a[1]}="${a[2]}"`);
 });
 
-// app.js: bare el('th', {}, 'English') headers, titles, switch labels
+// app.js：裸的 el('th', {}, 'English') 表头、标题、开关标签
 app.split('\n').forEach((l, i) => {
   if (/^\s*(\/\/|\*|\/\*)/.test(l)) return;
   const th = l.match(/el\('th',\s*(?:\{[^}]*\},\s*)?'([A-Za-z][^']*)'\)/);
@@ -48,10 +48,10 @@ app.split('\n').forEach((l, i) => {
   }
 });
 
-/* ---------- 2. dead interactive elements ---------- */
+/* ---------- 2. 死掉的交互元素 ---------- */
 
-// Buttons whose click handler is attached on a later line is fine; what we
-// hunt is buttons inside el(...) trees that never get a listener anywhere.
+// 点击处理器挂在后面几行的按钮没问题；这里要抓的是那些躺在 el(...) 树里、从头到尾
+// 没挂过任何监听器的按钮。
 const appLines = app.split('\n');
 const buttonLines = [];
 appLines.forEach((l, i) => {
@@ -60,8 +60,7 @@ appLines.forEach((l, i) => {
 });
 for (const b of buttonLines) {
   const hasInline = /onclick/.test(b.attrs);
-  // Look ahead 4 lines for addEventListener with a matching class/variable —
-  // approximate, but catches the real cases.
+  // 往后看 4 行，找类名/变量名匹配的 addEventListener —— 粗糙，但真出问题的都能抓到。
   const ctx = appLines.slice(b.line - 1, b.line + 4).join('\n');
   const hasLater = /addEventListener\('click'/.test(ctx);
   if (!hasInline && !hasLater) {
@@ -69,33 +68,32 @@ for (const b of buttonLines) {
   }
 }
 
-// Data rows without onclick while sibling rows are clickable. Legitimate
-// exclusions: rows whose cell contains the action (empty states with a CTA
-// button, the "+N more" expander) and tables explicitly marked .static.
+// 同级的行可点、它自己却没有 onclick 的数据行。合理例外：动作挂在单元格里的行
+// （带 CTA 按钮的空态、"展开更多"），以及明确标了 .static 的表格。
 if (/table\.tbl tbody tr \{ cursor: pointer/.test(css)) {
   appLines.forEach((l, i) => {
     if (!/el\('tr',\s*\{/.test(l)) return;
-    // Header rows may wrap: the el('th') can be on the next line.
+    // 表头行可能换行：el('th') 会出现在下一行。
     const ctx3 = appLines.slice(i, i + 3).join('\n');
     if (/el\('th'/.test(ctx3) || /el\('thead'/.test(l)) return;   // header rows
     if (/class: 'empty'/.test(l)) return;                       // empty states
     if (/colspan/.test(l)) return;                              // expander / footer rows
     if (/onclick/.test(l)) return;                              // wired
-    // A row inside a .static table is intentionally inert.
+    // .static 表格里的行是有意不可交互的。
     const ctx = appLines.slice(Math.max(0, i - 6), i + 1).join('\n');
     if (/tbl static/.test(ctx)) return;
     problems.interaction.push(`app.js:${i + 1}  data row without onclick while other rows are clickable — verify intent`);
   });
 }
 
-// Elements that look like controls but are spans/divs
+// 长得像控件、实际是 span/div 的元素
 appLines.forEach((l, i) => {
   if (/class: '[^']*\bclickable\b/.test(l) && /'span'/.test(l) && !/onclick/.test(l)) {
     problems.interaction.push(`app.js:${i + 1}  span marked .clickable without onclick`);
   }
 });
 
-/* ---------- 3. theme violations (hardcoded colours) ---------- */
+/* ---------- 3. 主题违规（硬编码颜色） ---------- */
 
 const cssLines = css.split('\n');
 cssLines.forEach((l, i) => {
@@ -106,7 +104,7 @@ cssLines.forEach((l, i) => {
   problems.theme.push(`styles.css:${i + 1}  hardcoded ${hex.join(' ')} — ${l.trim().slice(0, 80)}`);
 });
 
-/* ---------- 4. UX gaps (structural, from reading the views) ---------- */
+/* ---------- 4. 体验缺口（读代码看出来的结构问题） ---------- */
 
 const checks = [
   ['batch operations', /S\.checked/, 'no multi-select anywhere — bulk delete/distribute impossible'],
@@ -119,7 +117,7 @@ const checks = [
   ['telemetry wired', /localStats/, 'telemetry setting stored but nothing sends counts'],
   ['empty-state CTA', /projects\.noneLong[\s\S]{0,200}doImportProject|empty[\s\S]{0,120}class: 'btn primary'/, 'empty states are plain text without a call to action'],
   ['truncation tooltips', /t-desc', title:/, 'long truncated text has no title attribute'],
-  // Known deliberate gaps — kept visible so the decision stays documented:
+  // 已知的、有意的缺口 —— 留在这里可见，好让决定有据可查：
   ['drag to move', /dragstart|draggable/, 'no drag to move between scopes (distribute dialog covers the capability; drag is a UX duplicate)'],
   ['virtual scrolling', /virtual|IntersectionObserver/, 'no windowing — pagination covers it; revisit only past ~5k rows per filter'],
 ];
@@ -127,7 +125,7 @@ for (const [name, re, msg] of checks) {
   if (!re.test(app)) problems.ux.push(msg);
 }
 
-/* ---------- report ---------- */
+/* ---------- 报告 ---------- */
 
 let n = 0;
 for (const [cat, list] of Object.entries(problems)) {

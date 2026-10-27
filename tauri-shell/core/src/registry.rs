@@ -1,41 +1,37 @@
-//! `projects.json` registry — loads `<userData>/agentkeeper/projects.json`,
-//! hands the same instance to every IPC handler, and seeds on first run.
+//! `projects.json` 注册表 —— 加载 `<userData>/agentkeeper/projects.json`，
+//! 把同一个实例交给每一个 IPC handler，并在首次运行时做种子。
 //!
-//! One registry is created per app run and populated lazily by
-//! [`ensure_loaded`], so every handler sees the same `OnceLock<Mutex<..>>`.
+//! 每次应用运行创建一个注册表，由 [`ensure_loaded`] 惰性填充，所以每个 handler
+//! 看到的是同一个 `OnceLock<Mutex<..>>`。
 //!
-//! ## Why every byte matters
+//! ## 为什么每一个字节都要在意
 //!
-//! One store directory: `load()` reads the file, `save()` rewrites it, so any
-//! formatting difference (key order, indent, a trailing newline) would show up
-//! as churn in the audit trail and as a needless diff even when nothing
-//! changed. [`render`] therefore keeps one fixed byte layout: two-space
-//! indent, object key order preserved, **no trailing newline**.
+//! 只有一个 store 目录：`load()` 读文件，`save()` 重写它，所以任何格式差异
+//! （键顺序、缩进、一个结尾换行）都会在审计轨迹里表现为无谓的变动、在什么都没
+//! 改动时表现为一份没必要的差异。因此 [`render`] 保持一份固定的字节布局：两个
+//! 空格的缩进、对象键顺序被保留、**没有结尾换行**。
 //!
-//! ## Quirks kept on purpose
+//! ## 刻意保留的怪癖
 //!
-//! * Duplicate detection runs **before** the existence check and compares
-//!   `dir.to_lowercase()` on both sides, so re-adding a
-//!   project whose directory was deleted reports `project already registered`,
-//!   not `directory not found`.
-//! * `dir` is resolved lexically — never canonicalised. `fs::canonicalize` is
-//!   deliberately not used: it resolves symlinks and yields `\\?\`-prefixed
-//!   verbatim paths on Windows, which would change the stored string, the id
-//!   hash and every consumer of `p.dir`.
-//! * `id` is `proj-` + the slug of `name || basename(abs)` capped at 32
-//!   UTF-16 code units + `-` + the first 6 hash chars; the cap is UTF-16
-//!   based, hence `model::js_slice`.
-//! * `load()` swallows every error and falls back to `[]`.
-//! * `remove()` saves even when the id did not match.
-//! * `seed()` iterates in directory-listing order — OS order, never sorted —
-//!   and returns two empty arrays for a missing/unreadable root.
+//! * 重复检测跑在存在性检查**之前**，并且比较两侧的 `dir.to_lowercase()`，所以
+//!   重新添加一个目录已被删除的项目会报告 `project already registered`，
+//!   而不是 `directory not found`。
+//! * `dir` 是按字面解析的 —— 从不被 canonicalise。刻意不用 `fs::canonicalize`：
+//!   它会解析符号链接，并在 Windows 上产出带 `\\?\` 前缀的逐字路径，那会改变
+//!   存储的字符串、id 哈希以及 `p.dir` 的每一个消费者。
+//! * `id` 是 `proj-` 加上 `name || basename(abs)` 的 slug（截到 32 个 UTF-16
+//!   码元）加上 `-` 加上哈希的前 6 个字符；这个上限基于 UTF-16，所以用
+//!   `model::js_slice`。
+//! * `load()` 吞掉每一个错误并退回 `[]`。
+//! * `remove()` 即使 id 没匹配上也会保存。
+//! * `seed()` 按目录列表顺序迭代 —— 操作系统顺序，从不排序 —— 并且对一个
+//!   缺失/不可读的根目录返回两个空数组。
 //!
-//! ## Demo root
+//! ## 演示根目录
 //!
-//! [`seed`] takes the demo root as `root_dir`; `lib.rs` resolves it (dev
-//! layout, `AK_DEMO_PROJECTS`, or the bundled resource dir). Keeping path
-//! resolution out of `core/` is what lets the headless `ak-scan` binary reuse
-//! this module.
+//! [`seed`] 把演示根目录作为 `root_dir` 接收；`lib.rs` 负责解析它（开发布局、
+//! `AK_DEMO_PROJECTS`，或打包的资源目录）。把路径解析挡在 `core/` 之外，正是
+//! 让无头的 `ak-scan` 二进制能复用本模块的原因。
 
 use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
@@ -46,12 +42,11 @@ use super::model::{hash16, iso_from_millis, js_slice, norm_str, slug};
 use super::settings;
 
 /* ------------------------------------------------------------------ */
-/* singleton state                                                     */
+/* 单例状态                                                             */
 /* ------------------------------------------------------------------ */
 
-/// The `ProjectRegistry`: one file path plus the array that was loaded from
-/// it. `file` is empty until the first bind, which is how "not loaded yet" is
-/// told apart from "loaded from an empty store".
+/// `ProjectRegistry`：一条文件路径加上从它加载出来的那个数组。`file` 在第一次
+/// 绑定之前是空的，这就是"还没加载"与"从一个空 store 加载出来"的区分方式。
 struct Registry {
     file: PathBuf,
     projects: Vec<Value>,
@@ -67,9 +62,8 @@ fn cell() -> &'static Mutex<Registry> {
     })
 }
 
-/// A poisoned lock means another thread panicked mid-mutation; the stored
-/// array is still structurally valid, so continue with it rather than turning
-/// every later project call into a panic.
+/// 一把被毒化的锁意味着另一个线程在改动中途 panic 了；存储的数组在结构上仍然
+/// 有效，所以继续用它，而不是把之后每一次项目调用都变成 panic。
 fn state() -> MutexGuard<'static, Registry> {
     cell().lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -79,9 +73,9 @@ fn projects_file(store_root: &str) -> PathBuf {
 }
 
 fn load_from(file: &Path) -> Vec<Value> {
-    // Every failure — missing file, invalid JSON, a
-    // `projects` value that is not an array — collapses to an empty list. No
-    // error is ever surfaced to the renderer.
+    // 每一种失败 —— 文件缺失、JSON 无效、一个
+    // 不是数组的 `projects` 值 —— 都塌缩成一个空列表。绝不会
+    // 向渲染层暴露任何错误。
     std::fs::read(file)
         .ok()
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
@@ -94,12 +88,11 @@ fn bind(r: &mut Registry, store_root: &str) {
     r.projects = load_from(&r.file);
 }
 
-/// Load the registry on first use, exactly once per process.
+/// 每个进程只加载一次注册表，在首次使用时。
 ///
-/// The file is read at startup and never re-read,
-/// so two calls cannot disagree with an in-memory `add()` that happened in
-/// between. A second call with a different root is ignored on purpose — in
-/// production there is only one store root; tests use [`reload`].
+/// 文件在启动时被读取、之后从不重读，
+/// 所以两次调用不会与期间发生的内存中 `add()` 产生分歧。带着另一个根目录的
+/// 第二次调用被刻意忽略 —— 在生产环境里只有一个 store 根目录；测试用 [`reload`]。
 pub fn ensure_loaded(store_root: &str) {
     let mut r = state();
     if r.file.as_os_str().is_empty() {
@@ -107,33 +100,32 @@ pub fn ensure_loaded(store_root: &str) {
     }
 }
 
-/// Drop the in-memory list and re-read `projects.json`.
+/// 丢掉内存中的列表并重新读取 `projects.json`。
 ///
-/// Not dead code: it is the test hook the integration suites use to re-point
-/// the process-wide singleton at another store root, plus the inline tests
-/// below. The GUI itself never calls it — production reads the file exactly
-/// once, via [`ensure_loaded`].
+/// 不是死代码：它是集成测试套件用来把进程级单例重新指向另一个 store 根目录的
+/// 测试钩子，也是下面那些内联测试所用的钩子。GUI 本身从不调用它 —— 生产环境
+/// 恰好读一次文件，通过 [`ensure_loaded`]。
 pub fn reload(store_root: &str) {
     let mut r = state();
     bind(&mut r, store_root);
 }
 
 /* ------------------------------------------------------------------ */
-/* path helpers                                                        */
+/* 路径辅助函数                                                          */
 /* ------------------------------------------------------------------ */
 
-/// Lexical resolution, filesystem-free.
+/// 纯字面的路径解析，不碰文件系统。
 ///
-/// Absolutise against the cwd, then collapse `.` / `..` purely as text.
-/// Neither `canonicalize` nor `metadata` is involved, so a path that does not
-/// exist still resolves (the caller's existence check is a separate step), and
-/// symlinks are never followed into a different spelling of the same path.
+/// 先相对当前工作目录转成绝对路径，然后纯粹按文本折叠 `.` / `..`。
+/// 既不涉及 `canonicalize` 也不涉及 `metadata`，所以一条并不存在的路径仍然能
+/// 被解析（调用方的存在性检查是另一步），而且符号链接永远不会被跟随到同一条
+/// 路径的另一种写法上。
 fn resolve_path(dir: &str) -> String {
     let raw = Path::new(dir);
     let joined: PathBuf = if raw.is_absolute() {
         raw.to_path_buf()
     } else if raw.has_root() {
-        // Windows: `/x` and `\x` are rooted on the *current drive*.
+        // Windows：`/x` 和 `\x` 是 rooted 在*当前驱动器*上的。
         let mut s = String::new();
         if let Ok(cwd) = std::env::current_dir() {
             if let Some(Component::Prefix(p)) = cwd.components().next() {
@@ -162,9 +154,8 @@ fn resolve_path(dir: &str) -> String {
             Component::Normal(n) => parts.push(n.to_string_lossy().into_owned()),
         }
     }
-    // `C:foo` (drive-relative) cannot be resolved without the per-drive cwd
-    // the OS keeps in the environment. The drive root is the closest truthful
-    // answer and keeps the stored value absolute.
+    // `C:foo`（驱动器相对）无法在缺少操作系统保存在环境里的逐驱动器工作目录
+    // 时被解析。驱动器根是最接近真相的答案，也让存储的值保持绝对。
     if !rooted && prefix.as_deref().map(|p| p.contains(':')).unwrap_or(false) {
         rooted = true;
     }
@@ -186,17 +177,16 @@ fn resolve_path(dir: &str) -> String {
         out.push_str(&part);
     }
     if out.is_empty() {
-        // Only reachable if the cwd is unreadable and `dir` was empty.
+        // 只有在工作目录不可读且 `dir` 为空时才可能走到这里。
         out.push('.');
     }
     out
 }
 
-/// Basename, with the root behaviour preserved.
+/// basename，保留根目录的行为。
 ///
-/// `model::basename` falls back to the whole path when there is no final
-/// component; a drive root returns `''`. The registry feeds this
-/// value into both `name` and the id slug, so the distinction is real.
+/// `model::basename` 在没有最后一个分量时会退回整条路径；驱动器根返回 `''`。
+/// 注册表把这个值同时喂给 `name` 和 id 的 slug，所以这个区分是真实存在的。
 fn js_basename(p: &str) -> String {
     Path::new(p)
         .file_name()
@@ -204,7 +194,7 @@ fn js_basename(p: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Directory check — follows links, swallows errors.
+/// 目录检查 —— 跟随链接，吞掉错误。
 fn exists_dir(p: &str) -> bool {
     std::fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false)
 }
@@ -218,35 +208,35 @@ fn now_iso() -> String {
 }
 
 /* ------------------------------------------------------------------ */
-/* save / load                                                         */
+/* 保存 / 加载                                                           */
 /* ------------------------------------------------------------------ */
 
-/// Two-space indent, no trailing newline.
+/// 两个空格的缩进，没有结尾换行。
 ///
-/// `serde_json` is built with `preserve_order`, so both the top-level wrapper
-/// and the loaded project objects keep the exact stored key order.
+/// `serde_json` 是用 `preserve_order` 构建的，所以顶层包装和加载出来的项目对象
+/// 都保持存储时的确切键顺序。
 pub fn render(projects: &[Value]) -> String {
     serde_json::to_string_pretty(&json!({ "projects": projects }))
         .unwrap_or_else(|_| "{\"projects\":[]}".to_string())
 }
 
-/// `save()` — mkdir, write temp, rename. Shares
-/// `settings::atomic_write` so both stores have the same durability story;
-/// only the bytes differ, and those are pinned by `render`.
+/// `save()` —— 建目录、写临时文件、重命名。它共用
+/// `settings::atomic_write`，所以两个 store 有同样的持久化说法；
+/// 只有字节不同，而那些字节由 `render` 钉住。
 fn save(r: &Registry) -> std::io::Result<()> {
     settings::atomic_write(&r.file, &render(&r.projects))
 }
 
 /* ------------------------------------------------------------------ */
-/* public registry API                                                 */
+/* 公开的注册表 API                                                       */
 /* ------------------------------------------------------------------ */
 
-/// `list()` — a copy, so a caller cannot mutate the registry's array.
+/// `list()` —— 一份拷贝，所以调用方无法改动注册表的数组。
 pub fn list() -> Vec<Value> {
     state().projects.clone()
 }
 
-/// `get(id)` — identity comparison on strings, `null` when nothing matches.
+/// `get(id)` —— 字符串上的同一性比较，没有匹配时为 `null`。
 pub fn get(id: &str) -> Option<Value> {
     state()
         .projects
@@ -255,17 +245,17 @@ pub fn get(id: &str) -> Option<Value> {
         .cloned()
 }
 
-/// `add(dir, name)` — the full sequence.
+/// `add(dir, name)` —— 完整流程。
 pub fn add(dir: &str, name: Option<&str>) -> Value {
     let abs = resolve_path(dir);
     let mut r = state();
     if r.file.as_os_str().is_empty() {
-        // Only possible if a caller skipped `ensure_loaded`; refusing beats
-        // silently creating `projects.json` in the process's cwd.
+        // 只有调用方跳过了 `ensure_loaded` 才可能发生；拒绝比
+        // 悄悄在进程的工作目录里创建 `projects.json` 要好。
         return json!({ "ok": false, "error": "registry not initialised" });
     }
 
-    // Case-insensitive, and deliberately ahead of the existence check.
+    // 大小写不敏感，而且刻意跑在存在性检查之前。
     let needle = abs.to_lowercase();
     let duplicate = r.projects.iter().any(|p| {
         p.get("dir")
@@ -281,7 +271,7 @@ pub fn add(dir: &str, name: Option<&str>) -> Value {
         return json!({ "ok": false, "error": format!("directory not found: {}", abs) });
     }
 
-    // `name || path.basename(abs)` — an absent *or empty* name is falsy.
+    // `name || path.basename(abs)` —— 缺失*或为空*的 name 是 falsy。
     let base = js_basename(&abs);
     let chosen: &str = match name {
         Some(n) if !n.is_empty() => n,
@@ -301,15 +291,15 @@ pub fn add(dir: &str, name: Option<&str>) -> Value {
     });
 
     r.projects.push(project.clone());
-    // The push stays even if the write fails: the failure happens
-    // after the array was already extended.
+    // 即使写入失败，这次 push 也会保留：失败发生在
+    // 数组已经被扩展之后。
     if let Err(e) = save(&r) {
         return json!({ "ok": false, "error": e.to_string() });
     }
     json!({ "ok": true, "project": project })
 }
 
-/// `remove(id)` — always saves, even when nothing matched.
+/// `remove(id)` —— 总是保存，即使什么都没匹配上。
 pub fn remove(id: &str) -> Value {
     let mut r = state();
     if r.file.as_os_str().is_empty() {
@@ -325,11 +315,11 @@ pub fn remove(id: &str) -> Value {
     json!({ "ok": after != before, "removed": before - after })
 }
 
-/// Register every project under `root_dir`.
+/// 注册 `root_dir` 下的每一个项目。
 ///
-/// Non-directories and dot-prefixed names are skipped before `add` is tried;
-/// everything else goes through the normal duplicate/existence checks, so a
-/// second run reports each project as `already registered`.
+/// 非目录和以点开头的名字在尝试 `add` 之前就被跳过；
+/// 其余一切都走正常的重复/存在性检查，所以第二次运行会把每个项目都报告为
+/// `already registered`。
 pub fn seed(store_root: &str, root_dir: &str) -> Value {
     ensure_loaded(store_root);
     let mut added: Vec<Value> = Vec::new();
@@ -342,17 +332,17 @@ pub fn seed(store_root: &str, root_dir: &str) -> Value {
     if !root.exists() {
         return json!({ "added": added, "skipped": skipped });
     }
-    // A file here (or a permission error) yields empty arrays, not an error.
+    // 这里是一个文件（或者一个权限错误）会产出空数组，而不是错误。
     let Ok(entries) = std::fs::read_dir(root) else {
         return json!({ "added": added, "skipped": skipped });
     };
 
-    // `readdirSync` order is OS order; sorting would change which project is
-    // added first and therefore the order inside projects.json.
+    // `readdirSync` 的顺序就是操作系统顺序；排序会改变哪个项目先被
+    // 添加，从而改变 projects.json 内部的顺序。
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        // Dirent::isDirectory() is false for a junction/symlink, which is why
-        // a linked demo project is skipped.
+        // 对 junction/符号链接而言 Dirent::isDirectory() 为 false，这正是
+        // 链接过来的演示项目被跳过的原因。
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         if !is_dir || name.starts_with('.') {
             continue;
@@ -372,7 +362,7 @@ pub fn seed(store_root: &str, root_dir: &str) -> Value {
 }
 
 /* ------------------------------------------------------------------ */
-/* tests                                                               */
+/* 测试                                                                 */
 /* ------------------------------------------------------------------ */
 
 #[cfg(test)]

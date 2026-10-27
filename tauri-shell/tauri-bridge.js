@@ -1,14 +1,13 @@
 /*
- * Tauri shell adapter.
+ * Tauri 外壳适配层。
  *
- * The renderer gets `window.ak` from this file, which puts the same surface on
- * top of `window.__TAURI__.core.invoke`. The names, arities and argument shapes
- * here are a contract with `src/renderer/app.js`: anything that differs shows up
- * as a UI bug, so `scripts/check.js bridge` diffs each call against the Rust
- * command signature.
+ * 渲染层从这里拿到 `window.ak`，它把同一套接口铺在 `window.__TAURI__.core.invoke`
+ * 之上。这里的名字、参数个数与参数形状都是与 `src/renderer/app.js` 的契约：差一点
+ * 就会表现成 UI 缺陷，所以 `scripts/check.js bridge` 会把每次调用拿去和 Rust 命令
+ * 的签名比对。
  *
- * CSP note: this file is loaded by a <script> tag from the same origin, so it
- * is allowed under `script-src 'self'`.
+ * CSP 说明：这个文件由同源的 <script> 标签加载，所以在 `script-src 'self'` 下是
+ * 允许的。
  */
 (function () {
   'use strict';
@@ -18,8 +17,8 @@
     : null;
 
   if (!invoke) {
-    // Fail loudly. A silent no-op here would render an empty dashboard that
-    // looks like a data problem rather than a broken bridge.
+    // 要大声地失败。这里静默不做事，渲染出来的空面板会看起来像数据问题，
+    // 而不是桥接坏了。
     document.body.innerHTML =
       '<pre style="color:#b00;font:13px monospace;padding:24px">' +
       'Tauri bridge unavailable: window.__TAURI__.core.invoke is missing.</pre>';
@@ -36,10 +35,9 @@
     readAsset: function (assetId) { return call('read_asset', { args: { assetId: assetId } }); },
     saveMarkdown: function (assetId, content) { return call('save_markdown', { args: { assetId: assetId, content: content } }); },
     diff: function (assetId, content) { return call('diff', { args: { assetId: assetId, content: content } }); },
-    // The command argument is named `payload` on the Rust side, and Tauri looks
-    // it up by name in the invoke body (`missing required key` otherwise). Pass
-    // the object under that key — handing the bare payload fails the call, and
-    // the renderer has no catch, so the button just looks dead.
+    // Rust 那边这个命令的参数叫 `payload`，Tauri 是按名字在 invoke 的 body 里找它的
+    // （否则就报 `missing required key`）。所以对象要挂在这个键下面 —— 直接把 payload
+    // 本身递过去会让调用失败，而渲染层没有 catch，按钮看上去就像点不动。
     saveSkill: function (payload) { return call('save_skill', { payload: payload }); },
     upsertMcp: function (payload) { return call('upsert_mcp', { payload: payload }); },
     deleteMcp: function (assetId) { return call('delete_mcp', { args: { assetId: assetId } }); },
@@ -50,7 +48,7 @@
     getSettings: function () { return call('get_settings'); },
     saveSettings: function (settings) { return call('save_settings', { settings: settings }); },
 
-    // --- software update ---
+    // --- 软件更新 ---
     updateStatus: function () { return call('update_status'); },
     updateCheck: function () { return call('update_check'); },
     updateReleases: function (limit) { return call('update_releases', { limit: limit }); },
@@ -64,8 +62,8 @@
     openReleasePage: function (url) { return call('open_release_page', { url: url }); },
 
     /**
-     * The shell emits 'update-event' (see `lib.rs`). Returns an unsubscribe
-     * function so a re-render cannot stack listeners.
+     * 外壳会发 'update-event'（见 `lib.rs`）。返回一个退订函数，这样重新渲染
+     * 就不会把监听器越叠越多。
      */
     onUpdateEvent: function (callback) {
       if (window.__TAURI__ && window.__TAURI__.event && typeof window.__TAURI__.event.listen === 'function') {
@@ -87,13 +85,12 @@
     audit: function (opts) { return call('audit', { opts: opts }); },
     openPath: function (path) { return call('open_path', { path: path }); },
     openStore: function () { return call('open_store_dir'); },
-    // The renderer's crash channel. The command takes a single `payload`
-    // argument, so the object goes in under that key (see the note above
-    // `saveSkill`): handing over the bare payload is rejected by Tauri with
-    // `missing required key payload`, and the error would then be lost silently.
+    // 渲染层的崩溃上报通道。这个命令只接受一个 `payload` 参数，所以对象要挂在这个键
+    // 下面（见 `saveSkill` 上面那段说明）：直接递裸对象会被 Tauri 以
+    // `missing required key payload` 拒掉，而那个错误又会悄无声息地丢掉。
     uiError: function (payload) { return call('ui_error', { payload: payload }); },
 
-    // Data property, not a function: app.js reads it as a value.
+    // 是数据属性而不是函数：app.js 把它当值读。
     platform: 'win32'
   };
 

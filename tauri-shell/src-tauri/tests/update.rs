@@ -1448,7 +1448,6 @@ fn the_scheduler_fires_at_once_then_backs_off() {
     let manager = fx.manager("1.0.0");
 
     assert_eq!(manager.due_at(), 0, "no history means due immediately");
-
     let first = manager.tick().expect("the first tick must check");
     assert_eq!(first["latest"], json!("9.9.9"), "{}", first);
 
@@ -1469,7 +1468,7 @@ fn the_scheduler_fires_at_once_then_backs_off() {
 }
 
 /* ------------------------------------------------------------------ */
-/* 17h. settings: validation, clamping, silent install                 */
+/* 17h. 设置：校验、钳制、静默安装                                      */
 /* ------------------------------------------------------------------ */
 
 #[test]
@@ -1477,7 +1476,7 @@ fn save_settings_clamps_validates_and_echoes_back() {
     let fx = Fixture::new("settings");
     let manager = fx.manager("1.0.0");
 
-    // Silent install is on by default and can be turned off.
+    // 静默安装默认开启，并且可以被关掉。
     assert_eq!(manager.status()["settings"]["silent"], json!(true));
     let off = manager
         .save_settings(&json!({ "silent": false }))
@@ -1488,7 +1487,7 @@ fn save_settings_clamps_validates_and_echoes_back() {
         .expect("save");
     assert_eq!(manager.status()["settings"]["silent"], json!(true));
 
-    // `clampMinutes`: 1..1440, and a non-finite value falls back to 20.
+    // `clampMinutes`：1..1440，而一个非有限值回退到 20。
     let one = manager
         .save_settings(&json!({ "minutes": 0 }))
         .expect("save");
@@ -1502,13 +1501,13 @@ fn save_settings_clamps_validates_and_echoes_back() {
         .expect("save");
     assert_eq!(back["settings"]["minutes"], json!(45), "{}", back);
 
-    // An unusable repo is stored verbatim but reads back as the built-in one.
+    // 一个不可用的仓库会被原样存下，但读回来时是内置的那个。
     let bad = manager
         .save_settings(&json!({ "repo": "not a repo" }))
         .expect("save");
     assert_eq!(bad["repo"], json!(BUILT_IN_REPO), "{}", bad);
 
-    // A good one is echoed and persisted.
+    // 一个好的仓库会被回显并持久化。
     let good = manager
         .save_settings(&json!({ "repo": "acme/keeper", "beta": true, "proxy": "direct" }))
         .expect("save");
@@ -1536,11 +1535,11 @@ fn turning_auto_check_off_clears_the_schedule() {
     assert!(manager.tick().is_none());
 }
 
-// The shell's scheduler thread only calls `tick()` every 30 s; the decision to
-// touch the network lives in `tick()` itself, so the setting gate is asserted
-// here against the same method the thread calls (lib.rs:update_scheduler_loop).
-// The mock counts requests, so "off" has to be provably zero requests, not just
-// a `None` return that a broken early-return could fake.
+// shell 的调度器线程每 30 s 只调用一次 `tick()`；是否接触网络的
+// 决定就住在 `tick()` 本身，所以这个设置开关是在这里针对
+// 线程所调用的同一个方法来断言的（lib.rs:update_scheduler_loop）。
+// 模拟服务器会统计请求次数，所以"关"必须能证明是零请求，而不只是
+// 一个可能被坏掉的提前 return 伪造出来的 `None` 返回。
 #[test]
 fn update_check_off_means_no_tick_and_no_request() {
     let fx = Fixture::new("autogate");
@@ -1562,8 +1561,8 @@ fn update_check_off_means_no_tick_and_no_request() {
         "auto-check off must not hit the network"
     );
 
-    // Flipping the switch is all the scheduler needs (same manager, same root —
-    // the setting is re-read inside `tick`). One tick = exactly one request.
+    // 拨动这个开关就是调度器所需的一切（同一个 manager、同一个根目录 ——
+    // 这个设置是在 `tick` 内部被重新读取的）。一次 tick = 恰好一次请求。
     fx.save(json!({ "updateCheck": true }));
     let fired = manager
         .tick()
@@ -1572,7 +1571,7 @@ fn update_check_off_means_no_tick_and_no_request() {
     assert_eq!(fired["ok"], json!(true), "{}", fired);
     assert_eq!(fired["latest"], json!("9.9.9"), "{}", fired);
 
-    // ...and the deadline the tick just persisted keeps the next one quiet.
+    // …… 而且这次 tick 刚刚持久化的截止时间会让下一次保持安静。
     assert!(
         manager.tick().is_none(),
         "the next tick is a full interval away"
@@ -1585,8 +1584,8 @@ fn update_check_off_means_no_tick_and_no_request() {
 }
 
 /* ------------------------------------------------------------------ */
-/* the ak:update-* payload guard                                       */
-/* fixture                                                             */
+/* ak:update-* 载荷守卫                                                */
+/* 夹具                                                                */
 /* ------------------------------------------------------------------ */
 
 struct IpcFixture {
@@ -1630,23 +1629,23 @@ impl Drop for IpcFixture {
 }
 
 /* ------------------------------------------------------------------ */
-/* BUG-1 — `ak:update-token` can clear the credential                  */
+/* BUG-1 —— `ak:update-token` 能清空凭据                               */
 /* ------------------------------------------------------------------ */
 
-/// The whole handler, in one test.
+/// 整个处理器，一个测试搞定。
 ///
-/// The bug had two halves and both are pinned here:
+/// 这个 bug 有两半，两半都在这里被钉住：
 ///
-/// 1. `token: String` cannot deserialize `null`, so the invoke was *rejected*
-///    before the body ran — the renderer's `.catch` showed an error toast for a
-///    click that had asked to clear. Hence the raw request body.
-/// 2. `set_token(Some(&token))` made `Option<&str>`'s `None` branch unreachable,
-///    so "clear" had no Rust meaning at all. Hence the forwarded `None`.
+/// 1. `token: String` 无法反序列化 `null`，所以那次调用在函数体执行前
+///    就被*拒绝*了 —— 渲染器的 `.catch` 为一次明明要求清除的点击
+///    显示了错误提示。所以这里用了原始请求体。
+/// 2. `set_token(Some(&token))` 让 `Option<&str>` 的 `None` 分支无法触达，
+///    所以"清除"在 Rust 里根本没有对应的含义。所以这里转发了 `None`。
 ///
-/// The missing-field branch is the one that needs the raw body: Tauri's
-/// `CommandItem::deserialize_option` maps both an absent key and an explicit
-/// `null` to `visit_none()`, so an `Option<Value>` parameter cannot tell them
-/// apart and `update.tokenFieldRequired` would be dead code.
+/// 需要原始请求体的是缺字段那个分支：Tauri 的
+/// `CommandItem::deserialize_option` 把键缺席和显式的
+/// `null` 都映射成 `visit_none()`，所以一个 `Option<Value>` 参数
+/// 分不开它们，`update.tokenFieldRequired` 就会是死代码。
 #[test]
 fn token_arg_clears_on_null_and_rejects_a_missing_or_wrong_typed_field() {
     // `if (!('token' in p)) return { ok:false, error:'请求缺少 token 字段…' }`
@@ -1655,20 +1654,20 @@ fn token_arg_clears_on_null_and_rejects_a_missing_or_wrong_typed_field() {
         Err(ERR_TOKEN_FIELD_REQUIRED),
         "a payload without the token field must not be read as 'clear'"
     );
-    // `asObject(payload) || {}` — a non-object body collapses to `{}`.
+    // `asObject(payload) || {}` —— 一个非对象的请求体会塌缩成 `{}`。
     assert_eq!(token_arg(&json!(7)), Err(ERR_TOKEN_FIELD_REQUIRED));
     assert_eq!(token_arg(&json!("ghp_x")), Err(ERR_TOKEN_FIELD_REQUIRED));
     assert_eq!(token_arg(&Value::Null), Err(ERR_TOKEN_FIELD_REQUIRED));
 
-    // `null` is the explicit clear, and it must come back as `None` — the
-    // `Option<&str>` branch `manager.set_token` actually acts on.
+    // `null` 是明确的清除，而且它必须以 `None` 回来 ——
+    // 那正是 `manager.set_token` 真正据以行动的 `Option<&str>` 分支。
     assert_eq!(
         token_arg(&json!({ "token": null })),
         Ok(None),
         "null must reach set_token as None, not as an empty string"
     );
 
-    // `typeof p.token === 'string'`
+    // `typeof p.token === 'string'` —— token 必须是一个字符串。
     assert_eq!(
         token_arg(&json!({ "token": "ghp_abc123" })),
         Ok(Some("ghp_abc123".to_string()))
@@ -1679,7 +1678,8 @@ fn token_arg_clears_on_null_and_rejects_a_missing_or_wrong_typed_field() {
         "an empty string is a bad token, not a clear — token.rs rejects it"
     );
 
-    // `p.token !== null && typeof p.token !== 'string'`
+    // `p.token !== null && typeof p.token !== 'string'` —— 既不是 null
+    // 也不是字符串的 token 都是类型错误。
     for bad in [
         json!({ "token": 12 }),
         json!({ "token": true }),
@@ -1690,18 +1690,18 @@ fn token_arg_clears_on_null_and_rejects_a_missing_or_wrong_typed_field() {
     }
 }
 
-/// The full "clear token" chain, minus the button: `set_token(None)` must empty
-/// the credential in the manager *and* on disk, which is what the settings page
-/// badge reads.
+/// 完整的"清除令牌"链路，不含按钮：`set_token(None)` 必须把凭据
+/// 在 manager 里*并且*在磁盘上都清空，而设置页面上的
+/// 徽标读的就是磁盘上那个。
 #[test]
 fn clearing_the_token_empties_it_in_the_status_and_in_settings_json() {
     let fx = IpcFixture::new("clear");
     let manager = fx.manager();
 
     if manager.status()["encryption"] != json!(true) {
-        // No DPAPI on this host: `set_token` refuses rather than storing
-        // plaintext (`update.tokenNoCrypto`). The clear path still has to be
-        // the refusal, not a silent success.
+        // 本机没有 DPAPI：`set_token` 会拒绝，而不是存下
+        // 明文（`update.tokenNoCrypto`）。清除路径仍然必须是
+        // 那次拒绝，而不是一次无声的成功。
         let error = manager.set_token(None).expect_err("clear must be refused");
         assert!(error.message().contains("安全存储"), "{}", error);
         return;
@@ -1715,7 +1715,7 @@ fn clearing_the_token_empties_it_in_the_status_and_in_settings_json() {
         .unwrap_or("")
         .starts_with("enc1:"));
 
-    // `app.js:1802` → `{token:null}` → `None`.
+    // `app.js:1802` → `{token:null}` → `None`。
     let cleared = manager.set_token(None).expect("clear");
     assert_eq!(cleared["token"]["filled"], json!(false), "{}", cleared);
     assert_eq!(cleared["token"]["origin"], json!(null), "{}", cleared);
@@ -1729,20 +1729,20 @@ fn clearing_the_token_empties_it_in_the_status_and_in_settings_json() {
     );
 }
 
-/// The "清除令牌" button's own path: **the body the renderer sends**, through
-/// the same entry point the command uses.
+/// "清除令牌"按钮自己的那条路径：**渲染器发出的请求体**，
+/// 走的是命令所用的同一个入口。
 ///
-/// The rules are reachable but the command is not, so
-/// `set_token_checked` is the seam that makes the wiring assertable. Reintroducing
-/// BUG-1 — passing `Some(..)` unconditionally, or declaring the parameter
-/// `Option<Value>` and treating `None` as "clear" — turns this red.
+/// 规则是可达的而命令不可达，所以
+/// `set_token_checked` 就是那个让接线可以被断言的接缝。重新引入
+/// BUG-1 —— 无条件地传 `Some(..)`，或者把参数声明成
+/// `Option<Value>` 并把 `None` 当作"清除" —— 都会让这里变红。
 #[test]
 fn the_clear_button_payload_clears_and_a_bare_body_is_refused() {
     let fx = IpcFixture::new("clear-button");
     let manager = fx.manager();
     let encrypted = manager.status()["encryption"] == json!(true);
     if !encrypted {
-        // No DPAPI here: both paths have to refuse rather than write plaintext.
+        // 这里没有 DPAPI：两条路径都必须拒绝，而不是写入明文。
         assert!(manager
             .set_token_checked(&json!({ "token": null }))
             .is_err());
@@ -1754,7 +1754,7 @@ fn the_clear_button_payload_clears_and_a_bare_body_is_refused() {
         .set_token_checked(&json!({ "token": "ghp_testtoken123" }))
         .expect("save the token first");
 
-    // Exactly what `app.js:1802` puts on the wire for the clear button.
+    // 正是 `app.js:1802` 为清除按钮放到线上的内容。
     let cleared = manager
         .set_token_checked(&json!({ "token": null }))
         .expect("the clear button must succeed, not throw");
@@ -1766,7 +1766,7 @@ fn the_clear_button_payload_clears_and_a_bare_body_is_refused() {
         "the stored envelope must be gone"
     );
 
-    // A body without the field is a bug, not permission to delete.
+    // 一个没有这个字段的请求体是个 bug，不是删除的许可。
     let missing = manager
         .set_token_checked(&json!({}))
         .expect_err("a bare body must not clear the credential");
@@ -1782,13 +1782,13 @@ fn the_clear_button_payload_clears_and_a_bare_body_is_refused() {
     );
 }
 
-/// What `#[tauri::command]` actually hands a parameter typed `Option<Value>`.
+/// `#[tauri::command]` 实际上交给一个声明为 `Option<Value>` 的参数的东西。
 ///
-/// `CommandItem::deserialize_option` (`tauri-2.12.4/src/ipc/command.rs:146-157`)
-/// looks `key` up in the body: absent → `visit_none()`, present → delegate to
-/// the value, and `Value::deserialize_option` maps `Null` to `visit_none()` too.
-/// Mirrored here because `InvokeMessage`'s fields are `pub(crate)`, so the real
-/// plumbing cannot be driven from an integration test.
+/// `CommandItem::deserialize_option`（`tauri-2.12.4/src/ipc/command.rs:146-157`）
+/// 在请求体里查 `key`：缺席 → `visit_none()`，在场 → 委派给
+/// 那个值，而 `Value::deserialize_option` 也把 `Null` 映射成 `visit_none()`。
+/// 这里镜像它是因为 `InvokeMessage` 的字段是 `pub(crate)`，所以真正的
+/// 那套管线无法从集成测试里驱动。
 fn tauri_option_field(payload: &Value, key: &str) -> Option<Value> {
     match payload.get(key) {
         None => None,
@@ -1797,13 +1797,13 @@ fn tauri_option_field(payload: &Value, key: &str) -> Option<Value> {
     }
 }
 
-/// The reason `update_set_token` takes the raw body.
+/// `update_set_token` 之所以要拿原始请求体的原因。
 ///
-/// The rule requires "no `token` field" and "`token` is null" to produce
-/// *different* outcomes (an error vs. a clear). Under a plain
-/// `token: Option<Value>` parameter both arrive as `None`, so one of the two
-/// branches have to be sacrificed — which is exactly the compromise to avoid.
-/// This pins the collapse so the reasoning stays checkable.
+/// 规则要求"没有 `token` 字段"和"`token` 为 null"产生
+/// *不同*的结果（一个错误 versus 一次清除）。在一个普通的
+/// `token: Option<Value>` 参数下两者都成了 `None`，所以两个分支
+/// 之中必有一个要牺牲 —— 而那正是要避免的妥协。
+/// 这里把这种塌缩钉住，好让这层推理始终是可核对的。
 #[test]
 fn an_absent_token_key_and_an_explicit_null_are_indistinguishable_as_a_parameter() {
     let absent = tauri_option_field(&json!({}), "token");
@@ -1815,51 +1815,50 @@ fn an_absent_token_key_and_an_explicit_null_are_indistinguishable_as_a_parameter
          the command must keep taking the request body"
     );
 
-    // The body keeps them apart, which is the whole fix.
+    // 请求体把它们分开，这正是整个修复所在。
     assert_eq!(token_arg(&json!({})), Err(ERR_TOKEN_FIELD_REQUIRED));
     assert_eq!(token_arg(&json!({ "token": null })), Ok(None));
 }
 
 /* ------------------------------------------------------------------ */
-/* BUG-2 — the five `ak:update-settings` validations                   */
+/* BUG-2 —— 那五条 `ak:update-settings` 校验                            */
 /* ------------------------------------------------------------------ */
-/// `validate_settings_patch` is the *only* thing standing between a bad value
-/// and the store, because `manager.save_settings` clamps instead of rejecting.
+/// `validate_settings_patch` 是挡在一个坏值
+/// 与 store 之间的*唯一*屏障，因为 `manager.save_settings` 是钳制而不是拒绝。
 ///
-/// Pinned here so a future refactor that moves the rules cannot quietly drop
-/// them: the guard has to reject before `save_settings` ever sees the patch.
+/// 在这里钉住，好让将来一次把这些规则搬走的重构无法悄悄
+/// 丢掉它们：守卫必须在 `save_settings` 见到这个补丁之前就拒绝它。
 #[test]
 fn the_guard_rejects_what_save_settings_would_otherwise_persist() {
     let fx = IpcFixture::new("persist");
     let manager = fx.manager();
 
-    // Without the guard `save_settings` would clamp 99999 → 1440 and store it.
+    // 没有守卫的话，`save_settings` 会把 99999 钳成 1440 并存下它。
     assert_eq!(
         validate_settings_patch(&json!({ "minutes": 99999 })),
         Some(ERR_INTERVAL_RANGE)
     );
-    // …and would store a malformed repo verbatim, which then silently reads
-    // back as the built-in one — the "更新检查失败" symptom.
+    // …… 而且会把一个畸形的仓库原样存下，之后它读回来时又悄悄
+    // 变成了内置的那个 —— 也就是"更新检查失败"这个症状。
     assert_eq!(
         validate_settings_patch(&json!({ "repo": "这不是仓库名" })),
         Some(ERR_REPO_FORMAT)
     );
 
-    // Proof of the second half: `save_settings` itself does clamp, so nothing
-    // below it would have caught these.
+    // 第二半的证据：`save_settings` 本身确实会钳制，所以它下面
+    // 不会有任何东西抓住这些。
     let clamped = manager
         .save_settings(&json!({ "minutes": 99999 }))
         .expect("save_settings still succeeds — it clamps");
     assert_eq!(clamped["settings"]["minutes"], json!(1440), "{}", clamped);
 }
 
-/// BUG-2's **wiring**, not just its rules: a rejected patch must never reach
-/// the store.
+/// BUG-2 的**接线**，不只是它的规则：一个被拒绝的补丁绝不能抵达
+/// store。
 ///
-/// "The validation function is correct" and "the command runs the validation"
-/// are different claims, and only the second one is what the user sees. The
-/// command functions are private to the crate, so `save_settings_checked` is
-/// the seam that lets a test assert it.
+/// "校验函数是对的"和"命令会执行校验"是两种不同的断言，
+/// 而用户看到的只有后者。命令函数在 crate 内部是私有的，所以
+/// `save_settings_checked` 就是那个让测试能断言它的接缝。
 #[test]
 fn a_rejected_settings_patch_never_reaches_the_store() {
     let fx = IpcFixture::new("reject");
@@ -1892,11 +1891,11 @@ fn a_rejected_settings_patch_never_reaches_the_store() {
     }
 }
 /* ------------------------------------------------------------------ */
-/* 17j. ak:update-releases — the changelog list                         */
+/* 17j. ak:update-releases —— 变更日志列表                              */
 /* ------------------------------------------------------------------ */
 
-/// A release as GitHub sends it. `body` is deliberately long enough to exercise
-/// the 8000-byte cap without allocating a megabyte: 9000 chars.
+/// 一条 GitHub 发出的 release。`body` 被刻意写得足够长，以便触发
+/// 8000 字节的上限，而不必分配一兆字节：9000 个字符。
 fn changelog_entry(tag: &str, day: &str, body: &str, prerelease: bool) -> Value {
     json!({
         "tag_name": format!("v{}", tag),
@@ -1914,8 +1913,8 @@ fn long_body(marker: &str) -> String {
     format!("{}{}", marker, "x".repeat(9000))
 }
 
-/// The happy path: a plain array, newest first, with every field the panel
-/// renders — and no envelope, because the renderer maps over the answer.
+/// 顺利路径：一个普通数组，最新的在前，带着面板会渲染的每一个字段
+/// —— 而且没有信封，因为渲染器是对这个结果做 map 的。
 #[test]
 fn update_releases_returns_the_changelog_as_a_plain_array() {
     let fx = Fixture::new("releases");
@@ -1934,8 +1933,8 @@ fn update_releases_returns_the_changelog_as_a_plain_array() {
     let items = rows.as_array().expect("a plain array").clone();
     assert_eq!(items.len(), 4, "{items:#?}");
 
-    // GitHub's order is preserved: the newest first, not "highest version".
-    // `0.3.0-beta.1` is numerically the highest and sits third.
+    // GitHub 的顺序被保留：最新的在前，而不是"版本号最高的"。
+    // `0.3.0-beta.1` 数值上最高，却排在第三。
     assert_eq!(items[0]["version"], json!("0.2.1"), "{items:#?}");
     assert_eq!(items[0]["date"], json!("2026-10-23"));
     assert_eq!(items[0]["notes"], json!("third\n"));
@@ -1953,7 +1952,7 @@ fn update_releases_returns_the_changelog_as_a_plain_array() {
     );
     assert_eq!(items[2]["date"], json!("2026-10-01"));
 
-    // Every key the panel reads is present on every row.
+    // 面板读取的每一个键在每一行上都存在。
     for row in &items {
         let keys: Vec<&str> = row
             .as_object()
@@ -1968,7 +1967,7 @@ fn update_releases_returns_the_changelog_as_a_plain_array() {
         );
     }
 
-    // The request itself is the documented URL, and it asked for the default.
+    // 请求本身就是文档里写的那个 URL，而且它要的是默认值。
     let requests = mock.requests();
     assert!(
         requests
@@ -1978,9 +1977,9 @@ fn update_releases_returns_the_changelog_as_a_plain_array() {
     );
 }
 
-/// The 8000-byte cap is `release_from_api`'s, not a new one: a 200 KB changelog
-/// must not travel through IPC, and the panel must see the same truncated text
-/// the update card shows.
+/// 那个 8000 字节上限是 `release_from_api` 的，不是新加的一个：
+/// 一份 200 KB 的变更日志不该穿过 IPC，而且面板必须看到
+/// 与更新卡片相同的被截断文本。
 #[test]
 fn update_releases_truncates_the_notes_at_the_shared_ceiling() {
     let fx = Fixture::new("releases-notes");
@@ -1998,15 +1997,15 @@ fn update_releases_truncates_the_notes_at_the_shared_ceiling() {
         "{}",
         &notes[..20.min(notes.len())]
     );
-    // `js_slice` counts UTF-16 code units and must not split a surrogate pair.
+    // `js_slice` 按 UTF-16 码元计数，不得劈开一个代理对。
     assert!(
         notes.chars().count() <= 8000 && notes.encode_utf16().count() <= 8000,
         "notes are {} utf-16 units",
         notes.encode_utf16().count()
     );
 
-    // And it is the *same* truncation the update card gets: build the panel's
-    // own record from the same payload and compare byte for byte.
+    // 而且它与更新卡片拿到的是*同一处*截断：用同一份载荷
+    // 构造出面板自己的记录，然后逐字节比较。
     let panel = version::release_from_api(
         &json!({
             "tag_name": "v0.2.1",
@@ -2024,9 +2023,9 @@ fn update_releases_truncates_the_notes_at_the_shared_ceiling() {
     );
 }
 
-/// `limit` is honoured on the wire (`per_page`) *and* on the way out, and it
-/// is clamped at both ends — a caller cannot ask for 10 000 entries and a caller
-/// cannot be pushed below one by a nonsense value.
+/// `limit` 在链路上（`per_page`）*和*在出站时都被遵守，而且
+/// 两端都被钳制 —— 调用方不能要 10000 条，调用方也不能被一个
+/// 无意义的值压到一条以下。
 #[test]
 fn update_releases_clamps_the_limit_at_both_ends() {
     let fx = Fixture::new("releases-limit");
@@ -2049,12 +2048,12 @@ fn update_releases_clamps_the_limit_at_both_ends() {
         mock.requests()
     );
 
-    // 0 clamps up to 1 (an empty changelog would look like a broken fetch).
+    // 0 会向上钳到 1（一份空的变更日志看起来像是取数坏了）。
     let rows = agentkeeper_shell_lib::update_releases_from(&fx.root_str(), Some(0));
     assert_eq!(rows.as_array().unwrap().len(), 1, "{rows:#?}");
 
-    // A ceiling far above GitHub's `per_page` maximum is clamped to it, so the
-    // request stays one page instead of silently under-delivering.
+    // 一个远高于 GitHub `per_page` 最大值的上限会被钳到那个最大值，
+    // 这样请求就只占一页，而不是悄悄少给内容。
     let rows = agentkeeper_shell_lib::update_releases_from(&fx.root_str(), Some(10_000));
     assert_eq!(
         rows.as_array().unwrap().len(),
@@ -2070,24 +2069,24 @@ fn update_releases_clamps_the_limit_at_both_ends() {
     );
 }
 
-/// Every failure mode has to answer with displayable text rather than an empty
-/// list: an empty array is indistinguishable from "this project has never
-/// released anything", which is a claim the app cannot support.
+/// 每一种失败模式都必须给出可显示的文本，而不是一个空
+/// 列表：空数组与"这个项目从来没有发布过任何东西"
+/// 无法区分，而那是这个应用无法支撑的一句断言。
 #[test]
 fn update_releases_reports_each_failure_with_a_message() {
     let fx = Fixture::new("releases-fail");
 
-    // 1. transport failure: nothing is listening on port 1.
+    // 1. 传输失败：1 号端口上没有任何东西在监听。
     fx.save(json!({ "updateRepo": "acme/keeper", "updateApiBase": "http://127.0.0.1:1" }));
     let r = agentkeeper_shell_lib::update_releases_from(&fx.root_str(), None);
     assert_eq!(r["ok"], json!(false), "{r}");
     let error = r["error"].as_str().expect("an error string");
     assert!(error.contains("cannot reach the server"), "{error}");
-    // The renderer dictionary maps this shape (`^cannot reach the server: §1$`),
-    // which is why the message is passed through instead of reworded.
+    // 渲染器字典映射的就是这个形状（`^cannot reach the server: §1$`），
+    // 这就是为什么这条消息被原样透传而不是改写。
     assert!(error.len() > 20, "the message must say something: {error}");
 
-    // 2. rate limited.
+    // 2. 被限流。
     let mock = MockGitHub::start(MockOptions::default());
     mock.set_rate_limited(true);
     fx.save(json!({ "updateRepo": "acme/keeper", "updateApiBase": mock.base }));
@@ -2095,7 +2094,7 @@ fn update_releases_reports_each_failure_with_a_message() {
     assert_eq!(r["ok"], json!(false), "{r}");
     assert!(r["error"].as_str().unwrap().contains("rate limit"), "{r}");
 
-    // 3. an HTTP status that is neither "no release" nor a rate limit.
+    // 3. 一个既不是"没有 release"也不是限流的 HTTP 状态码。
     let mock = MockGitHub::start(MockOptions {
         list_status: Some(500),
         ..MockOptions::default()
@@ -2112,8 +2111,8 @@ fn update_releases_reports_each_failure_with_a_message() {
     );
 }
 
-/// A repository with no releases yet is *not* an error: GitHub answers `/releases`
-/// with an empty array, and that is a truthful "nothing published".
+/// 一个还没有任何 release 的仓库*不是*一个错误：GitHub 会用
+/// 一个空数组回答 `/releases`，而那是一句诚实的"什么都没发布"。
 #[test]
 fn update_releases_answers_an_empty_array_for_a_silent_repository() {
     let fx = Fixture::new("releases-empty");
@@ -2124,8 +2123,8 @@ fn update_releases_answers_an_empty_array_for_a_silent_repository() {
     assert_eq!(rows, json!([]), "{rows:#?}");
 }
 
-/// A draft is an unfinished note with no publish date; listing it in a public
-/// changelog would advertise a version nobody can install.
+/// 一份草稿是没有发布日期的未完成记录；把它列进公开的
+/// 变更日志等于宣传一个没人能安装的版本。
 #[test]
 fn update_releases_drops_drafts_and_keeps_everything_else() {
     let fx = Fixture::new("releases-draft");
@@ -2144,15 +2143,15 @@ fn update_releases_drops_drafts_and_keeps_everything_else() {
     assert_eq!(items[0]["version"], json!("0.2.1"));
 }
 
-/// The repo and API base come from the same settings keys the update check
-/// reads, so pointing the app at a mirror moves the changelog too. An unusable
-/// `updateRepo` falls back to the built-in repository rather than failing.
+/// 仓库与 API 基址取自更新检查所读的同一批设置键，
+/// 所以把应用指向一个镜像时，变更日志也跟着走。一个不可用的
+/// `updateRepo` 会回退到内置仓库而不是失败。
 #[test]
 fn update_releases_reads_the_same_repository_settings_as_the_check() {
     let fx = Fixture::new("releases-repo");
     let mock = MockGitHub::start(MockOptions::default());
 
-    // A trailing slash on the API base must not produce `//repos/…`.
+    // API 基址上的一个尾随斜杠不得产生 `//repos/…`。
     fx.save(json!({
         "updateRepo": "  acme/keeper  ",
         "updateApiBase": format!("{}/", mock.base),
@@ -2172,7 +2171,7 @@ fn update_releases_reads_the_same_repository_settings_as_the_check() {
         mock.requests()
     );
 
-    // An unusable repo is replaced by the built-in one — the query still runs.
+    // 一个不可用的仓库会被内置的那个取代 —— 查询仍然会跑。
     fx.save(json!({ "updateRepo": "not a repo" }));
     let rows = agentkeeper_shell_lib::update_releases_from(&fx.root_str(), None);
     assert!(rows.is_array(), "{rows:#?}");
@@ -2186,16 +2185,16 @@ fn update_releases_reads_the_same_repository_settings_as_the_check() {
 }
 
 /* ------------------------------------------------------------------ */
-/* the messages themselves                                             */
+/* 消息本身                                                            */
 /* ------------------------------------------------------------------ */
 
-/// The engine speaks English; Chinese comes from the renderer dictionary.
+/// 引擎说的是英语；中文来自渲染器的字典。
 ///
-/// A hard-coded Chinese sentence here would reach an English UI in Chinese —
-/// the defect a translated "English" slot would reintroduce.
-/// `scripts/tauri-i18n.js` greps the Rust source, and `src/renderer/
-/// engine-zh.js` must map each of these; this test keeps the two lists honest
-/// against typos in either.
+/// 这里硬编码一句中文，会让英语界面收到中文 ——
+/// 那正是被翻译过的"英语"槽位会重新引入的缺陷。
+/// `scripts/tauri-i18n.js` 会 grep Rust 源码，而 `src/renderer/
+/// engine-zh.js` 必须映射其中每一条；本测试让这两份清单
+/// 对彼此的拼写错误保持诚实。
 #[test]
 fn every_guard_message_is_english_and_has_a_dictionary_entry() {
     let messages = [
@@ -2221,8 +2220,8 @@ fn every_guard_message_is_english_and_has_a_dictionary_entry() {
             message
         );
     }
-    // `discover.repoFormat` and `ipc.repoFormat` are one rule, so they share a
-    // string — which is what lets one EXACT entry cover both.
+    // `discover.repoFormat` 与 `ipc.repoFormat` 是同一条规则，所以它们共用
+    // 一个字符串 —— 这正是让一条 EXACT 条目能同时覆盖两者的原因。
     assert_eq!(
         ERR_REPO_FORMAT,
         "repo must be owner/repo or a github.com URL"

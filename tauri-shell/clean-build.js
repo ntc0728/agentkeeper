@@ -1,57 +1,54 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * Reclaim space from the Rust build tree — WITHOUT touching artefacts a
- * rebuild would have to regenerate.
+ * 从 Rust 构建目录回收磁盘空间——但不动那些重新构建时必须重新生成的产物。
  *
- *   node tauri-shell/clean-build.js                 # report only
- *   node tauri-shell/clean-build.js --apply         # remove orphaned build dirs
- *   node tauri-shell/clean-build.js --apply --pdbs  # ...and linker .pdb files
- *   node tauri-shell/clean-build.js --apply --all   # ...and incremental caches too
+ *   node tauri-shell/clean-build.js                 # 仅报告
+ *   node tauri-shell/clean-build.js --apply         # 删除孤立的构建目录
+ *   node tauri-shell/clean-build.js --apply --pdbs  # ……以及链接器 .pdb 文件
+ *   node tauri-shell/clean-build.js --apply --all   # ……以及增量编译缓存
  *
- * Policy: build artefacts are KEPT. `*.rlib`, `*.rmeta`, `*.pdb`
- * and `incremental/` are outputs, not residue — deleting them buys disk by
- * making the next build slower. What this script removes by default is only
- * the debris no build can use again: build-script output dirs whose crate hash
- * no `.fingerprint` references any more (each Cargo.toml change orphans one,
- * ~100 MB a piece).
+ * 策略：构建产物一律保留。`*.rlib`、`*.rmeta`、`*.pdb`
+ * 与 `incremental/` 都是输出而非残留——删掉它们只是把磁盘占用
+ * 换成了下一次构建变慢。本脚本默认删除的只是任何构建都再也
+ * 用不上的残渣：其 crate hash 已不再被任何 `.fingerprint` 引用的
+ * 构建脚本输出目录（每次 Cargo.toml 变动会遗留一个，每个约 100 MB）。
  *
- * The optional flags exist for a machine that genuinely needs the disk back:
+ * 这些可选开关是给确实需要把磁盘空间抢回来的机器准备的：
  *
- *   --pdbs   `*.pdb` under build/ and deps/. A linker output, not read by any
- *            build; this project attaches no native debugger. ~0.2-0.4 GiB.
- *   --all    also `incremental/` under each profile. The RELEASE cache costs
- *            ~0.8 GiB but is what `package-release.js` relies on for 18 s hot
- *            pack builds — deleting it sends the next pack back to ~80 s.
+ *   --pdbs   build/ 与 deps/ 下的 `*.pdb`。这是链接器输出，任何构建都不会读它；
+ *            本项目不挂接原生调试器。约 0.2-0.4 GiB。
+ *   --all    同时删除各 profile 下的 `incremental/`。RELEASE 缓存占
+ *            约 0.8 GiB，但 `package-release.js` 依赖它来达成 18 秒的热
+ *            打包构建——删掉它会让下一次打包回到约 80 秒。
  *
- * Never removed by any flag: `*.rlib` + `*.rmeta` (the compile cache: one
- * matched pair per dependency; removing them means recompiling all ~300
- * crates), and the `out/` dirs of third-party build scripts (webview2-com-sys
- * ships WebView2LoaderStatic.lib with a 2006 mtime — a timestamp from the
- * published crate, not staleness).
+ * 任何开关都不会删除：`*.rlib` + `*.rmeta`（编译缓存：每个依赖一对匹配项；
+ * 删掉意味着重新编译全部约 300 个 crate），以及第三方构建脚本的 `out/`
+ * 目录（webview2-com-sys 附带的 WebView2LoaderStatic.lib 的 mtime 是 2006 年
+ * ——那是已发布 crate 的时间戳，并非陈旧残留）。
  *
- * The tree-size ceiling lives in `scripts/check.js` (`gateTree`): that gate
- * fails when `target/` passes 6.5 GiB, which is the guard against unbounded
- * growth — not this script's default behaviour.
+ * 目录体积上限写在 `scripts/check.js`（`gateTree`）里：那个关卡在
+ * `target/` 超过 6.5 GiB 时失败，这是防止无节制增长的护栏——而不是本脚本
+ * 的默认行为。
  *
- * Deletion uses PowerShell `Remove-Item`, not fs.rmSync: the latter stalls on
- * this tree (Node's fs routes deletes through the Recycle Bin here; thousands
- * of files take minutes instead of seconds).
+ * 删除使用 PowerShell 的 `Remove-Item`，而不是 fs.rmSync：后者在这棵目录树上
+ * 会卡住（此处 Node 的 fs 会把删除走回收站；成千上万个文件要花几分钟而不是
+ * 几秒）。
  */
 
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-// The workspace root is `tauri-shell/`, and cargo's shared target directory
-// sits beside `core/` and `src-tauri/` — not inside either of them.
+// 工作区根目录是 `tauri-shell/`，cargo 的共享 target 目录
+// 位于 `core/` 与 `src-tauri/` 旁边——不在它们内部。
 const WORKSPACE = __dirname;
 const TARGET = path.join(WORKSPACE, 'target');
 const APPLY = process.argv.includes('--apply');
 const WITH_PDBS = process.argv.includes('--pdbs') || process.argv.includes('--all');
 const WITH_INCREMENTAL = process.argv.includes('--all');
 
-/** Every file under `dir` matching `pred`, as {path, size}. Missing dir = []. */
+/** `dir` 下匹配 `pred` 的所有文件，形如 {path, size}。目录不存在则返回 []。 */
 function walk(dir, pred) {
   const out = [];
   const stack = [dir];
@@ -70,7 +67,7 @@ function walk(dir, pred) {
         try {
           out.push({ path: full, size: fs.statSync(full).size });
         } catch {
-          /* raced with a concurrent build; skip */
+          /* 与并发的构建发生竞争；跳过 */
         }
       }
     }
@@ -79,15 +76,14 @@ function walk(dir, pred) {
 }
 
 /**
- * Collapse hard links before summing.
+ * 求和前先把硬链接合并。
  *
- * cargo hard-links `target/release/<name>.pdb` against
- * `target/release/deps/<name>-<hash>.pdb` (link count 2). Counting both
- * entries double-reports the bytes: a dry run listed 128 pdb
- * entries / 321 MB where `du` and inode accounting agreed on 74 files /
- * 199 MB. Deleting by path is still correct (the last link releases the
- * blocks), but the reported *reclaimable* figure must not be inflated --
- * a cleanup script that overstates its own value is worse than none.
+ * cargo 会把 `target/release/<name>.pdb` 与
+ * `target/release/deps/<name>-<hash>.pdb` 硬链接在一起（链接数为 2）。两个条目
+ * 都计入会重复上报字节数：一次 dry run 列出 128 个 pdb 条目 / 321 MB，
+ * 而 `du` 与 inode 统计一致地给出 74 个文件 / 199 MB。按路径删除仍然是对的
+ * （最后一个链接会释放数据块），但上报的*可回收*数字不能被夸大——
+ * 一个夸大自身价值的清理脚本还不如没有。
  */
 function dedupeByInode(files) {
   const seen = new Set();
@@ -111,7 +107,7 @@ function mb(bytes) {
   return `${(bytes / 1048576).toFixed(1)} MB`;
 }
 
-/** Group a list of paths into the top-level build/ or deps/ bucket. */
+/** 把一组路径归入顶层的 build/ 或 deps/ 分组。 */
 function byBucket(files) {
   const g = new Map();
   for (const f of files) {
@@ -125,18 +121,18 @@ function byBucket(files) {
   return g;
 }
 
-// -- 1. pdb files (opt-in: --pdbs / --all) ---------------------------------
-// A linker output, not residue — kept unless the machine needs the disk back.
+// -- 1. pdb 文件（需显式开启：--pdbs / --all）-------------------------------
+// 这是链接器输出而非残留——除非机器确实需要腾出磁盘，否则保留。
 const pdbsAll = WITH_PDBS ? walk(TARGET, (p) => p.toLowerCase().endsWith('.pdb')) : [];
 const pdbs = dedupeByInode(pdbsAll);
-/** Measured size even when not deleting, so the report can say what it costs. */
+/** 即使不删除也会统计体积，这样报告才能说明它占多少。 */
 const pdbAllBytes = dedupeByInode(walk(TARGET, (p) => p.toLowerCase().endsWith('.pdb')))
   .reduce((a, f) => a + f.size, 0);
 
-// -- 2. orphaned build-script output dirs ----------------------------------
-// A `build/<crate>-<hash>/` is live iff `.fingerprint/<crate>-<hash>/` exists.
-// Cargo reuses the fingerprint dir for every build unit of that crate; an
-// orphaned build dir means no unit references that hash any more.
+// -- 2. 孤立的构建脚本输出目录 ---------------------------------------------
+// `build/<crate>-<hash>/` 当且仅当 `.fingerprint/<crate>-<hash>/` 存在时才算活跃。
+// Cargo 会为该 crate 的每个构建单元复用同一个 fingerprint 目录；构建目录成为
+// 孤儿意味着已没有任何单元引用那个 hash。
 const buildRoot = path.join(TARGET, 'release', 'build');
 const fpRoot = path.join(TARGET, 'release', '.fingerprint');
 const orphans = [];
@@ -144,7 +140,7 @@ let fpNames = new Set();
 try {
   fpNames = new Set(fs.readdirSync(fpRoot));
 } catch {
-  /* no fingerprints yet */
+  /* 还没有任何 fingerprint */
 }
 let buildDirs = [];
 try {
@@ -152,17 +148,17 @@ try {
     .filter((e) => e.isDirectory())
     .map((e) => e.name);
 } catch {
-  /* never built */
+  /* 从未构建过 */
 }
 for (const name of buildDirs) {
-  // Compare the FULL name (crate + hash). Matching on the crate name alone
-  // would call every historical hash "live": the tree held
-  // agentkeeper-shell-{0dab…, ab74…, d8bc…} build dirs, and a crate-name match
-  // reported zero orphans because at least one always matched.
+  // 比较完整名称（crate + hash）。只按 crate 名匹配会把每个历史 hash
+  // 都算成"活跃"：目录树里曾有
+  // agentkeeper-shell-{0dab…, ab74…, d8bc…} 这些构建目录，而按 crate 名匹配
+  // 会报出零个孤儿，因为至少总有一个能匹配上。
   //
-  // A build dir is still needed when *any* fingerprint dir carries its hash --
-  // the same crate is compiled as several units (lib / bin / test), and they
-  // share one build-script output dir.
+  // 只要*任意* fingerprint 目录带着它的 hash，该构建目录就仍然需要——
+  // 同一个 crate 会被编译成多个单元（lib / bin / test），而它们
+  // 共用同一个构建脚本输出目录。
   const hash = (name.match(/-([0-9a-f]{16})$/) || [])[1];
   const live = hash && [...fpNames].some((f) => f.endsWith('-' + hash));
   if (!live) {
@@ -172,11 +168,11 @@ for (const name of buildDirs) {
   }
 }
 
-// -- 3. incremental cache (opt-in: --all) ----------------------------------
-// The RELEASE cache is what package-release.js relies on for 18 s hot pack
-// builds (CARGO_INCREMENTAL=1 on the pack path); the debug cache buys nothing
-// (dev rebuilds in ~4 s either way). Both are caches, so neither is removed
-// by default — `--all` is for a machine that needs the ~1 GiB back.
+// -- 3. 增量编译缓存（需显式开启：--all）-----------------------------------
+// RELEASE 缓存正是 package-release.js 依赖的对象，用来达成 18 秒的热打包
+// 构建（打包路径上 CARGO_INCREMENTAL=1）；debug 缓存则毫无价值
+// （开发重建两种情况都只要约 4 秒）。两者都是缓存，所以默认都不删除
+// ——`--all` 是给需要拿回那约 1 GiB 的机器用的。
 const incEntries = WITH_INCREMENTAL
   ? ['release', 'debug']
       .map((p) => path.join(TARGET, p, 'incremental'))
@@ -189,7 +185,7 @@ const incEntries = WITH_INCREMENTAL
       })
       .map((p) => ({ path: p, size: walk(p, () => true).reduce((a, f) => a + f.size, 0) }))
   : [];
-/** Measured either way, so the report can show what the caches cost. */
+/** 无论是否删除都会统计，这样报告可以显示这些缓存占多少。 */
 const incAllBytes = ['release', 'debug']
   .map((p) => path.join(TARGET, p, 'incremental'))
   .reduce((a, p) => {
@@ -200,7 +196,7 @@ const incAllBytes = ['release', 'debug']
     }
   }, 0);
 
-// -- report ----------------------------------------------------------------
+// -- 报告 ------------------------------------------------------------------
 const pdbBytes = pdbs.reduce((a, f) => a + f.size, 0);
 const orphanBytes = orphans.reduce((a, f) => a + f.size, 0);
 const incBytes = incEntries.reduce((a, e) => a + e.size, 0);
@@ -241,14 +237,14 @@ if (!APPLY) {
   process.exit(0);
 }
 
-// -- delete ----------------------------------------------------------------
-// One Remove-Item per path: PowerShell handles this tree in seconds where
-// fs.rmSync stalls (see the header note).
+// -- 删除 ------------------------------------------------------------------
+// 每个路径调用一次 Remove-Item：PowerShell 处理这棵目录树只要几秒，而
+// fs.rmSync 会卡住（见文件头说明）。
 //
-// Delete `pdbsAll`, not the de-duplicated `pdbs`: the pdb at target/release/ and
-// its twin under deps/ are two directory entries onto one inode, so removing
-// only one path frees nothing and the file survives. Reporting uses the
-// de-duplicated list; deletion has to touch every link.
+// 删除用 `pdbsAll`，而不是去重后的 `pdbs`：target/release/ 下的 pdb 与
+// deps/ 下的孪生文件是指向同一个 inode 的两个目录项，所以只删掉
+// 其中一个路径什么也释放不了，文件还在。报告使用去重后的
+// 列表；删除则必须触及每一个链接。
 const victims = [
   ...pdbsAll.map((f) => f.path),
   ...orphans.map((o) => o.path),
@@ -260,8 +256,8 @@ if (!victims.length) {
   process.exit(0);
 }
 
-// -LiteralPath so a path with [ or ] (not present here, but cheaper than a bug)
-// is not treated as a wildcard. Batched to stay under Windows' command length.
+// 使用 -LiteralPath，这样含 [ 或 ] 的路径（这里没有，但比留下一个 bug 更划算）
+// 不会被当成通配符。分批执行以保持在 Windows 命令行长度上限之内。
 const BATCH = 40;
 let failed = 0;
 for (let i = 0; i < victims.length; i += BATCH) {
@@ -275,7 +271,7 @@ for (let i = 0; i < victims.length; i += BATCH) {
   if (r.status !== 0) failed += chunk.length;
 }
 
-// Verify rather than trust the exit code.
+// 校验而不是相信退出码。
 const leftPdb = walk(TARGET, (p) => p.toLowerCase().endsWith('.pdb')).length;
 console.log('');
 console.log(`deleted ${victims.length - failed} path(s); ${leftPdb} pdb file(s) remain`);

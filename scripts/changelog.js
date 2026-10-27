@@ -35,7 +35,7 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const RECORD = path.join(ROOT, 'changelog', 'next.json');
 
-/** Kind → bullet prefix. The key is stored, the value is rendered. */
+/** 类型 → 条目前缀。存的是键，渲染出来的才是值。 */
 const KINDS = { fix: '修复', feat: '新增', opt: '优化' };
 const KIND_HINT = Object.keys(KINDS).join(' / ');
 
@@ -66,7 +66,7 @@ function write(data) {
   fs.writeFileSync(RECORD, JSON.stringify(data, null, 2) + '\n');
 }
 
-/** Every structural problem, so one run reports all of them. */
+/** 一次把所有结构问题都找出来，一趟就能看完。 */
 function findings(data) {
   const out = [];
   if (data === null || typeof data !== 'object' || Array.isArray(data)) {
@@ -98,14 +98,13 @@ function findings(data) {
       return;
     }
     const text = entry.text.trim();
-    // One bullet is one sentence a reader can scan; the renderer owns the "1."
-    // and a second line would break the numbered list.
+    // 一条就是一句能扫过去的话；编号「1.」由渲染器负责，多一行就把有序列表拆断了。
     if (/[\r\n]/.test(text)) out.push(`${at}.text must be a single line`);
     if (/^\d+\./.test(text)) out.push(`${at}.text must not start with its own number — the renderer numbers the list`);
     if (seen.has(text)) out.push(`${at}.text duplicates entries[${seen.get(text)}]`);
     else seen.set(text, i);
   });
-  // The title line is `0.2.1: <summary>`; an empty one renders a bare version.
+  // 标题行是 `0.2.1: <摘要>`；留空的话只会渲染出一个光秃秃的版本号。
   if (data.entries.length && typeof data.summary === 'string' && !data.summary.trim()) {
     out.push('"summary" must be filled in when "entries" is not empty — it is the line the release is titled with');
   }

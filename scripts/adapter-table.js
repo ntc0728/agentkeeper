@@ -1,33 +1,33 @@
 'use strict';
 /**
- * Adapter table — the generator input for `core/adapters.rs`.
+ * 适配器表——`core/adapters.rs` 的生成器输入。
  *
- * SOURCE
- *   The canonical declaration of every supported agent: id, label, accent
- *   colour and the per-scope directories it reads. `npm run tauri:adapters`
- *   evaluates this file against a fake home and freezes the result into the
- *   `DECLARED_TABLE_JSON` / `RESOLVED_PATHS_JSON` constants that the Rust
- *   tests compare against, so the two declarations cannot drift.
+ * 数据来源
+ *   所有受支持 agent 的权威声明：id、标签、强调色以及它按作用域读取的
+ *   目录。`npm run tauri:adapters`
+ *   会在一个假的 home 目录下求值本文件，并把结果冻结进
+ *   `DECLARED_TABLE_JSON` / `RESOLVED_PATHS_JSON` 常量，Rust
+ *   测试正是拿它做比对，因此两份声明不会走偏。
  *
- * WHY IT STANDS ALONE
- *   The only consumer of this table is `scripts/gen-adapters-snapshots.js`,
- *   which freezes it into
- *   `DECLARED_TABLE_JSON` / `RESOLVED_PATHS_JSON` inside
- *   `tauri-shell/core/src/adapters.rs`. Nothing else may import it:
- *   this file exists to regenerate a snapshot, not to be an engine.
+ * 为什么独立成文件
+ *   这张表的唯一消费方是 `scripts/gen-adapters-snapshots.js`，
+ *   它把表冻结进
+ *   `tauri-shell/core/src/adapters.rs` 内的
+ *   `DECLARED_TABLE_JSON` / `RESOLVED_PATHS_JSON`。其他任何东西都不得导入它：
+ *   这个文件的存在是为了重新生成快照，而不是充当引擎。
  *
- * WHEN YOU EDIT THIS FILE
- *   Re-run `npm run tauri:adapters` (scripts/gen-adapters-snapshots.js) IN THE
- *   SAME CHANGE. The Rust snapshot is the parity oracle for the `AGENTS` table
- *   in adapters.rs — an added/removed/renamed agent, a changed `home` template,
- *   or any edited skills/rules/memory/mcp/plugins list makes it stale, and a
- *   stale snapshot asserts the old table rather than what this file says.
+ * 修改本文件时
+ *   在同一次改动里重新运行 `npm run tauri:adapters`
+ *   （scripts/gen-adapters-snapshots.js）。Rust 快照是 adapters.rs 中 `AGENTS`
+ *   表的一致性判据——新增/删除/重命名 agent、`home` 模板有变化，
+ *   或 skills/rules/memory/mcp/plugins 列表有任何改动，都会让快照过期；
+ *   而过期的快照断言的是旧表，而不是本文件所说的内容。
  *
- * WHAT IS NOT PART OF THIS TABLE
- *   The `detected: (fs, p) => ...` closures: never invoked, and detection now
- *   lives in Rust (`adapters.rs` derives `installed` from `existsDir(home)`).
- *   `detected` was never part of the generated
- *   snapshot either, so dropping it leaves the snapshot byte-identical.
+ * 不属于这张表的内容
+ *   `detected: (fs, p) => ...` 这些闭包：从未被调用，且检测逻辑现在
+ *   位于 Rust 侧（`adapters.rs` 由 `existsDir(home)` 推导出 `installed`）。
+ *   `detected` 本来也从未进入生成的
+ *   快照，所以去掉它会让快照保持逐字节一致。
  */
 
 const os = require('os');
@@ -422,31 +422,31 @@ const AGENTS = [
   }
 ];
 
-/** Cross-agent shared Agent Skills standard directory (~/.agents/skills). */
+/** 跨 agent 共享的 Agent Skills 标准目录（~/.agents/skills）。 */
 const SHARED_SKILLS_DIR = '~/.agents/skills';
 
 /**
- * Expand a leading `~` in a path template (home / env token expansion).
+ * 展开路径模板中开头的 `~`（home / env 令牌展开）。
  *
- * Only the tilde is substituted: the separator right behind it stays as
- * written, so `~/.claude` becomes `<home>/.claude`, never a normalised
- * `path.join(home, '.claude')`. That byte-level behaviour is asserted on the
- * Rust side by `resolve_home_matches_the_js_substitution_byte_for_byte`.
+ * 只替换波浪号：紧跟其后的分隔符保持原样，
+ * 因此 `~/.claude` 会变成 `<home>/.claude`，绝不会变成被规范化的
+ * `path.join(home, '.claude')`。这种逐字节的行为在
+ * Rust 侧由 `resolve_home_matches_the_js_substitution_byte_for_byte` 断言。
  *
- * Tilde expansion lives here only: the snapshot generator imports this exact
- * regex so the two cannot drift.
+ * 波浪号展开只放在这里：快照生成器导入的正是这个
+ * 正则，因此两者不会走偏。
  *
- * os.homedir() is called per invocation (never captured at require time), so a
- * caller can monkey-patch os.homedir before requiring this module.
+ * os.homedir() 每次调用时才求值（绝不在 require 时缓存），这样
+ * 调用方可以在 require 本模块之前给 os.homedir 打补丁。
  */
 const resolveHome = (token) => (!token ? null : token.replace(/^~(?=$|[\\/])/, os.homedir()));
 
-/** Look up an adapter by id; an unknown id resolves to null, never a guess. */
+/** 按 id 查找适配器；未知 id 解析为 null，绝不猜测。 */
 function byId(id) {
   return AGENTS.find((a) => a.id === id) || null;
 }
 
 /**
- * Minimal surface for scripts/gen-adapters-snapshots.js.
+ * 供 scripts/gen-adapters-snapshots.js 使用的最小导出面。
  */
 module.exports = { AGENTS, SHARED_SKILLS_DIR, resolveHome, byId };

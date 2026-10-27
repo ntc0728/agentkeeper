@@ -1207,8 +1207,8 @@ fn describe_plugin_dir(
         };
 
         let origin = plugin_origin(rel_label, is_marketplace);
-        // `meta.listings` only exists on marketplace entries (the reference code
-        // assigns it inside the isMarketplace branch).
+        // `meta.listings` 只在 marketplace 条目上存在（参考实现的代码
+        // 是在 isMarketplace 分支里赋值的）。
         let mut meta = json!({
             "version": version.clone().map(Value::from).unwrap_or(Value::Null),
             "relLabel": rel_label,
@@ -1221,8 +1221,8 @@ fn describe_plugin_dir(
             "marketplace": rel_label
         });
         if let Value::Object(m) = &mut meta {
-            // `isMarketplace` is always present; `listings` only on marketplace
-            // entries — that asymmetry is in the reference and the renderer relies on it.
+            // `isMarketplace` 总是存在；`listings` 只在 marketplace
+            // 条目上存在 —— 这种不对称性存在于参考实现中，渲染层依赖它。
             m.insert("isMarketplace".to_string(), json!(is_marketplace));
             if is_marketplace {
                 m.insert("listings".to_string(), listings.clone());
@@ -1275,7 +1275,7 @@ fn describe_plugin_dir(
                 None => tags_of(&data),
             },
             shared: false,
-            writable: Some(false), // plugin cache is host-owned
+            writable: Some(false), // plugin 缓存是宿主所有的
             origin: Some(origin.to_string()),
             issues: Vec::new(),
             ..Default::default()
@@ -1290,7 +1290,7 @@ fn read_json_safe(path: &Path) -> Value {
 }
 
 /* ------------------------------------------------------------------ */
-/* dedupe + effective view                                            */
+/* 去重 + effective 视图                                                  */
 /* ------------------------------------------------------------------ */
 
 fn str_field(a: &Value, key: &str) -> Option<String> {
@@ -1378,8 +1378,8 @@ fn dedupe_by_physical_path(assets: Vec<Value>) -> Vec<Value> {
     out
 }
 
-/// `computeEffective` — project scope shadows global scope for the same
-/// agent; copies belonging to different agents all stay live.
+/// `computeEffective` —— 对同一个 agent，project scope 会遮蔽 global scope；
+/// 属于不同 agent 的副本则全部保持有效。
 fn compute_effective(assets: &[Value]) -> Vec<Value> {
     let mut order: Vec<String> = Vec::new();
     let mut map: HashMap<String, Value> = HashMap::new();
@@ -1413,7 +1413,7 @@ fn compute_effective(assets: &[Value]) -> Vec<Value> {
             .to_string()
     }
 
-    // Group by `kind:slug(name)`, keeping first-sighting order.
+    // 按 `kind:slug(name)` 分组，保留首次出现的顺序。
     let mut groups: Vec<(String, Vec<String>)> = Vec::new();
     let mut group_index: HashMap<String, usize> = HashMap::new();
     for id in &order {
@@ -1484,7 +1484,7 @@ fn compute_effective(assets: &[Value]) -> Vec<Value> {
 }
 
 /* ------------------------------------------------------------------ */
-/* summary + payload                                                  */
+/* 摘要 + 负载                                                           */
 /* ------------------------------------------------------------------ */
 
 pub fn summarize(assets: &[Value]) -> Value {
@@ -1561,10 +1561,9 @@ fn or_null(data: &Value, key: &str) -> Value {
     }
 }
 
-/// `stripHeavy` — the renderer never sees `raw`, and `effective` is reduced
-/// to the three fields the UI reads. Done in place: this runs over ~1000
-/// assets holding megabytes of metadata, and the reference version's object spread
-/// is exactly the kind of copy this implementation is trying to avoid.
+/// `stripHeavy` —— 渲染层永远看不到 `raw`，而 `effective` 被缩减为 UI 会读的
+/// 三个字段。原地完成：这要跑过约 1000 个带着数 MB 元数据的资产，而参考实现
+/// 那套对象展开正是这个实现想要避免的那种拷贝。
 fn shrink_effective(a: &mut Value) {
     let reduced = match a.get("effective") {
         Some(Value::Object(e)) => json!({
@@ -1575,26 +1574,24 @@ fn shrink_effective(a: &mut Value) {
         _ => Value::Null,
     };
     if let Value::Object(m) = a {
-        // `stripHeavy` sets `raw: undefined`, which `jsonSafe` then
-        // *drops* — so the renderer receives no `raw` key at all. Sending
-        // `null` here is not equivalent: it is a different payload. The key
-        // must be absent.
+        // `stripHeavy` 设为 `raw: undefined`，而 `jsonSafe` 随后会
+        // *丢弃*它 —— 所以渲染层根本收不到 `raw` 键。在这里发 `null`
+        // 并不等价：那是另一个负载。这个键必须不存在。
         m.remove("raw");
         m.insert("effective".to_string(), reduced);
     }
 }
 
-/// Consumes the scan result: the payload is built by moving values into one
-/// map, so the 11MB of asset JSON is never copied. (`json!` on a `Value`
-/// re-serialises it, which cost ~70ms and a second full copy.)
+/// 消费扫描结果：负载是通过把值移动进一个映射来构建的，所以那 11MB 的资产
+/// JSON 从不被拷贝。（对一个 `Value` 用 `json!` 会把它重新序列化，那要花掉
+/// 约 70ms 和第二次完整拷贝。）
 fn ipc_payload(result: ScanResult) -> Value {
     let mut assets = result.assets;
-    // `keeper.scan()` runs the security pass on `res.assets` only, and
-    // `computeEffective()` has already cloned them by then — so
-    // payload `effective[i].security` is *absent*. Mirroring that exactly is
-    // the point: the UI reads `security` from `assets` (Health view) and never
-    // from `effective`, and inventing the field here would make the two
-    // payloads disagree.
+    // `keeper.scan()` 只在 `res.assets` 上跑安全检查，而
+    // `computeEffective()` 到那时已经把它们克隆过了 —— 所以负载里的
+    // `effective[i].security` 是*不存在*的。精确镜像这一点正是要点：UI 从
+    // `assets`（健康视图）读 `security`，从不在 `effective` 里读，而在这里
+    // 凭空造出这个字段会让两个负载互相矛盾。
     super::security::security_pass(&mut assets);
     for a in &mut assets {
         shrink_effective(a);
@@ -1615,10 +1612,10 @@ fn ipc_payload(result: ScanResult) -> Value {
             m.insert("accent".to_string(), Value::from(a.accent));
             m.insert("home".to_string(), Value::from(a.home));
             m.insert("installed".to_string(), Value::Bool(a.installed));
-            // `scanAll` never sets `homeExists` on its agent status, so
-            // `jsonSafe` drops the key entirely (`undefined` is skipped, not
-            // nulled). Emitting `null` here was a difference the hand-copied
-            // mirror in the parity script could not see.
+            // `scanAll` 从不在它的 agent 状态上设置 `homeExists`，所以
+            // `jsonSafe` 会整个丢掉这个键（`undefined` 是被跳过，而不是被
+            // 置为 null）。在这里发出 `null` 曾经是一个 parity 脚本里那份
+            // 手抄镜像所看不到的差异。
             m.insert(
                 "notes".to_string(),
                 a.notes.map(Value::from).unwrap_or(Value::Null),
@@ -1636,13 +1633,13 @@ fn ipc_payload(result: ScanResult) -> Value {
     out.insert("scannedAt".to_string(), Value::from(result.scanned_at));
     out.insert("summary".to_string(), result.summary);
     let mut out = Value::Object(out);
-    // `jsonSafe` caps every array at 500 entries (`value.slice(0, 500)`), which
-    // is why a plugin with 718 files reaches the renderer with the first 500.
-    // Sending the full list is not "better data" — it is a different payload.
+    // `jsonSafe` 把每个数组都截到 500 条（`value.slice(0, 500)`），这就是一个
+    // 有 718 个文件的 plugin 到达渲染层时只剩前 500 个的原因。
+    // 发完整列表并不是"更好的数据" —— 那是另一个负载。
     //
-    // The cap applies *per element*: the reference runs `stripHeavy` on each asset
-    // separately and the top-level `assets` array never goes through jsonSafe,
-    // so capping the whole payload at once would drop 487 of 987 assets.
+    // 这个上限是*按元素*施加的：参考实现对每个资产分别跑 `stripHeavy`，而
+    // 顶层的 `assets` 数组从不经过 jsonSafe，所以一次性对整个负载设限会丢掉
+    // 987 个资产中的 487 个。
     if let Value::Object(m) = &mut out {
         for key in ["assets", "effective", "agents", "projects"] {
             if let Some(Value::Array(items)) = m.get_mut(key) {
@@ -1655,7 +1652,7 @@ fn ipc_payload(result: ScanResult) -> Value {
     out
 }
 
-/// Recursively truncate every array to `cap` entries, mutating in place.
+/// 递归地把每个数组截断到 `cap` 条，原地修改。
 fn cap_arrays(v: &mut Value, cap: usize) {
     match v {
         Value::Array(items) => {
@@ -1675,14 +1672,12 @@ fn cap_arrays(v: &mut Value, cap: usize) {
     }
 }
 
-/// Same scan as [`scan_payload`] but WITHOUT publishing the result to the
-/// process-global read cache.
+/// 与 [`scan_payload`] 相同的扫描，但**不**把结果发布到进程全局的读缓存。
 ///
-/// `Keeper::index_get()` uses this for its cold-cache fallback. That fallback
-/// exists to answer "what does this id point at" and nothing else; publishing
-/// its result globally made a lookup silently overwrite the cache every other
-/// caller relies on — which is how a keeper test could pass alone and fail
-/// under `cargo test` depending on interleaving.
+/// `Keeper::index_get()` 用它作为冷缓存兜底。那个兜底存在的目的只是回答"这个
+/// id 指向什么"，别的什么都不做；把它的结果全局发布曾让一次查找悄悄覆盖掉每个
+/// 其它调用方都依赖的缓存 —— 这正是某个 keeper 测试单独跑能通过、却在
+/// `cargo test` 下取决于交错顺序而失败的原因。
 pub fn scan_payload_uncached(
     user_home: &str,
     projects: &[Value],
@@ -1692,13 +1687,13 @@ pub fn scan_payload_uncached(
     (ipc_payload(result), timings)
 }
 
-/// Public entry point used by both the Tauri command and the parity CLI.
+/// Tauri 命令和 parity CLI 共用的公开入口。
 pub fn scan_payload(user_home: &str, projects: &[Value]) -> (Value, Vec<(&'static str, u128)>) {
     let result = scan_all(user_home, projects);
     let timings = result.timings.clone();
     let payload = ipc_payload(result);
-    // Feed the read-side cache with exactly what the renderer is about to get,
-    // so `read_asset` / `baseline_diff` do not need a second scan.
+    // 用渲染层马上要拿到的那份内容去喂读侧缓存，
+    // 这样 `read_asset` / `baseline_diff` 就不需要第二次扫描。
     if let (Some(all), Some(effective)) = (
         payload.get("assets").and_then(|v| v.as_array()),
         payload.get("effective").and_then(|v| v.as_array()),
@@ -1709,7 +1704,7 @@ pub fn scan_payload(user_home: &str, projects: &[Value]) -> (Value, Vec<(&'stati
 }
 
 /* ------------------------------------------------------------------ */
-/* orchestration                                                      */
+/* 编排                                                                */
 /* ------------------------------------------------------------------ */
 
 fn scan_agent_globals(agent: &Agent, home: &str) -> Vec<Value> {
@@ -1760,13 +1755,13 @@ pub struct ScanResult {
     pub timings: Vec<(&'static str, u128)>,
 }
 
-/// `scanAll({store, projects})`. `user_home` replaces `os.homedir()`, and the
-/// project list comes from the same `projects.json` the reference registry writes.
+/// `scanAll({store, projects})`。`user_home` 取代 `os.homedir()`，而项目列表
+/// 来自参考实现的注册表所写的同一个 `projects.json`。
 pub fn scan_all(user_home: &str, projects: &[Value]) -> ScanResult {
     let mut timings: Vec<(&'static str, u128)> = Vec::new();
     let t_agents = Instant::now();
 
-    // Status is cheap (17 stats) and must stay in declaration order.
+    // 状态很便宜（17 次 stat），而且必须保持声明顺序。
     let mut statuses: Vec<AgentStatus> = Vec::new();
     let mut homes: Vec<Option<String>> = Vec::new();
     for agent in AGENTS {
@@ -1789,8 +1784,8 @@ pub fn scan_all(user_home: &str, projects: &[Value]) -> ScanResult {
     }
     timings.push(("agents", t_agents.elapsed().as_millis()));
 
-    // Per-agent scan in parallel; `collect` preserves declaration order so
-    // dedupe keeps the same "first sighting wins" result as the reference build.
+    // 每个 agent 并行扫描；`collect` 保持声明顺序，所以去重会得到与参考构建
+    // 相同的"先到先得"结果。
     let t_scan = Instant::now();
     let per_agent: Vec<Vec<Value>> = AGENTS
         .par_iter()
@@ -1806,7 +1801,7 @@ pub fn scan_all(user_home: &str, projects: &[Value]) -> ScanResult {
     }
     timings.push(("scan_agents", t_scan.elapsed().as_millis()));
 
-    // Shared Agent Skills standard directory, reported as a pseudo-agent.
+    // 共享的 Agent Skills 标准目录，作为一个伪 agent 报告。
     let t_shared = Instant::now();
     if let Some(shared_skills) = resolve_home(SHARED_SKILLS_DIR, user_home) {
         let shared_home = resolve_home("~/.agents", user_home).unwrap_or_default();
@@ -1835,7 +1830,7 @@ pub fn scan_all(user_home: &str, projects: &[Value]) -> ScanResult {
     }
     timings.push(("shared", t_shared.elapsed().as_millis()));
 
-    // Projects.
+    // 项目。
     let t_projects = Instant::now();
     let mut projects_out: Vec<Value> = Vec::new();
     for proj in projects {
@@ -1951,7 +1946,7 @@ pub fn scan_all(user_home: &str, projects: &[Value]) -> ScanResult {
     }
 }
 
-/// Read the project registry the reference store writes (`projects.json`).
+/// 读取参考实现的 store 所写的项目注册表（`projects.json`）。
 pub fn read_projects(store_root: &str) -> Vec<Value> {
     let path = Path::new(store_root).join("projects.json");
     let raw = read_all(&path);

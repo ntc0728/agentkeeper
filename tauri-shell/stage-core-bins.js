@@ -1,22 +1,19 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * Stage the two headless binaries from the `agentkeeper-core` crate so Tauri
- * can bundle them as sidecars.
+ * 把 `agentkeeper-core` crate 里那两个无界面二进制暂存过来，好让 Tauri 把它们
+ * 作为 sidecar 打进安装包。
  *
- * Why this is needed at all: `cargo tauri build` collects the binaries of the
- * crate it builds — the Tauri shell — by scanning that crate's `src/bin/`.
- * The MCP server and the headless scanner live in a DIFFERENT crate
- * (`tauri-shell/core`), deliberately, so they do not inherit the WebView
- * dependency graph. Tauri therefore cannot see them, and `bundle.externalBin`
- * is the mechanism for shipping a binary from elsewhere.
+ * 为什么非要这一步：`cargo tauri build` 只会扫描它自己要构建的那个 crate 的
+ * `src/bin/` 来收集二进制 —— 也就是 Tauri 外壳这个 crate。而 MCP 服务与无界面
+ * 扫描器是**故意**放在另一个 crate（`tauri-shell/core`）里的，这样它们不会继承
+ * WebView 那一整条依赖图。于是 Tauri 根本看不到它们，`bundle.externalBin` 就是
+ * 把别处的二进制带进安装包的那个机制。
  *
- * The circularity that used to make this impossible is gone: the sidecar no
- * longer belongs to the crate whose build script validates `externalBin`.
- * `tauri-build` runs as the SHELL crate's build script, and the shell crate
- * does not contain the sidecar — the core crate does, with no Tauri build
- * script of its own. So the shell's build can ask for a file that some other
- * crate produces, without either waiting on the other.
+ * 以前让这件事做不成的循环依赖已经没了：sidecar 不再属于「构建脚本要校验
+ * `externalBin`」的那个 crate。`tauri-build` 是作为**外壳** crate 的构建脚本跑的，
+ * 而外壳 crate 里没有 sidecar —— 它在 core crate 里，那个 crate 自己没有 Tauri
+ * 构建脚本。所以外壳的构建可以要求一个由别的 crate 产出的文件，两边都不必互相等。
  *
  * Usage:
  *   node tauri-shell/stage-core-bins.js              # build + stage
@@ -32,18 +29,18 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-// `tauri-shell/` — the Rust workspace root, holding `core/` and `src-tauri/`.
+// `tauri-shell/` —— Rust 工作区根目录，装着 `core/` 与 `src-tauri/`。
 const WORKSPACE = __dirname;
 const CORE = path.join(WORKSPACE, 'core');
 const OUT_DIR = path.join(WORKSPACE, 'src-tauri', 'binaries');
 
-/** The two binaries the installer ships beside the shell. */
+/** 安装包里跟着外壳一起发布的两个二进制。 */
 const BINS = ['agentkeeper-mcp', 'ak-scan'];
 
-/** `bundle.externalBin` entries, in the order tauri.conf.json lists them. */
+/** `bundle.externalBin` 的条目，顺序与 tauri.conf.json 里列的一致。 */
 const EXTERNAL_BIN_ENTRIES = BINS.map((b) => `binaries/${b}`);
 
-/** The only triple this app bundles: tauri.conf.json targets NSIS on win-x64. */
+/** 这个应用只打这一个三元组：tauri.conf.json 的目标是 win-x64 上的 NSIS。 */
 const DEFAULT_TRIPLE = 'x86_64-pc-windows-msvc';
 
 const argv = process.argv.slice(2);
@@ -57,7 +54,7 @@ function fail(m) {
   process.exit(1);
 }
 
-/* ------------------------------------------------------------------ config */
+/* ------------------------------------------------------------------ 配置 */
 
 function assertConfigListsThem() {
   const confPath = path.join(WORKSPACE, 'src-tauri', 'tauri.conf.json');
@@ -78,9 +75,9 @@ function assertConfigListsThem() {
   }
 }
 
-/* ------------------------------------------------------------------- build */
+/* ------------------------------------------------------------------- 构建 */
 
-/** `cargo` is deliberately not on PATH in this repo's dev shell. */
+/** 这个仓库的开发 shell 里故意没把 `cargo` 放进 PATH。 */
 function cargoPath() {
   const explicit = process.env.AK_CARGO;
   if (explicit) {
@@ -107,7 +104,7 @@ function build() {
   if (run.status !== 0) fail(`cargo build exited ${run.status}`);
 }
 
-/* ------------------------------------------------------------------- stage */
+/* ------------------------------------------------------------------- 暂存 */
 
 function artefactPath(name) {
   return path.join(WORKSPACE, 'target', 'release', `${name}.exe`);

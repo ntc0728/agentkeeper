@@ -1,8 +1,7 @@
 'use strict';
 /**
- * Runs before styles.css paints so the correct theme is on <html> for the
- * very first frame. Kept separate (rather than inline) because the CSP is
- * script-src 'self' with no 'unsafe-inline'.
+ * 在 styles.css 上色之前就跑，好让第一帧的 <html> 上已经是正确的主题。单独成文件
+ * （而不是内联）是因为 CSP 是 script-src 'self'，没有 'unsafe-inline'。
  */
 (function () {
   var pref = localStorage.getItem('ak.theme') || 'system';

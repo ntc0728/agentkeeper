@@ -1,16 +1,16 @@
 'use strict';
 /**
- * Minimal i18n — no dependency, two languages, keyed by view area.
+ * 极简 i18n —— 零依赖、两种语言，键按界面区域分组。
  *
- * Resolution order (highest first):
- *   1. explicit user choice stored in settings
- *   2. localStorage (previous session)
+ * 取值优先级（从高到低）：
+ *   1. 用户显式选择（存在设置里）
+ *   2. localStorage（上一次会话）
  *   3. navigator.language
  *   4. 'en'
  *
- * All UI strings must go through t(). Anything hardcoded in app.js is a bug.
- * Keys are grouped by area: nav.*, dashboard.*, assets.*, health.*,
- * activity.*, settings.*, common.*
+ * 所有界面文案都必须走 t()。app.js 里任何硬编码都是缺陷。
+ * 键按区域分组：nav.*、dashboard.*、assets.*、health.*、activity.*、settings.*、
+ * common.*
  */
 
 const STRINGS = {
@@ -413,9 +413,8 @@ const STRINGS = {
     'drawer.unsavedTitle': 'Unsaved edits',
     'toast.saveFailed': 'Save failed',
     'toast.writeFailed': 'Write failed',
-    // Partial-restore reporting (reportWriteFailure). The main process sends a
-    // stable errorCode; these four sentences are the difference between "the
-    // write was refused" and "the write happened and could not be undone".
+    // 部分还原的上报（reportWriteFailure）。主线程给的是稳定的 errorCode；这四句话
+    // 区分的是「写入被拒绝」与「写进去了但没能撤销」这两种完全不同的处境。
     'restore.title': 'Files could not be fully restored',
     'restore.headline.partial': 'This change was written, then rolled back, but some files could not be put back.',
     'restore.headline.symlink': 'This change was written, then rolled back, but a symbolic link could not be recreated.',
@@ -942,7 +941,7 @@ function systemLang() {
   return nav.startsWith('zh') ? 'zh' : 'en';
 }
 
-/** Set language. Pass 'auto' to follow the OS. */
+/** 设置语言。传 'auto' 表示跟随系统。 */
 function setLang(lang) {
   current = lang === 'auto' ? systemLang() : (STRINGS[lang] ? lang : 'en');
   localStorage.setItem('ak.lang', lang);
@@ -952,12 +951,11 @@ function setLang(lang) {
 }
 
 /**
- * Translate. Unknown keys return the key so gaps are obvious, not blank.
+ * 翻译。未知的键原样返回键名，这样缺口一目了然，而不是显示成空白。
  *
- * NOTE: deliberately NOT a top-level `function t` — classic <script> files
- * share one global lexical scope, so a `function t` here would collide with
- * app.js's `const t` and blank the entire window. Everything is exposed via
- * window.__akI18n instead.
+ * 注意：这里刻意**不用**顶层的 `function t` —— 传统 <script> 文件共享同一个全局
+ * 词法作用域，在这里写 `function t` 会与 app.js 的 `const t` 撞车，整扇窗直接白屏。
+ * 所以一切都挂在 window.__akI18n 上对外暴露。
  */
 const translate = (key, vars) => {
   let s = (STRINGS[current] && STRINGS[current][key])
