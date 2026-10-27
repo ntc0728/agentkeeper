@@ -1,32 +1,27 @@
-# Incremental compilation stays OFF for this workspace, at the config layer that wins.
+# 这个工作区关掉增量编译，写在真正生效的那一层配置里。
 #
-# `Cargo.toml` already says `[profile.dev] incremental = false`, but that key is
-# the WEAKEST of the three places the setting can live. Measured on cargo 1.99.1
-# with a 6-case matrix: whenever a `[build] incremental` exists anywhere in the
-# config chain, it wins over `[profile.*] incremental` in both directions --
-# a global `true` silently re-enabled incremental here despite the profile
-# saying `false`, and a config `true` overrode a profile `false` too.
+# `Cargo.toml` 里已经写了 `[profile.dev] incremental = false`，但那个键是三个
+# 可写位置里**最弱**的一个。在 cargo 1.99.1 上用 6 组组合实测：只要配置链上任何
+# 一处存在 `[build] incremental`，它在两个方向上都压过 `[profile.*] incremental`
+# —— 一个全局的 `true` 会在 profile 写明 `false` 的情况下悄悄重新打开增量编译，
+# 配置里的 `true` 同样能覆盖 profile 里的 `false`。
 #
-# This machine's ~/.cargo/config.toml carries `[build] incremental = true`
-# (written for all projects), which is why the older `target/` trees grew
-# incremental caches of 629 MB (debug) and 2.5 GB (release) even though the
-# profile asked for none. Note the key name matters: writing
-# `[profile.dev] incremental = false` *here* would NOT help, only `[build]`.
+# 本机的 `~/.cargo/config.toml` 带着 `[build] incremental = true`（当初给所有项目
+# 写的），这就是较早的 `target/` 树里长出 629 MB（debug）与 2.5 GB（release）增量
+# 缓存的原因，尽管 profile 要求不要。注意键名的区别：在这里写
+# `[profile.dev] incremental = false` **没有用**，只有 `[build]` 才行。
 #
-# A project-level `.cargo/config.toml` takes precedence over the home-directory
-# one, so this file pins the value for this workspace without touching a
-# machine-wide setting that other Rust projects may legitimately rely on.
+# 项目级 `.cargo/config.toml` 的优先级高于用户主目录那份，所以这个文件只为本工作区
+# 钉住取值，不去改一个别的 Rust 项目可能正当地依赖着的机器级设置。
 #
-# Cargo discovers this file by walking UP from the current working directory,
-# not from `--manifest-path`. It therefore has to sit at the WORKSPACE root
-# (`tauri-shell/`), not inside one member: the builders now run with cwd =
-# `tauri-shell/` (scripts/package-release.js, tauri-shell/stage-core-bins.js)
-# as well as `tauri-shell/src-tauri` (the release workflow), and only a
-# file at the root is found from both.
+# cargo 是**从当前工作目录向上**找这个文件的，不是从 `--manifest-path` 找。因此它
+# 必须放在工作区根（`tauri-shell/`），而不能放进某个成员目录里：现在的构建脚本
+# 既有以 `tauri-shell/` 为工作目录跑的（scripts/package-release.js、
+# tauri-shell/stage-core-bins.js），也有以 `tauri-shell/src-tauri` 为工作目录跑的
+# （发布工作流），只有根目录这一份能同时被两边找到。
 #
-# Escape hatch, if a build really does need the cache: CARGO_INCREMENTAL=1
-# overrides this file (env beats config). Unset it afterwards -- note that
-# CARGO_INCREMENTAL only honours the literals `0` and `1`; values like `true`
-# or a typo'd variable name are silently ignored.
+# 逃生出口：如果某次构建确实需要缓存，设 `CARGO_INCREMENTAL=1` 即可覆盖本文件
+# （环境变量优先级高于配置）。用完记得取消 —— 注意 `CARGO_INCREMENTAL` 只认字面量
+# `0` 和 `1`，写成 `true` 或把变量名拼错都会被静默忽略。
 [build]
 incremental = false

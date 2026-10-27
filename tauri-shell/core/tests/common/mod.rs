@@ -1,15 +1,15 @@
-//! Shared scaffolding for the integration tests.
+//! 集成测试共用的脚手架。
 //!
-//! Two rules the whole suite depends on:
+//! 整套用例依赖两条规矩：
 //!
-//! * Every test owns a temp root under `std::env::temp_dir()` (pid + nanos, so
-//!   two concurrent runs cannot collide) and removes it with
-//!   `core::store::rmrf`. `std::fs::remove_dir_all` is unusable on this host —
-//!   its trash layer fails on trees it did not create.
-//! * `core::registry` and `core::assets` are process-global singletons (they
-//!   stand in for the registry instance and the last scan).
-//!   `cargo test` runs test fns on a thread pool, so any test that binds or
-//!   seeds them must hold [`serial`] first.
+//! * 每个用例都在 `std::env::temp_dir()` 下拥有一份自己的临时根目录（pid + 纳秒，
+//!   所以两次并发运行不会撞车），并用 `core::store::rmrf` 把它删掉。
+//!   `std::fs::remove_dir_all` 在这台机器上不能用 ——
+//!   它的回收站层遇到不是自己创建的目录树就会失败。
+//! * `core::registry` 和 `core::assets` 是进程级单例（它们
+//!   代替了注册表实例和最近一次扫描的结果）。
+//!   `cargo test` 在线程池上跑测试函数，所以任何要绑定或
+//!   播种它们的用例都必须先拿到 [`serial`]。
 
 #![allow(dead_code)]
 
@@ -18,13 +18,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Serialises tests that touch the process-global registry / asset cache.
+/// 给那些会碰到进程级 registry / asset 缓存的用例加锁，让它们串行执行。
 pub fn serial() -> MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A fresh, empty directory that this test owns and removes afterwards.
+/// 一个全新的空目录，归本用例所有，事后由它负责删除。
 pub fn temp_root(tag: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -35,7 +35,7 @@ pub fn temp_root(tag: &str) -> PathBuf {
     dir
 }
 
-/// Recursive, forced removal — via the store's helper.
+/// 递归强制删除 —— 走 store 提供的辅助函数。
 pub fn cleanup(p: &Path) {
     store::rmrf(p);
 }
@@ -55,8 +55,8 @@ pub fn exists(path: &str) -> bool {
     Path::new(path).exists()
 }
 
-/// Relative path + content for
-/// every file, so "restored byte-for-byte" is checkable in one comparison.
+/// 每个文件的相对路径 + 内容，这样「逐字节还原」在一次比较里
+/// 就能验完。
 pub fn dir_snapshot(dir: &str) -> String {
     let mut files = list_all(Path::new(dir), String::new());
     files.sort();
@@ -96,8 +96,8 @@ fn list_all(dir: &Path, base: String) -> Vec<String> {
     out
 }
 
-/// Join with the native separator, matching what every
-/// stored path field looks like.
+/// 用本机原生分隔符拼接，好让结果与每个
+/// 持久化的路径字段长出来的样子一致。
 pub fn join(base: &str, parts: &[&str]) -> String {
     let mut p = PathBuf::from(base);
     for part in parts {

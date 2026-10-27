@@ -2,19 +2,18 @@
   --bg: #f4f5f7;
   --surface: #ffffff;
   --surface-2: #fafbfc;
-  /* One step darker than --surface-2, used only as the moving half of the
-     skeleton shimmer. It needed a real token: the animation referenced
-     var(--surface-3, var(--surface-2)), so in both themes the shimmer was a
-     single flat colour and read as a static grey block, not a loading state. */
+  /* 比 --surface-2 深一档，只用作骨架屏微光的移动那一半。它必须是一个真正的
+     token：动画引用的是 var(--surface-3, var(--surface-2))，所以在两种主题下
+     微光都只有一个平面颜色，看上去就是一块静止的灰色方块，而不是加载中的状态。 */
   --surface-3: #eef1f5;
   --border: #e4e7ec;
   --border-strong: #d3d8e0;
   --text: #131720;
   --text-2: #5b6472;
-  /* AA (4.5:1) for 10–12px auxiliary text: 5.01:1 on --surface (#ffffff),
-     4.83:1 on --surface-2 (#fafbfc) and 4.59:1 on --bg (#f4f5f7). A lighter
-     grey (#8b94a3 measures 3.06 / 2.95 / 2.81) fails AA for table headers,
-     hints and stat footnotes. */
+  /* 10–12px 辅助文字要满足 AA（4.5:1）：在 --surface (#ffffff) 上是 5.01:1，
+     在 --surface-2 (#fafbfc) 上是 4.83:1，在 --bg (#f4f5f7) 上是 4.59:1。
+     更浅的灰（#8b94a3 实测 3.06 / 2.95 / 2.81）在表头、提示语和统计脚注上
+     达不到 AA。 */
   --text-3: #667080;
   --accent: #2f6bff;
   --accent-soft: #eaf0ff;
@@ -30,15 +29,13 @@
   --shadow-sm: 0 1px 2px rgba(16, 24, 40, .05);
   --shadow-md: 0 4px 14px rgba(16, 24, 40, .07), 0 1px 3px rgba(16, 24, 40, .05);
   --shadow-lg: 0 18px 44px rgba(16, 24, 40, .16);
-  /* ---- scales (R32): the only source of a text size or a corner radius ----
-     The type scale has five integer tiers; the radius scale has four. Both are
-     asserted by tauri-shell/real-ui-probe.mjs against the live DOM, so a new
-     hand-tuned value cannot slip back in without failing the UI gate.
+  /* ---- 刻度：字号与圆角的唯一来源 ----
+     字号五档、圆角四档。新增数值请落在这张表里，不要手调出一个表外尺寸。
      10 / 10.5 / 11 / 11.5 → micro | 12 / 12.5 → small | 13 / 13.5 / 14 → body
      17 / 19 → title | 25 / 26 → display
      2 / 4 → xs | 6 / 7 / 8 / 9 → sm | 11 / 14 → md | 20 / 50% / 999 → pill
-     (20px badges/switches and 50% knobs/dots are pills already: clamping makes
-     both identical to a 999px radius on the square elements they sit on.) */
+     (20px 徽标/开关和 50% 旋钮/圆点本来就属于 pill：钳制之后，两者在它们所附着
+     的方形元素上都等同于 999px 圆角。) */
   --fs-micro: 11px;
   --fs-small: 12px;
   --fs-body: 13px;
@@ -53,16 +50,16 @@
   --mono: "Cascadia Mono", "JetBrains Mono", Consolas, "SF Mono", monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Inter, sans-serif;
 
-  /* ---- component tokens: every value below MUST be themed in the dark
-     blocks, and no component rule may hardcode a colour. ---- */
+  /* ---- 组件 token：下面每一个值都必须在深色块里配套给出主题值，
+     并且任何组件规则都不许硬编码颜色。 ---- */
 
-  /* Sidebar follows the theme: a dark sidebar under a light theme reads as a
-     bug. Dark values live in the dark blocks. */
+  /* 侧边栏跟随主题：浅色主题下配一条深色侧边栏，看起来就是 bug。
+     深色主题的取值放在深色块里。 */
   --side-bg: #eceff4;
   --side-border: #dfe3ea;
   --side-text: #414a58;
-  /* Sidebar auxiliary text is 10–11.5px on --side-bg (#eceff4). Every value
-     here is ≥4.5:1 against it (was 3.62 / 3.28 / 2.65). */
+  /* 侧边栏辅助文字是 10–11.5px，落在 --side-bg (#eceff4) 上。这里每个取值
+     相对它都 ≥4.5:1（原来是 3.62 / 3.28 / 2.65）。 */
   --side-muted: #5f6877;   /* 4.88:1 */
   --side-group: #5f6877;   /* 4.88:1 */
   --side-note: #646d7c;    /* 4.53:1 */
@@ -75,18 +72,18 @@
   --badge-warn-bg: #fdf3e2;
   --badge-warn-text: #8a5a12;
   --knob: #ffffff;
-  /* Colour of an agent logo whose adapter declares no accent of its own.
-     A token, not a literal, so the dark block can darken it in one place. */
+  /* 某个 agent 的适配器没有声明自己的强调色时，用它做该 agent 的 logo 颜色。
+     这是 token 而不是字面量，好让深色块能在一处把它调暗。 */
   --agent-fallback: #4b5563;
   --brand-grad: linear-gradient(140deg, #4f8bff, #7c5cff 60%, #22d3ee);
   --brand-name: #131720;
 
-  /* controls */
+  /* 控件 */
   --btn-hover-border: #bcc3ce;
-  /* A filled button carries white 13–14px text, so its fill needs its own
-     token: --accent stays the colour for borders, focus rings and chart
-     strokes, where 3:1 (UI components) is the bar, not 4.5:1 (text). */
-  --btn-primary-bg: #2d67fa;      /* 4.74:1 — #2f6bff measured 4.50 and slipped under AA */
+  /* 实心按钮承载白色 13–14px 文字，所以它的填充色需要自己的 token：
+     --accent 继续作为边框、焦点环和图表描边的颜色，那里适用 3:1
+     （UI 组件）这条线，不是 4.5:1（文本）。 */
+  --btn-primary-bg: #2d67fa;      /* 4.74:1 — #2f6bff 实测 4.50，掉到 AA 之下 */
   --btn-primary-hover: #2560ec;   /* 5.30:1 */
   --btn-danger-bg: #d13438;       /* 4.93:1 */
   --btn-danger-hover: #bb2b2f;    /* 6.20:1 */
@@ -100,12 +97,12 @@
   --select-bg: #ffffff;
   --log-bg: #f8fafc;
 
-  /* tables & lists */
+  /* 表格与列表 */
   --row-hover: #f8fafc;
   --table-border: #f0f2f5;
   --chip-bg: #eef1f5;
 
-  /* status text colours (paired with the *-soft backgrounds) */
+  /* 状态文字颜色（与 *-soft 背景配对使用） */
   --chip-skill-text: #5936d6;
   --chip-mcp-text: #1f57d8;
   --chip-plugin-text: #0b7a45;
@@ -117,8 +114,8 @@
   --chip-ok-text: #0b7a45;
   --warn-line: #e0a02a;
 
-  /* alerts: border and text are separate tokens because dark theme needs
-     lighter text on the same soft background */
+  /* 告警：边框与文字拆成两个 token，因为深色主题需要在同一块浅色背景上
+     用更亮的文字 */
   --alert-err-border: #f5c9ca;
   --alert-err-text: #8f2225;
   --alert-warn-border: #f0d9ae;
@@ -129,7 +126,7 @@
   --alert-ok-text: #0b6b3d;
   --bordered-accent: #c8d9ff;
 
-  /* diff palette */
+  /* 差异配色 */
   --diff-add-bg: #e9f8ef;
   --diff-add-text: #10603a;
   --diff-del-bg: #fdecec;
@@ -137,7 +134,7 @@
   --diff-mod-bg: #fdf5e4;
   --diff-mod-text: #7a5310;
 
-  /* toasts (dark bubbles in both themes, but themed for consistency) */
+  /* 轻提示（两种主题下都是深色气泡，但仍然按主题给出取值以保持一致） */
   --toast-bg: #161a22;
   --toast-text: #ffffff;
   --toast-ok: #0e6b3d;
@@ -145,8 +142,8 @@
   --toast-warn: #8a5a12;
 }
 
-/* Dark theme: only the variable values change — every component already
-   reads from tokens, so no component rule needs a dark variant. */
+/* 深色主题：只改变量取值 —— 每个组件本来就读 token，
+   所以没有任何组件规则需要一份深色变体。 */
 [data-theme="dark"] {
   --bg: #101317;
   --surface: #181c22;
@@ -156,8 +153,8 @@
   --border-strong: #3a424e;
   --text: #e6eaf0;
   --text-2: #a3adbb;
-  /* 6.42:1 on --surface, 5.92:1 on --surface-2, 6.99:1 on --bg. The old
-     value measured 4.10 / 3.78 / 4.47 and failed AA on every panel. */
+  /* 在 --surface 上是 6.42:1，在 --surface-2 上是 5.92:1，在 --bg 上是 6.99:1。
+     原取值实测 4.10 / 3.78 / 4.47，在每一块面板上都达不到 AA。 */
   --text-3: #93a0ae;
   --accent: #6b96ff;
   --accent-soft: #1b2740;
@@ -174,17 +171,16 @@
   --shadow-md: 0 4px 14px rgba(0, 0, 0, .45), 0 1px 3px rgba(0, 0, 0, .3);
   --shadow-lg: 0 18px 44px rgba(0, 0, 0, .55);
 
-  /* controls — dark surfaces, light text; *-text tokens are lifted to keep
-     ≥4.5:1 contrast against their soft backgrounds */
+  /* 控件 —— 深色底、浅色字；*-text token 被提亮，以使其相对各自的浅色背景
+     保持 ≥4.5:1 对比度 */
   --btn-hover-border: #4a5464;
-  /* White on the dark --accent measures 2.83:1 — too low for text, exactly
-     right as a border/icon/chart colour. The button fill therefore
-     gets a deeper derived value (5.30:1 base, 4.81:1 hover). Do NOT "fix" this
-     by raising the font weight/size: that is changing the criterion, not
-     meeting it. */
-  --btn-primary-bg: #2560ec;      /* 5.30:1 with --knob */
+  /* 白色文字落在深色 --accent 上实测 2.83:1 —— 作为文字太低，作为边框/图标/
+     图表颜色却正合适。所以按钮填充改用派生出来的更深取值（常态 5.30:1、
+     悬停 4.81:1）。不要靠加大字重/字号来“修”这个问题：那是在改判据，
+     而不是满足判据。 */
+  --btn-primary-bg: #2560ec;      /* 配 --knob 为 5.30:1 */
   --btn-primary-hover: #3068f0;   /* 4.81:1 */
-  --btn-danger-bg: #c62f34;       /* 5.44:1 — --red #f2636a is only 3.10:1 */
+  --btn-danger-bg: #c62f34;       /* 5.44:1 —— --red #f2636a 只有 3.10:1 */
   --btn-danger-hover: #cf363b;    /* 4.95:1 */
   --ghost-hover-bg: #232936;
   --icon-hover-bg: #232936;
@@ -196,12 +192,12 @@
   --select-bg: #1e232b;
   --log-bg: #1a1f28;
 
-  /* tables & lists */
+  /* 表格与列表 */
   --row-hover: #1d2330;
   --table-border: #232936;
   --chip-bg: #232936;
 
-  /* status text, lifted for dark */
+  /* 状态文字，为深色主题提亮 */
   --chip-skill-text: #b7a3ff;
   --chip-mcp-text: #8db0ff;
   --chip-plugin-text: #5fd08e;
@@ -213,7 +209,7 @@
   --chip-ok-text: #5fd08e;
   --warn-line: #e8b34a;
 
-  /* alerts */
+  /* 告警 */
   --alert-err-border: #5c2a2c;
   --alert-err-text: #ff9a9e;
   --alert-warn-border: #5c4520;
@@ -224,7 +220,7 @@
   --alert-ok-text: #7fd9a4;
   --bordered-accent: #2a3a5e;
 
-  /* diff palette */
+  /* 差异配色 */
   --diff-add-bg: #12291a;
   --diff-add-text: #7fd9a4;
   --diff-del-bg: #33181a;
@@ -232,18 +228,18 @@
   --diff-mod-bg: #332a14;
   --diff-mod-text: #f0c674;
 
-  /* toasts stay dark bubbles */
+  /* 轻提示保持深色气泡 */
   --toast-bg: #161a22;
   --toast-text: #ffffff;
   --toast-ok: #0e6b3d;
   --toast-err: #9c272b;
   --toast-warn: #8a5a12;
 
-  /* sidebar stays dark in dark themes */
+  /* 侧边栏在深色主题下仍然是深色 */
   --side-bg: #12151c;
   --side-border: #0b0d11;
   --side-text: #cdd3dd;
-  /* ≥4.5:1 on --side-bg: 6.21 / 6.21 / 5.90 (was 4.10 / 3.35 / 3.15) */
+  /* 在 --side-bg 上 ≥4.5:1：6.21 / 6.21 / 5.90（原来是 4.10 / 3.35 / 3.15） */
   --side-muted: #8f97a5;
   --side-group: #8f97a5;
   --side-note: #8b93a1;
@@ -255,17 +251,15 @@
   --badge-text: #cfd6e2;
   --badge-warn-bg: #4a2a12;
   --badge-warn-text: #ffbe7a;
-  --agent-fallback: #6b7280;   /* white label 4.83:1, tile 3.54:1 vs --surface */
+  --agent-fallback: #6b7280;   /* 白字 4.83:1，色块相对 --surface 为 3.54:1 */
   --brand-name: #ffffff;
 }
 
-/* The dark palette lives in ONE place: [data-theme="dark"] above. Do not add a
-   second copy under another theme value — theme-init.js:12 and
-   app.js:applyTheme() only ever write "dark" or "light", so it would drift
-   behind this block. */
+/* 深色配色只存在于一个地方：上面的 [data-theme="dark"]。不要把它复制到另一个
+   theme 取值下面 —— theme-init.js:12 和 app.js:applyTheme() 只会写 "dark" 或
+   "light"，所以复制出来的那份必然落后于这个块。 */
 
-/* Native form controls follow the theme too, otherwise selects render
-   white-on-white in dark mode. */
+/* 原生表单控件也要跟随主题，否则深色模式下 select 会渲染成白底白字。 */
 [data-theme="dark"] select,
 [data-theme="dark"] input,
 [data-theme="dark"] textarea {
@@ -285,14 +279,13 @@ html, body {
 
 button, input, select, textarea { font: inherit; color: inherit; }
 
-/* 248px rather than 232px: the Chinese labels ("操作记录", "健康检查") need
-   the extra room or they ellipsize. The track is a default, not a law — the
-   sidebar toggle and the 900px/600px breakpoints below both override it. */
+/* 用 248px 而不是 232px：中文标签（“操作记录”、“健康检查”）需要多出来的这点
+   空间，否则会被省略号截断。这条轨道是默认值，不是铁律 —— 侧边栏折叠开关和
+   下面的 900px/600px 断点都会覆盖它。 */
 .app { display: grid; grid-template-columns: 248px 1fr; height: 100%; }
 
-/* Icon-only rail. One set of rules powers both the user toggle (app.js
-   `syncSideToggle`) and the narrow-viewport fallback, so "collapsed" can never
-   mean two different things depending on why it happened. */
+/* 纯图标侧栏。同一套规则同时支撑用户手动折叠（app.js `syncSideToggle`）和
+   窄视口下的自动回退，这样“折叠”永远不会因为触发原因不同而变成两件事。 */
 .app.collapsed { grid-template-columns: 60px 1fr; }
 .app.collapsed .brand-text,
 .app.collapsed .nav-text,
@@ -301,14 +294,14 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .app.collapsed .nav-item { justify-content: center; }
 .app.collapsed .brand { padding: 14px 0 10px; flex-direction: column; gap: 8px; }
 .app.collapsed .nav-item { padding: 8px 0; }
-/* Group captions become empty spacing rather than a vertical column of single
-   letters inside a 60px rail. The nav items keep their accessible names via
-   aria-label (app.js `applyLanguage`), which display:none would otherwise eat. */
+/* 分组标题变成纯留白，而不是在 60px 宽的轨道里竖成一列单字。导航项仍通过
+   aria-label（app.js `applyLanguage`）保留无障碍名称 —— 那些名称本来会被
+   display:none 一并吃掉。 */
 .app.collapsed .nav-group { text-indent: -999px; overflow: hidden; padding: 10px 0 4px; }
 .side-toggle { margin-left: auto; flex: none; font-size: var(--fs-small); }
 .app.collapsed .side-toggle { margin-left: 0; }
 
-/* ---------------- sidebar ---------------- */
+/* ---------------- 侧边栏 ---------------- */
 .sidebar {
   background: var(--side-bg);
   color: var(--side-text);
@@ -338,63 +331,55 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .nav-item:hover { background: var(--nav-hover-bg); color: var(--nav-active-text); }
 .nav-item.active { background: var(--nav-active-bg); color: var(--nav-active-text); font-weight: 550; }
 .nav-ico { width: 15px; text-align: center; opacity: .75; font-size: var(--fs-small); flex-shrink: 0; }
-/* CJK labels are wider than the Latin ones and must not wrap to a vertical
-   column, which is what happens with a bare text node inside a flex row. */
+/* CJK 标签比拉丁字母宽，绝不能折成竖排的一列 —— 而 flex 行里直接放一个裸文本
+   节点，就会出现这种结果。 */
 .nav-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nav-badge {
   margin-left: auto; background: var(--badge-bg); color: var(--badge-text);
   font-size: var(--fs-micro); padding: 1px 6px; border-radius: var(--r-pill); font-variant-numeric: tabular-nums;
 }
 .nav-badge.warn { background: var(--badge-warn-bg); color: var(--badge-warn-text); }
-/* The update dot hides itself until a release is actually waiting. There is no
-   global `.hidden` rule in this sheet (only per-component ones), so the badge
-   needs its own or it stays visible with a stray "!" next to Settings. */
+/* 更新圆点在真的有新版本等待之前自己隐藏。本样式表里没有全局的 `.hidden`
+   规则（只有各组件自己的），所以这个徽标需要自带一条，否则它会一直显示，
+   在“设置”旁边留一个孤零零的“!”。 */
 .nav-badge.hidden { display: none; }
 
 
-/* ---------------- topbar ---------------- */
-/* min-width:0 stops a long path in the view from widening the grid track past
-   the window and pushing the topbar controls out of reach. */
+/* ---------------- 顶栏 ---------------- */
+/* min-width:0 阻止视图里的长路径把网格轨道撑出窗口之外、把顶栏控件挤到够不着
+   的地方。 */
 .main { display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
 .topbar {
   background: var(--surface); border-bottom: 1px solid var(--border);
   padding: 14px 22px; display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
 }
-/* Shrinkable, so the action row keeps its single line at normal widths and
-   only wraps when the text itself is scaled up. Without this the title block
-   claims its full intrinsic width and pushes the last button onto a new row.
-   Measured at 1440px: `flex: 1 1 260px` grew this block to 672px of a 1192px
-   bar and left the search box 189px — 51px under its own basis, truncating the
-   shipped Chinese placeholder by 15px. The title never needs the free space
-   (its longest string is the subtitle), so `flex: 0 1 auto` caps it at its
-   content and hands the remainder to `.topbar-actions`. `min-width: 0` is kept
-   so it still shrinks rather than pushing the buttons off the window. */
+/* 允许收缩，这样在正常宽度下操作按钮行保持单行，只有文字本身被放大时才折行。
+   没有这一条时，标题块会按自己的固有宽度占满，把最后一个按钮挤到新的一行。
+   在 1440px 实测：`flex: 1 1 260px` 把这个块撑到 1192px 宽的栏里的 672px，
+   只给搜索框留下 189px —— 比它自己的基准宽度少 51px，把已上线的中文占位符
+   截掉了 15px。标题从来不需要这段余量（它最长的字符串就是副标题），所以用
+   `flex: 0 1 auto` 把它限制在内容宽度，把剩下的交给 `.topbar-actions`。
+   `min-width: 0` 必须保留，好让它仍然会收缩，而不是把按钮推出窗口。 */
 .topbar-title { flex: 0 1 auto; min-width: 0; }
 .topbar-title h1 { margin: 0; font-size: var(--fs-title); font-weight: 650; letter-spacing: -.2px; }
 .topbar-title p { margin: 2px 0 0; font-size: var(--fs-small); color: var(--text-3); }
 
-/* The search field: compact by default, but never narrower than its own
-   placeholder needs. Measured in Chromium at 13px: the shipped Chinese string
-   ("按名称、Agent、标签筛选…") needs 162px of content, and the longer English one
-   ("Filter by name, agent, tag…") about 168px. Content box = width − 28px left
-   padding (the search glyph) − 12px right padding (the caret) − 2px borders, so
-   210px clears the Chinese string with room and 216px clears both. The floor is
-   the shorter of the two so the zh UI is not widened by the English string;
-   the ellipsis on `::placeholder` covers anything longer. `flex: 0 1 240px`
-   still lets the field give ground when the window is narrow — the topbar
-   wraps the whole actions block instead of clipping it. */
+/* 搜索框：默认紧凑，但绝不窄于它自己的占位符所需。在 Chromium 中按 13px 实测：
+   已上线的中文串（“按名称、Agent、标签筛选…”）需要 162px 内容宽，更长的英文串
+   （“Filter by name, agent, tag…”）约需 168px。内容盒 = width − 28px 左内边距
+   （搜索图标）− 12px 右内边距（光标）− 2px 边框，所以 210px 能宽松地容下中文串，
+   216px 两者都容得下。下限取两者中较短的那个，这样中文界面不会被英文串撑宽；
+   `::placeholder` 上的省略号兜住更长的任何情况。`flex: 0 1 240px` 仍然让这个字段
+   在窗口变窄时可以让步 —— 顶栏是把整个操作块折行，而不是裁掉它。 */
 .search-wrap { position: relative; display: flex; align-items: center; flex: 0 1 240px; min-width: 210px; }
-/* `.topbar-actions` stays atomic — search + the three buttons are ONE action
-   that a user reads together, and splitting 重新扫描 onto a line of its own
-   below the search box reads as two unrelated controls.
-   `flex-wrap: nowrap` was the shipped value and it clipped: the last button's
-   right edge measured 1495 against a 1440 window. Wrapping is the fix that
-   keeps all four controls on one line; if the row genuinely cannot fit, the
-   WHOLE block moves to its own line, which is what `.topbar`'s `flex-wrap: wrap`
-   is for. `flex: 0 1 auto` (basis 0) is what makes that happen correctly —
-   with the shipped `flex: 1` (basis 0% but growable) the title block ate the
-   free space instead and squeezed the actions to their minimum, which is how
-   重新扫描 ended up wrapped at 1440px with 600px to spare. */
+/* `.topbar-actions` 保持为一个整体 —— 搜索框加三个按钮是用户一起读的同一个
+   动作区，把“重新扫描”单独折到搜索框下面一行，读起来就像两个互不相干的控件。
+   `flex-wrap: nowrap` 是原来已上线的取值，而它会裁切：最后一个按钮的右边缘
+   实测 1495，而窗口只有 1440。折行才是解决办法，它让四个控件都留在同一行；
+   如果这一行真的放不下，整个块会移到自己的一行 —— 这正是 `.topbar` 的
+   `flex-wrap: wrap` 要处理的情况。`flex: 0 1 auto`（basis 0）才能让它正确发生 ——
+   用已上线的 `flex: 1`（basis 0% 但可增长）时，是标题块吃掉了余量，把操作区
+   压到最小，于是在 1440px、还剩 600px 余量的情况下“重新扫描”照样被折行。 */
 .topbar-actions {
   margin-left: auto; display: flex; gap: 8px; align-items: center;
   flex-wrap: nowrap; flex: 0 1 auto; min-width: 0;
@@ -402,23 +387,19 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 .search-ico { position: absolute; left: 9px; color: var(--text-3); font-size: var(--fs-body); pointer-events: none; }
 .search-wrap input {
-  /* The right padding reserves room for the absolutely-positioned <kbd> key
-     hint at right:8px. Reserving it *permanently* is what truncated the
-     placeholder: the hint is a keyboard affordance, not content, so it is
-     faded out by default and the space it would need is given back to the
-     text. The hint fades IN on hover/focus, and by then the placeholder is
-     either gone (focus) or already readable. 12px clears the caret; the kbd
-     appears over the text only while the pointer is on the field. */
+  /* 右内边距为绝对定位的 <kbd> 键位提示（right:8px）预留空间。正是“永久”预留
+     这一块把占位符截断了：这个提示是键盘辅助功能，不是内容，所以默认把它淡出，
+     把它本来要占的空间还给文字。提示在 hover/focus 时淡入，而到那时占位符
+     要么已经消失（聚焦），要么已经读完了。12px 让开了光标位置；kbd 只在指针
+     位于该字段上时才出现在文字之上。 */
   width: 100%; padding: 7px 12px 7px 28px; border-radius: var(--r-sm);
   border: 1px solid var(--border); background: var(--surface-2); outline: none;
   color: var(--text);
 }
-/* English placeholders are longer than their Chinese counterparts; an input
-   clips its placeholder with no ellipsis by default, so "Filter by name, agent,
-   tag…" was cut mid-word at 1440px. Widening the box covers the shipped string
-   and the ellipsis keeps any future longer one honest. The block-level
-   overflow rules below are what make the ellipsis actually reachable: an
-   inline-level box ignores text-overflow on the overflowing text. */
+/* 英文占位符比对应的中文更长；input 默认会直接裁掉占位符、不带省略号，所以
+   “Filter by name, agent, tag…” 在 1440px 下被从词中间切断。加宽输入框能容下
+   已上线的字符串，省略号则让以后更长的字符串也保持诚实。真正让省略号生效的
+   是下面那些块级溢出规则：行内级盒子会忽略溢出文字上的 text-overflow。 */
 .search-wrap input::placeholder { text-overflow: ellipsis; }
 .search-wrap input:focus { border-color: var(--accent); background: var(--input-focus-bg); box-shadow: 0 0 0 3px var(--accent-soft); }
 .search-wrap kbd {
@@ -427,17 +408,15 @@ button, input, select, textarea { font: inherit; color: inherit; }
   background: var(--kbd-bg); line-height: 1.5; pointer-events: none;
   opacity: 0; transition: opacity .13s ease;
 }
-/* The hint is a keyboard affordance, not content. It shows on hover, and on
-   focus only once the field is empty — a focused field with text needs no
-   hint, and an empty one hides its own placeholder at the same moment, so the
-   two can never occupy the same pixels. */
+/* 这个提示是键盘辅助功能，不是内容。它在 hover 时出现，聚焦时只在字段为空时
+   出现 —— 有文字的聚焦字段不需要提示，而空字段在同一时刻会隐藏自己的占位符，
+   所以两者永远不会占用同一片像素。 */
 .search-wrap:hover kbd { opacity: 1; }
 .search-wrap:focus-within kbd { opacity: 1; }
 .search-wrap input:not(:placeholder-shown):focus ~ kbd { opacity: 0; }
 .search-wrap input:not(:placeholder-shown):hover ~ kbd { opacity: 0; }
-/* Chromium's native search clear button is painted inside the right padding
-   box, i.e. exactly where the kbd lives. Without the margin it sat under the
-   key hint. */
+/* Chromium 原生搜索清除按钮画在右内边距盒里，也就是 kbd 所在的位置。没有这段
+   外边距时，它会压在键位提示下面。 */
 .search-wrap input[type="search"]::-webkit-search-cancel-button { margin-right: 4px; }
 
 .btn {
@@ -462,7 +441,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .icon-btn:hover { background: var(--icon-hover-bg); color: var(--text); }
 
-/* ---------------- view ---------------- */
+/* ---------------- 视图 ---------------- */
 .view { flex: 1; overflow-y: auto; padding: 20px 22px 40px; }
 
 .card {
@@ -485,42 +464,38 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .row { display: flex; gap: 14px; }
 .mt { margin-top: 14px; }
 
-/* ---- fill-the-view layout ----
+/* ---- 铺满视图的布局 ----
  *
- * `.view` is a flex item with a definite height and `overflow-y:auto`. A child
- * at `height:100%` therefore resolves against the view's content box, which is
- * what lets a dashboard panel claim "everything below the stat grid" instead of
- * floating as a short card above empty background. Each link in the chain must
- * declare `min-height:0` — a flex item's default `min-height:auto` refuses to
- * shrink below its content, which is exactly what turns a filling layout into
- * a scroll-everything layout.
+ * `.view` 是一个有确定高度、带 `overflow-y:auto` 的 flex 项。因此
+ * `height:100%` 的子元素是相对视图的内容盒来解析的，这才能让一个仪表盘面板
+ * 声称自己占据“统计网格以下的全部空间”，而不是缩成一张矮卡片、浮在空白背景上。
+ * 这条链上的每一环都必须声明 `min-height:0` —— flex 项默认的 `min-height:auto`
+ * 拒绝收缩到内容高度以下，而这正是把“铺满布局”变成“整体滚动布局”的原因。
  *
- * `.card-fill` overrides the `.card { overflow-x:auto }` rule from the
- * anti-clipping section: a card that is itself a flex column cannot also be the
- * horizontal scroll box, so the single scroll container has to be the table
- * wrapper (`.card-scroll`) inside it.
+ * `.card-fill` 覆盖了防裁切章节里的 `.card { overflow-x:auto }` 规则：
+ * 一张自己就是 flex 列的卡片不可能同时充当横向滚动盒，所以唯一的滚动容器
+ * 只能是它内部的表格包装层（`.card-scroll`）。
  */
 .view-fill { height: 100%; display: flex; flex-direction: column; min-height: 0; }
 .row-fill { flex: 1 1 auto; min-height: 0; }
-/* Stacked variant: one panel per row. Each still claims an equal share of the
-   leftover height, so the pair together fills the container — a single `.col`
-   child would otherwise be sized by its content and leave dead space below.
-   `flex: 1 1 0` (not `auto`) is what makes the shares equal: with `auto` the
-   taller table's content would decide the split. */
+/* 纵向堆叠变体：一行一个面板。每个面板仍然平分剩余高度，两块合起来就填满
+   容器 —— 否则单个 `.col` 子元素会按自身内容定高，在下面留下死空间。
+   `flex: 1 1 0`（而不是 `auto`）才是让各份等分的关键：用 `auto` 时，
+   较高的那张表的内容会决定怎么分。 */
 .row-fill.col { display: flex; flex-direction: column; gap: 14px; }
 .row-fill.col > .flex-1-min { flex: 1 1 0; min-height: 0; display: flex; }
 .card-fill { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-/* `.card { overflow-x:auto }` is declared later in the sheet (anti-clipping
-   section) and has the same specificity, so the override needs two classes. */
+/* `.card { overflow-x:auto }` 在本样式表更靠后的位置（防裁切章节）声明，
+   且特指度相同，所以覆盖它需要两个类。 */
 .card.card-fill { overflow: hidden; }
-/* A card head must not be squeezed out of the flex column by a tall body. */
+/* 卡片头不能被一个很高的主体挤出 flex 列。 */
 .card-fill > .card-head { flex: none; }
 .card-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
-/* Two same-height panels side by side: both children stretch to the row height
-   instead of one of them deciding how tall the pair is. */
+/* 两块同高面板并排：两个子元素都拉伸到行高，而不是由其中一个决定这一对
+   有多高。 */
 .row-fill > .flex-1-min { display: flex; min-height: 0; }
 .row-fill > .flex-1-min > .card-fill { width: 100%; }
-/* A panel skeleton stands in for `.card-fill` during the first paint. */
+/* 首帧渲染期间，由面板骨架屏顶替 `.card-fill`。 */
 .skl-panel {
   flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
   background: var(--surface); border: 1px solid var(--border);
@@ -528,7 +503,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .skl-panel .skl-lines { flex: 1; min-width: 0; }
 
-/* stat cards */
+/* 统计卡片 */
 .stat {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 14px 16px; position: relative; overflow: hidden; box-shadow: var(--shadow-sm);
@@ -543,8 +518,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .stat.k-rule::after { background: var(--chip-rule); }
 .stat.k-memory::after { background: var(--teal); }
 
-/* Drill-down affordance: a stat that reports a number should also lead to
-   the list behind it. */
+/* 下钻入口：一块报出数字的统计，也应该能带用户走到它背后的那份列表。 */
 .stat.clickable {
   cursor: pointer;
   transition: border-color .14s ease, box-shadow .14s ease, transform .14s ease;
@@ -568,28 +542,25 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .chip.clickable { cursor: pointer; border: 0; font-family: inherit; }
 .chip.clickable:hover { filter: brightness(.96); }
 
-/* ---- settings rows ----
-   The label/hint block is the reading column and the control is the action
-   column. Two fixes to the width split:
-   · `.set-label` grows from a 0 basis (`flex: 1 1 0`) rather than from its
-     intrinsic width. `flex: 1` means `flex: 1 1 0%` in modern engines but the
-     useful part is the zero basis: the free space goes to the *hint* column,
-     not to the short label, so a row whose control is a 44px switch does not
-     leave a 400px empty gutter between the label and the switch.
-   · `.set-control` gets a flex basis of 0 with a right margin instead of
-     `margin-left:auto`. Both centre the control to the right edge; only the
-     second keeps a wrapping control right-aligned, because a wrapper that has
-     collapsed to zero width and then grows still starts from the right.
-   · 46% is a cap, not the budget: a 320px token field in a 620px modal is
-     52% of the row and must not be clipped by the old 52% ceiling. */
+/* ---- 设置行 ----
+   标签/提示这一块是阅读列，控件是操作列。宽度切分上有两处修正：
+   · `.set-label` 从 0 基准增长（`flex: 1 1 0`），而不是从固有宽度增长。
+     `flex: 1` 在现代引擎里就是 `flex: 1 1 0%`，但真正有用的是那个零基准：
+     余量流向的是*提示*列，而不是那个偏短的标签，所以一行里控件是 44px 开关时，
+     标签和开关之间不会留下 400px 的空档。
+   · `.set-control` 用 flex 基准 0 加右外边距，取代 `margin-left:auto`。
+     两者都把控件靠到右边缘；只有第二种能保持折行后的控件仍然右对齐，
+     因为一个已经收成零宽、再重新长开的包装层仍然是从右边开始的。
+   · 46% 是上限，不是预算：620px 弹窗里的一个 320px token 字段占这一行的
+     52%，不能被原来 52% 的上限裁掉。 */
 .set-row {
   display: flex; align-items: flex-start; gap: 16px;
   padding: 12px 0; border-bottom: 1px solid var(--border);
 }
 .set-row:last-child { border-bottom: 0; }
 .set-label { flex: 1 1 0; min-width: 0; font-size: var(--fs-body); font-weight: 500; }
-/* A long path or an unbroken token in the label column breaks instead of
-   widening the row; CJK breaks anywhere, so keep the normal rules there. */
+/* 标签列里的长路径或不断开的长 token 要折行，而不是把整行撑宽；CJK 本来
+   就能在任意位置断行，所以那里保持正常规则。 */
 .set-label label { overflow-wrap: anywhere; }
 .set-hint {
   font-size: var(--fs-micro); color: var(--text-3); font-weight: 400; margin-top: 4px;
@@ -602,8 +573,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .items { align-items: center; }
 
 .switch {
-  /* 44×24 rather than 40×22: WCAG 2.2 AA target size is 24×24, and the switch
-     is a standalone control (its label text is not clickable). */
+  /* 44×24 而不是 40×22：WCAG 2.2 AA 的目标尺寸是 24×24，而开关是一个
+     独立控件（它的标签文字不可点击）。 */
   width: 44px; height: 24px; border-radius: var(--r-md); padding: 0;
   background: var(--border-strong); border: 0; cursor: pointer;
   position: relative; transition: background .16s ease;
@@ -624,100 +595,88 @@ button, input, select, textarea { font: inherit; color: inherit; }
   font-family: var(--mono);
 }
 .input-inline:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
-/* A fixed-width field must never force its row wide: the 84px box is a
-   starting width, not a minimum. Shrinking is allowed, growing is not, so a
-   320px token field keeps its size in a 620px modal while a cramped sidebar
-   row can still fit the field and its button side by side. */
+/* 定宽字段绝不能让它的行变宽：84px 是起始宽度，不是最小值。允许收缩，
+   不允许增长，所以 320px 的 token 字段在 620px 弹窗里保持自己的尺寸，
+   而拥挤的侧边栏行仍然能把字段和它的按钮并排放得下。 */
 .input-inline { max-width: 100%; flex-shrink: 1; }
-/* `type=password` (the update token) has no default styling and no glyph to
-   size against, so the shipped placeholder `ghp_… / github_pat_…` was the only
-   thing left in the box and it ellipsized to "ghp_…" — which looks like a
-   stored value, not a hint. The wide variant below is 320px, which is what
-   makes the full hint readable; this keeps the shorter boxes honest too. */
+/* `type=password`（更新用的 token）既没有默认样式，也没有可供对齐的字符，
+   所以已上线的占位符 `ghp_… / github_pat_…` 成了框里唯一的东西，还被省略成
+   “ghp_…” —— 那看起来像一个已保存的值，而不是提示。下面的宽变体是 320px，
+   正是它让完整提示可读；这一条也让较短的那些框保持诚实。 */
 .input-inline::placeholder { color: var(--text-3); opacity: 1; }
 .input-inline:disabled::placeholder { color: var(--text-3); opacity: .6; }
 .stat-label { font-size: var(--fs-micro); color: var(--text-3); display: flex; align-items: center; gap: 6px; }
 .stat-value { font-size: var(--fs-display); font-weight: 650; margin-top: 6px; letter-spacing: -.6px; font-variant-numeric: tabular-nums; }
 .stat-foot { font-size: var(--fs-micro); color: var(--text-3); margin-top: 3px; }
 
-/* tables
+/* 表格
  *
- * COLUMN CONTRACT. `table-layout: fixed` stops the browser from guessing
- * widths from content: the header row's `width` values decide every column and
- * the rest of the table obeys them. Without it a three-column table in a wide
- * card gave all the slack to the label cell ("Agent" stretched over 700px
- * while the numeric columns were pushed against the right edge), and a
- * five-column table pulled its short `kind` chip column wide while
- * squeezing the asset name.
+ * 列契约。`table-layout: fixed` 阻止浏览器根据内容猜宽度：表头行上的 `width`
+ * 取值决定每一列，表格其余部分服从它们。没有它时，宽卡片里一张三列表会把所有
+ * 富余都给了标签单元格（“Agent”被拉到 700px 宽，而数字列被挤到右边缘），
+ * 一张五列表则把短短的 `kind` 徽标列拉宽、同时挤压资产名。
  *
- * The four shape rules use `:has()` on the header row because that is the only
- * purely-CSS way to tell the 3-column dashboard table from the 7-column asset
- * table: both are `.tbl`, both are `width:100%`, and app.js adds no
- * distinguishing class. WebView2 is evergreen, so `:has()` is available.
- * Widths are declared on `th` only — in fixed layout the first row is
- * authoritative, and app.js already mirrors `.num` onto both `th` and `td`.
+ * 四条形状规则在表头行上用 `:has()`，因为这是纯 CSS 唯一能分清 3 列仪表盘表
+ * 与 7 列资产表的办法：两者都是 `.tbl`、都是 `width:100%`，而 app.js 并不加
+ * 任何区分用的类。WebView2 是常青浏览器，所以 `:has()` 可用。
+ * 宽度只声明在 `th` 上 —— 固定布局里第一行是权威，而且 app.js 已经把 `.num`
+ * 同时镜像到 `th` 和 `td`。
  *
- * The `.col-*` classes are the same contract, addressed by name. app.js can
- * adopt them one table at a time; where a class is present it wins over the
- * shape fallback, because it is the more specific intent.
+ * `.col-*` 类是同一条契约，只是按名字寻址。app.js 可以一张表一张表地接入；
+ * 只要类出现了，它就压过形状回退规则，因为那是更明确的意图。
  */
 table.tbl {
   table-layout: fixed; width: 100%; border-collapse: collapse;
 }
 table.tbl th, table.tbl td { overflow: hidden; }
-/* The matrix sizes itself from its rotated headers and its own scroll box;
-   fixed layout would collapse the agent columns to one glyph. */
+/* 矩阵表按自己旋转过的表头和自己的滚动盒来定尺寸；固定布局会把 agent 列
+   压成一个字符宽。 */
 table.tbl.matrix { table-layout: auto; min-width: 0; }
 table.tbl.matrix th, table.tbl.matrix td { overflow: visible; }
 
-/* Table floor widths.
+/* 表格宽度下限。
  *
- * These are deliberately NOT guarded by the `:not(:has([class*="col-"]))`
- * opt-out that the column widths use. A `min-width` on the table is a floor
- * for the whole grid, not a per-column guess, and it is what keeps the ONE
- * flexible column from collapsing to zero: measured at a 600px viewport the
- * asset table's fixed columns (44 + 92 + 148 + 84 + 84 + 112 = 564px) exceed
- * the 518px card, which left `col-name` at exactly 0px — a column that is
- * present in the DOM and invisible on screen. With the floor the table becomes
- * 720px and scrolls horizontally inside `.card { overflow-x: auto }`, giving the
- * name column 156px, which is a readable name behind a scrollbar rather than a
- * silent zero. */
+ * 这些下限刻意**不**受列宽规则所用的 `:not(:has([class*="col-"]))` 退出开关
+ * 保护。表格上的 `min-width` 是整张网格的下限，不是对单列的猜测，而且正是它
+ * 让那*唯一*一列弹性列不会塌成零：在 600px 视口实测，资产表的固定列
+ * （44 + 92 + 148 + 84 + 84 + 112 = 564px）超出了 518px 的卡片，于是
+ * `col-name` 恰好剩下 0px —— 一列存在于 DOM 里、在屏幕上却看不见。有了下限，
+ * 表格变成 720px 并在 `.card { overflow-x: auto }` 内横向滚动，给名字列 156px，
+ * 那是滚动条后面一个可读的名字，而不是无声的零宽。 */
 table.tbl:has(thead > tr > th:last-child:nth-child(7)) { min-width: 720px; }
 table.tbl:has(thead > tr > th:last-child:nth-child(9)) { min-width: 880px; }
 table.tbl:has(thead > tr > th:last-child:nth-child(5)) { min-width: 520px; }
 
-/* FALLBACK SHAPE RULES — the no-new-class safety net.
+/* 回退形状规则 —— 不新增类名时的安全网。
  *
- * These apply only to tables that have NOT opted into the named `.col-*`
- * contract below, hence `:not(:has([class*="col-"]))` on the table and
- * `:not([class*="col-"])` on each column. The guard is load-bearing: `:has()`
- * with a `:last-child:nth-child(n)` argument lands around (0,3,2), which
- * silently outranks a plain `table.tbl th.col-kind` (0,2,2). Without the
- * guard these fallbacks kept overriding the explicit intent of every table
- * app.js had already annotated — measured: `.tbl-recent th.col-kind` was
- * computed at 92px (the fallback) instead of the 76px it was given.
+ * 这些规则只作用于**未**接入下面具名 `.col-*` 契约的表格，所以表格上带
+ * `:not(:has([class*="col-"]))`、每列上带 `:not([class*="col-"])`。这层守卫是
+ * 承重的：带 `:last-child:nth-child(n)` 参数的 `:has()` 特指度大约落在 (0,3,2)，
+ * 会悄悄压过普通的 `table.tbl th.col-kind` (0,2,2)。没有这层守卫时，这些回退
+ * 规则持续覆盖每一张 app.js 已经标注过的表格的明确意图 —— 实测：
+ * `.tbl-recent th.col-kind` 计算出来是 92px（回退值），而不是给它的 76px。
  *
- * This is what makes the column contract hold even for a table app.js never
- * touches: column count is the only signal available from CSS alone. */
+ * 也正是这一层，让列契约对 app.js 从未触碰的表格也成立：列数是纯 CSS 唯一
+ * 拿得到的信号。 */
 
-/* three columns: label + two numbers */
+/* 三列：标签 + 两个数字 */
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(3)) th:nth-child(2):not([class*="col-"]) { width: 76px; }
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(3)) th:nth-child(3):not([class*="col-"]) { width: 88px; }
-/* two columns: type + name */
+/* 两列：类型 + 名称 */
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(2)) th:nth-child(1):not([class*="col-"]) { width: 132px; }
-/* five columns: kind / name / agent / scope / relative time */
+/* 五列：kind / 名称 / agent / 作用域 / 相对时间 */
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(5)) th:nth-child(1):not([class*="col-"]) { width: 92px; }
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(5)) th:nth-child(3):not([class*="col-"]) { width: 152px; }
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(5)) th:nth-child(4):not([class*="col-"]) { width: 116px; }
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(5)) th:nth-child(5):not([class*="col-"]) { width: 116px; }
-/* seven columns: select / kind / name / owner / size / tokens / state */
+/* 七列：选择 / kind / 名称 / 所有者 / 大小 / tokens / 状态 */
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(7)) th:nth-child(1):not([class*="col-"]) { width: 44px; }
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(7)) th:nth-child(2):not([class*="col-"]) { width: 92px; }
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(7)) th:nth-child(4):not([class*="col-"]) { width: 148px; }
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(7)) th:nth-child(5):not([class*="col-"]) { width: 84px; }
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(7)) th:nth-child(6):not([class*="col-"]) { width: 84px; }
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(7)) th:nth-child(7):not([class*="col-"]) { width: 112px; }
-/* nine columns: project / agents / five kind counters / added / action */
+/* 九列：项目 / agents / 五个 kind 计数 / 添加时间 / 操作 */
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(9)) th:nth-child(2):not([class*="col-"]) { width: 112px; }
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(9)) th:nth-child(8):not([class*="col-"]) { width: 112px; }
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(9)) th:nth-child(9):not([class*="col-"]) { width: 104px; }
@@ -731,14 +690,13 @@ table.tbl th {
 table.tbl th.num { text-align: right; }
 table.tbl td { padding: 9px 12px; border-bottom: 1px solid var(--table-border); vertical-align: middle; }
 
-/* ---- named column contract ----
-   The named classes are what app.js attaches when a table has a known shape.
-   They are declared AFTER the `:has()` shape fallbacks on purpose: specificity
-   only follows declaration order for equally specific rules, and
-   `table.tbl:has(...) th:nth-child(n)` (0,3,2) would otherwise beat
-   `table.tbl th.col-num` (0,2,2) and silently ignore the explicit intent.
-   `.col-name` is the only flexible column: it takes every pixel the fixed
-   columns leave, and its content ellipsizes instead of widening the row. */
+/* ---- 具名列契约 ----
+   具名类是 app.js 在表格形状已知时挂上去的。它们刻意声明在 `:has()` 形状
+   回退规则**之后**：特指度只在同等特指度的规则之间才按声明顺序决定胜负，
+   否则 `table.tbl:has(...) th:nth-child(n)` (0,3,2) 会压过
+   `table.tbl th.col-num` (0,2,2)，悄悄忽略明确的意图。
+   `.col-name` 是唯一一列弹性列：它拿走固定列留下的每一个像素，其内容用
+   省略号收尾，而不是把行撑宽。 */
 table.tbl th.col-check, table.tbl td.col-check { width: 44px; }
 table.tbl th.col-kind, table.tbl td.col-kind { width: 92px; }
 table.tbl th.col-name, table.tbl td.col-name { width: auto; min-width: 0; }
@@ -751,27 +709,23 @@ table.tbl th.col-act, table.tbl td.col-act { width: 104px; }
 table.tbl th.col-num, table.tbl td.col-num {
   width: 84px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap;
 }
-/* ---- per-table tightening -------------------------------------------------
-   The two dashboard panels are half-width cards (~560px at 1440), so the
-   generic widths above do not fit: the agent table has SEVEN numeric columns
-   (5 kinds + total + size) and the recent table has four fixed columns plus a
-   flexible name. At the generic widths the name column fell to ~90px and
-   ellipsized to "deep-res…", which is the same defect in a new place. These two
-   overrides give each panel an arithmetic that adds up inside a half card:
+/* ---- 按表收紧 --------------------------------------------------------------
+   两块仪表盘面板都是半宽卡片（1440 下约 560px），所以上面那些通用宽度放不下：
+   agent 表有**七**个数字列（5 类 + 合计 + 大小），recent 表有四列固定列加一个
+   弹性名称列。按通用宽度，名称列掉到约 90px，被省略成“deep-res…”，同一个
+   缺陷又在新位置重演。这两条覆盖规则让每块面板的算术能在半张卡片里加得起来：
 
-     agents: 140 (label, flexible) + 7 × 56 = 532  → the label absorbs the rest
-     recent: 76 + 8 + 100 + 76 + 88 = 348         → ~200px left for the name
-   The kind column is sized to the widest chip (记忆 — 2 CJK glyphs plus pill
-   padding ≈ 52px) with a little air; wider only steals name width. */
+     agents: 140（标签，弹性）+ 7 × 56 = 532  → 标签吸收剩下的部分
+     recent: 76 + 8 + 100 + 76 + 88 = 348     → 名称列还剩约 200px
+   kind 列按最宽的徽标定尺寸（记忆 —— 2 个 CJK 字形加 pill 内边距 ≈ 52px），
+   再留一点余气；更宽只会偷走名称列的宽度。 */
 table.tbl.tbl-agents { min-width: 460px; }
-/* The label column is the only flexible one, so on a full-width card it
-   absorbed ~700px and pushed the seven numeric columns into the far right
-   corner: an unreadable gap between the agent name and its own numbers — the
-   defect this column contract exists to remove, reappearing at full width.
-   Capping it at 260px puts the numbers directly beside the name and leaves
-   the slack on the right of the numeric block, where a table's eye does not
-   travel. `col-agent { width:auto }` still lets a narrower card (≤1200px,
-   where the panels stack) give the remainder back. */
+/* 标签列是唯一一列弹性的，所以在整宽卡片上它吸收了约 700px，把七个数字列
+   挤到最右边：agent 名和它自己的数字之间隔着一道读不过去的空档 —— 这条列契约
+   本来就是为了消灭这个缺陷，结果它在整宽下又出现了。把它限制在 260px，数字就
+   紧挨着名字，富余留在数字块的右侧，那是读表格的视线不会走到的地方。
+   `col-agent { width:auto }` 仍然让更窄的卡片（≤1200px，此时两块面板改为
+   堆叠）把余量还回去。 */
 table.tbl.tbl-agents th.col-agent, table.tbl.tbl-agents td.col-agent { width: 260px; }
 table.tbl.tbl-agents th.col-num, table.tbl.tbl-agents td.col-num { width: 56px; }
 table.tbl.tbl-recent { min-width: 440px; }
@@ -788,24 +742,22 @@ table.tbl th.col-owner, table.tbl td.col-owner,
 table.tbl th.col-name, table.tbl td.col-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 table.tbl tbody tr { cursor: pointer; }
 table.tbl tbody tr:hover { background: var(--row-hover); }
-/* Read-only inventory tables: rows are informational, so no pointer lie. */
+/* 只读清单表：行只承载信息，所以不用手型光标撒谎。 */
 table.tbl.static tbody tr { cursor: default; }
 table.tbl.static tbody tr:hover { background: transparent; }
 table.tbl tbody tr.inert { cursor: default; opacity: .75; }
 table.tbl tbody tr.inert:hover { background: transparent; }
 table.tbl tbody tr.sel { background: var(--accent-soft); }
 table.tbl tbody tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-/* Identity cells are the flexible ones, so their inner block ellipsizes. The
-   old rule left `.t-name` free to wrap, which under `table-layout: fixed`
-   meant a two-line row for a long skill name and a ragged table. */
+/* 标识列是弹性列，所以要让它们内部的块级元素来做省略。旧规则放任 `.t-name`
+   自由折行，在 `table-layout: fixed` 下就意味着一行变成两行高、表格参差不齐。 */
 table.tbl .t-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 table.tbl .t-mono { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .t-name { font-weight: 550; }
-/* Two lines, then clamp — one rule, not two. The declaration at the top of the
-   file used to be a one-line `nowrap` cut and was silently overridden by a
-   second `.t-desc` further down; the loser half stayed behind and read as if it
-   were in effect. `-webkit-line-clamp` needs `display: -webkit-box` and
-   `overflow: hidden`, both here. */
+/* 两行，然后截断 —— 一条规则，不是两条。文件顶部的那条声明原本是单行
+   `nowrap` 裁切，却被更靠下的一条 `.t-desc` 悄悄覆盖；落败的那一半留在原地，
+   读起来却像仍然生效。`-webkit-line-clamp` 需要 `display: -webkit-box` 和
+   `overflow: hidden`，两者都在这里。 */
 .t-desc {
   font-size: var(--fs-micro); color: var(--text-3); max-width: 380px;
   white-space: normal; display: -webkit-box; -webkit-line-clamp: 2;
@@ -813,9 +765,8 @@ table.tbl .t-mono { display: block; overflow: hidden; text-overflow: ellipsis; w
 }
 .t-mono { font-family: var(--mono); font-size: var(--fs-micro); color: var(--text-2); }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
-/* app.js marks the per-agent total column with `.strong` so it reads as the
-   summary row among the five kind counters. 600 weight, not 700: the counter
-   is already the largest number in the column. */
+/* app.js 用 `.strong` 标记每个 agent 的合计列，好让它在五个 kind 计数中间
+   读起来像小结行。字重 600 而不是 700：这个数字本来就已经是列里最大的数。 */
 .strong { font-weight: 600; }
 
 .chip {
@@ -835,7 +786,7 @@ table.tbl .t-mono { display: block; overflow: hidden; text-overflow: ellipsis; w
 
 .dot { width: 6px; height: 6px; border-radius: var(--r-pill); background: currentColor; display: inline-block; }
 
-/* agent cards */
+/* agent 卡片 */
 .agent-card {
   display: flex; gap: 11px; align-items: flex-start; padding: 12px 14px;
   border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface);
@@ -851,20 +802,20 @@ table.tbl .t-mono { display: block; overflow: hidden; text-overflow: ellipsis; w
 .mini { font-size: var(--fs-micro); color: var(--text-2); }
 .mini b { font-variant-numeric: tabular-nums; }
 
-/* bars */
+/* 条形图 */
 .bar { height: 6px; border-radius: var(--r-xs); background: var(--bar-bg); overflow: hidden; display: flex; }
 .bar span { display: block; height: 100%; }
 .legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px; font-size: var(--fs-micro); color: var(--text-2); }
 .legend i { width: 8px; height: 8px; border-radius: var(--r-xs); display: inline-block; margin-right: 5px; }
 .swatch { width: 8px; height: 8px; border-radius: var(--r-xs); display: inline-block; margin-right: 5px; }
 
-/* health rows */
+/* 健康检查行 */
 .issue {
   display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px;
   border: 1px solid var(--border); border-left-width: 3px; border-radius: var(--radius-sm);
   background: var(--surface);
-  /* Without min-width:0 a long issue list blows out the flex row and the
-     sibling cards get squeezed to a sliver. */
+  /* 没有 min-width:0 时，一长串问题会把这条 flex 行撑爆，旁边的卡片被挤成
+     一条细线。 */
   min-width: 0; flex: 1 1 0; width: 100%;
 }
 .issue.error { border-left-color: var(--red); }
@@ -873,7 +824,7 @@ table.tbl .t-mono { display: block; overflow: hidden; text-overflow: ellipsis; w
 .issue-title { font-weight: 560; font-size: var(--fs-small); }
 .issue-meta { font-size: var(--fs-micro); color: var(--text-3); margin-top: 2px; font-family: var(--mono); word-break: break-all; }
 
-/* timeline */
+/* 时间线 */
 .tl { position: relative; padding-left: 20px; }
 .tl::before { content: ''; position: absolute; left: 5px; top: 4px; bottom: 4px; width: 1px; background: var(--border); }
 .tl-item { position: relative; padding: 7px 0; }
@@ -890,7 +841,7 @@ table.tbl .t-mono { display: block; overflow: hidden; text-overflow: ellipsis; w
 .tl-time { margin-left: auto; font-size: var(--fs-micro); color: var(--text-3); font-variant-numeric: tabular-nums; }
 .tl-meta { font-size: var(--fs-micro); color: var(--text-3); font-family: var(--mono); margin-top: 2px; word-break: break-all; }
 
-/* ---------------- drawer ---------------- */
+/* ---------------- 抽屉 ---------------- */
 .drawer-scrim {
   position: fixed; inset: 0; background: rgba(16, 20, 28, .28);
   opacity: 0; pointer-events: none; transition: opacity .18s; z-index: 40;
@@ -911,11 +862,10 @@ table.tbl .t-mono { display: block; overflow: hidden; text-overflow: ellipsis; w
 .drawer-head .icon-btn { margin-left: auto; }
 .drawer-body { flex: 1; overflow-y: auto; padding: 16px; }
 
-/* 128px was a hard floor for the term column: an English label longer than
-   that ("Configuration file", "Encrypted at rest") either wrapped to two lines
-   or pushed the value column right, while short labels left a visible gutter.
-   `minmax(96px, max-content)` gives every row the term width it actually needs
-   up to a quarter of the drawer, and lets the value column take the rest. */
+/* 术语列原本硬性下限是 128px：比它更长的英文标签（“Configuration file”、
+   “Encrypted at rest”）要么折成两行，要么把值列往右推，而短标签又会留下一道
+   看得见的空档。`minmax(96px, max-content)` 让每一行得到它实际需要的术语宽度
+   （上限是抽屉的四分之一），剩下的交给值列。 */
 .kv {
   display: grid; grid-template-columns: minmax(96px, max-content) 1fr;
   gap: 8px 14px; font-size: var(--fs-small);
@@ -967,13 +917,13 @@ textarea.editor:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(-
 .alert.info { background: var(--accent-soft); border-color: var(--alert-info-border); color: var(--alert-info-text); }
 .alert.ok { background: var(--green-soft); border-color: var(--alert-ok-border); color: var(--alert-ok-text); }
 
-/* Retryable error panel (boot / scan / view failure — app.js errorPanel()).
-   The button is a plain .btn so it inherits focus ring, hover and disabled. */
+/* 可重试的错误面板（启动 / 扫描 / 视图失败 —— app.js errorPanel()）。
+   按钮就是普通的 .btn，所以它继承焦点环、悬停和禁用态。 */
 .alert-msg { line-height: 1.45; word-break: break-word; }
 .alert-hint { margin-top: 4px; color: var(--text-2); font-size: var(--fs-micro); }
 .alert-actions { margin-top: 8px; display: flex; gap: 8px; }
 
-/* ---------------- modal ---------------- */
+/* ---------------- 弹窗 ---------------- */
 .modal-scrim {
   position: fixed; inset: 0; background: rgba(16, 20, 28, .34);
   display: none; align-items: center; justify-content: center; z-index: 60; padding: 24px;
@@ -996,12 +946,12 @@ textarea.editor:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(-
   border-radius: 0 0 var(--r-md) var(--r-md);
 }
 
-/* ---------------- toasts ---------------- */
+/* ---------------- 轻提示 ---------------- */
 .toasts { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 80; display: flex; flex-direction: column; gap: 8px; align-items: center; }
 .toast {
   background: var(--toast-bg); color: var(--toast-text); padding: 9px 15px; border-radius: var(--r-sm); font-size: var(--fs-small);
-  /* A failed check toasts the raw GitHub message. With no width cap that ran
-     the whole width of the window; wrap it and cap it instead. */
+  /* 检查失败时会把 GitHub 的原始消息塞进轻提示。没有宽度上限时它会横跨整个
+     窗口；改成折行并加上限。 */
   max-width: min(560px, 92vw); white-space: normal; overflow-wrap: anywhere;
   box-shadow: var(--shadow-lg); display: flex; gap: 8px; align-items: center;
   animation: pop .18s ease-out;
@@ -1013,7 +963,7 @@ textarea.editor:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(-
 
 .empty { padding: 40px 20px; text-align: center; color: var(--text-3); font-size: var(--fs-small); }
 
-/* discover results */
+/* 发现结果 */
 .grow { flex: 1; min-width: 0; }
 .disc-hint { margin-top: 8px; font-size: var(--fs-small); max-width: 68ch; }
 .disc-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px 8px; border-bottom: 1px solid var(--border); }
@@ -1030,9 +980,8 @@ textarea.editor:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(-
 .spread { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .gap-sm { gap: 5px; }
 .pre-wrap { white-space: pre-wrap; }
-/* Target list in the write confirmation: one path per line. Wrapped in a
-   scroll box instead of letting a long list push the dialog buttons out of
-   reach — a delete can touch dozens of files. */
+/* 写入确认里的目标清单：一行一个路径。把它套进滚动盒，而不是让一长串路径
+   把对话框按钮顶到够不着的地方 —— 一次删除可能涉及几十个文件。 */
 .write-targets {
   margin: 10px 0 0; padding: 8px 10px 8px 24px; list-style: disc;
   max-height: 190px; overflow: auto;
@@ -1040,12 +989,10 @@ textarea.editor:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(-
   line-height: 1.5; word-break: break-all;
 }
 .write-targets li { margin: 1px 0; }
-/* Paths that could not be restored (reportWriteFailure). Same scroll-box
-   treatment as the write confirmation: a failed transaction across a
-   distributed skill can touch many paths, and an unbounded list would push the
-   dialog's Close button out of reach. `list-style:none` — these are entries to
-   inspect, not an enumeration to count, and the bullets read as decoration
-   next to a full filesystem path. */
+/* 无法恢复的路径（reportWriteFailure）。与写入确认同样的滚动盒处理：一次
+   跨多个位置的技能分发失败会涉及很多路径，不加上限的列表会把对话框的关闭按钮
+   顶到够不着的地方。`list-style:none` —— 这些是待查看的条目，不是要清点的
+   枚举，项目符号挨着一整条文件系统路径读起来只是装饰。 */
 .restore-list {
   margin: 0 0 12px; padding: 8px 10px; list-style: none;
   max-height: 200px; overflow: auto;
@@ -1058,8 +1005,8 @@ code.inline {
   padding: 1px 5px; border-radius: var(--r-xs); color: var(--text-2);
 }
 
-/* ---- utility classes (kept here rather than as inline style attributes so
-   the renderer can keep a strict `style-src 'self'` CSP) ---- */
+/* ---- 工具类（放在这里而不是写成行内 style 属性，好让渲染进程继续保持严格的
+   `style-src 'self'` CSP） ---- */
 .flex-1 { flex: 1; }
 .flex-1-min { flex: 1; min-width: 0; }
 .mb-8 { margin-bottom: 8px; }
@@ -1099,13 +1046,12 @@ code.inline {
   max-height: 260px; overflow: auto; border: 1px solid var(--border);
   border-radius: var(--r-sm); padding: 8px;
 }
-/* Counter line, "2 次扫描 · 0 次应用 · …".
+/* 计数行，“2 次扫描 · 0 次应用 · …”。
  *
- * The settings card is narrow, so this needs to wrap — but it has to wrap
- * BETWEEN counters, never inside one: plain inline text split "0 次失败" into
- * "0" and "次失败", and `white-space: nowrap` alone made the units overflow
- * the card. A wrapping flex row of nowrap items is the combination that holds:
- * each counter stays whole, the row still breaks into as many lines as needed. */
+ * 设置卡片很窄，所以这里必须折行 —— 但只能在计数器**之间**折，绝不能在
+ * 计数器内部折：纯行内文字把“0 次失败”拆成“0”和“次失败”，而只加
+ * `white-space: nowrap` 又让单位溢出卡片。可折行的 flex 行 + 不可折行的
+ * 子项，才是成立的那个组合：每个计数器保持完整，整行仍然按需断成多行。 */
 .stats-value-right {
   max-width: 320px; display: flex; flex-wrap: wrap; justify-content: flex-end;
   gap: 2px 10px;
@@ -1114,7 +1060,7 @@ code.inline {
 .input-inline.wide { width: 320px; max-width: 45vw; font-family: var(--mono); }
 .git-status { font-size: var(--fs-micro); margin-top: 6px; }
 
-/* ---- batch selection bar ---- */
+/* ---- 批量选择栏 ---- */
 .batchbar {
   position: sticky; bottom: 0; z-index: 5;
   display: flex; align-items: center; gap: 10px;
@@ -1123,7 +1069,7 @@ code.inline {
 }
 .batchbar .count { font-size: var(--fs-small); font-weight: 600; }
 
-/* ---- context menu ---- */
+/* ---- 右键菜单 ---- */
 .ctxmenu {
   position: fixed; z-index: 90; min-width: 168px;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-sm);
@@ -1139,12 +1085,12 @@ code.inline {
 .ctxmenu button.danger { color: var(--red); }
 .ctxmenu hr { border: 0; border-top: 1px solid var(--border); margin: 4px 6px; }
 
-/* ---- pager ---- */
+/* ---- 分页器 ---- */
 .pager { display: flex; align-items: center; gap: 10px; justify-content: flex-end; padding: 10px 14px; }
 .pager .info { font-size: var(--fs-micro); color: var(--text-3); font-variant-numeric: tabular-nums; }
 .pager button { min-width: 30px; }
 
-/* ---- update banner ---- */
+/* ---- 更新横幅 ---- */
 .update-banner {
   display: flex; align-items: center; gap: 10px;
   padding: 8px 22px; font-size: var(--fs-small);
@@ -1154,7 +1100,7 @@ code.inline {
 .update-banner.hidden { display: none; }
 .update-banner a { color: inherit; }
 
-/* ---- matrix view ---- */
+/* ---- 矩阵视图 ---- */
 table.matrix td.yes { color: var(--green); font-weight: 700; }
 table.matrix td.no { color: var(--text-3); }
 table.matrix th.rot {
@@ -1164,16 +1110,16 @@ table.matrix th.rot > div {
   transform: rotate(-58deg); transform-origin: bottom left;
   width: 22px; margin-left: auto; margin-bottom: 6px;
 }
-/* ---------- interaction polish ----------
-   Every clickable gets one short eased transition; hover lifts; press sinks;
-   keyboard focus gets a visible ring. All colours via vars — theme-safe. */
+/* ---------- 交互打磨 ----------
+   每个可点击元素都有一条短促的缓动过渡；悬停抬起；按下下沉；
+   键盘焦点有可见的焦点环。所有颜色都走变量 —— 对主题安全。 */
 .btn, .nav-item, .icon-btn, .chip, .switch, input[type="text"],
 input[type="search"], input[type="password"], select, textarea {
   transition: background .13s ease, border-color .13s ease, color .13s ease,
     box-shadow .13s ease, transform .09s ease, opacity .13s ease;
 }
 
-/* buttons: hover lifts with shadow, press sinks — unmistakable feedback */
+/* 按钮：悬停带阴影抬起，按下下沉 —— 反馈明确不会认错 */
 .btn:hover { transform: translateY(-1px); box-shadow: var(--shadow-md); }
 .btn:active { transform: translateY(0) scale(.985); box-shadow: var(--shadow-sm); }
 .btn:focus-visible, .icon-btn:focus-visible {
@@ -1182,24 +1128,24 @@ input[type="search"], input[type="password"], select, textarea {
 .btn.primary:hover { border-color: var(--btn-primary-hover); }
 .btn.danger:hover { border-color: var(--btn-danger-hover); }
 
-/* nav: hover slides the icon slightly and fades it in */
+/* 导航：悬停时图标轻微滑动并淡入 */
 .nav-item:hover .nav-ico { opacity: 1; transform: translateX(1px); }
 .nav-ico { transition: opacity .13s ease, transform .13s ease; }
 .nav-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
-/* text inputs: focus gets an accent border so the field you are in is obvious */
+/* 文本输入：聚焦时给强调色边框，让当前所在的字段一眼可见 */
 input:focus, select:focus, textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
 }
 
-/* discover rows: hover tints the whole row */
+/* 发现行：悬停时整行上色 */
 .disc-row { border-radius: var(--r-sm); }
 .disc-row:hover { background: var(--surface-2); }
 .disc-row .btn { opacity: .82; }
 .disc-row:hover .btn { opacity: 1; }
 
-/* scan-in-flight feedback (spinner + skeleton) */
+/* 扫描进行中的反馈（转圈 + 骨架屏） */
 @keyframes ak-spin { to { transform: rotate(360deg); } }
 .spinner {
   display: inline-block; width: 14px; height: 14px; flex: none;
@@ -1221,7 +1167,7 @@ input:focus, select:focus, textarea:focus {
 .skeleton.s3 { width: 84%; }
 .skeleton.s1, .skeleton.s2, .skeleton.s3 { height: 14px; margin: 14px 0; }
 
-/* scan progress strip under the banner */
+/* 横幅下方的扫描进度条 */
 .scanbar {
   position: relative; display: flex; align-items: center; gap: 10px;
   padding: 8px 22px 10px; font-size: var(--fs-small); font-weight: 500; color: var(--text-2);
@@ -1230,7 +1176,7 @@ input:focus, select:focus, textarea:focus {
   animation: ak-fade-in .18s ease;
 }
 .scanbar.hidden { display: none; }
-/* indeterminate progress strip hugging the bottom edge */
+/* 贴着底边的不确定进度条 */
 .scan-track { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; overflow: hidden; background: transparent; }
 .scan-fill {
   position: absolute; top: 0; bottom: 0; width: 32%; border-radius: var(--r-xs);
@@ -1240,27 +1186,25 @@ input:focus, select:focus, textarea:focus {
 @keyframes ak-scan-sweep { 0% { left: -32%; } 100% { left: 100%; } }
 @keyframes ak-fade-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 
-/* ---------- anti-clipping ----------
-   Flex children need min-width:0 to shrink; long names ellipsize
-   instead of pushing buttons out of their headers. */
+/* ---------- 防裁切 ----------
+   flex 子元素需要 min-width:0 才会收缩；长名字走省略号，
+   而不是把按钮挤出自己的表头。 */
 .set-control { max-width: 62%; }
 .set-control > * { max-width: 100%; }
 .input-inline.wide { width: min(320px, 100%); }
 
-/* ---- type hierarchy and rhythm ----
-   Applied without moving the theme:
-   · `.card-head .sub` is a caption, not a heading: `--fs-micro` at
-     `--text-3` sits four levels below the `--fs-title` page title and two
-     below the `--fs-body` card title. Both keep their measured ratios
-     (5.01:1 and 4.83:1 in light, 6.42:1 in dark on --text-3), so the
-     auxiliary contrast floor is unchanged.
-   · `.card-head h2` no longer wraps into a second line: a long card title
-     ellipsizes instead, which keeps every head one 48px row and stops the
-     body below it from stepping down the card. */
+/* ---- 字号层级与节奏 ----
+   在不改动主题的前提下应用：
+   · `.card-head .sub` 是说明文字，不是标题：`--fs-micro` 配 `--text-3`，
+     比 `--fs-title` 的页面标题低四级、比 `--fs-body` 的卡片标题低两级。
+     两者都保持自己实测的对比度（浅色下 5.01:1 和 4.83:1，深色下
+     --text-3 为 6.42:1），所以辅助文字的对比度下限没有变化。
+   · `.card-head h2` 不再折成第二行：长卡片标题改为省略号收尾，这让每个
+     卡片头都保持一行 48px，也让它下面的主体不会把卡片顶高。 */
 .card-head h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* `white-space: normal` (from the `.sub` rule above) means this text wraps and
-   is never ellipsized — a `text-overflow` here would be dead and misleading:
-   measured in the running app at 900px, no `.card-head .sub` clipped. */
+/* `white-space: normal`（来自上面那条 `.sub` 规则）意味着这段文字会折行、永远
+   不会被省略 —— 在这里写 `text-overflow` 是死代码而且误导：在运行中的应用里按
+   900px 实测，没有任何一个 `.card-head .sub` 被裁切。 */
 .card-head .sub { min-width: 0; overflow: hidden; }
 
 .topbar-title { min-width: 0; }
@@ -1274,21 +1218,20 @@ input:focus, select:focus, textarea:focus {
   -webkit-box-orient: vertical; line-height: 1.45;
 }
 
-/* wide tables scroll horizontally inside their card instead of being cut.
-   A filling card is its own flex column, so the scroll box has to be
-   `.card-scroll` inside it — see the fill-the-view block above. */
+/* 宽表格在自己卡片内部横向滚动，而不是被切掉。
+   铺满的卡片本身就是一个 flex 列，所以滚动盒只能是它内部的
+   `.card-scroll` —— 见上面的铺满视图块。 */
 .card { overflow-x: auto; }
 #drawer-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* ---- table rhythm ----
-   One height for every row in every table: the 9px vertical padding plus the
-   13px body line box is ~33px per row, and `tabular-nums` on `.num` keeps the
-   digit columns aligned while the label column scrolls. The last row loses its
-   border so a table does not end on a line of its own under the card edge. */
+/* ---- 表格节奏 ----
+   所有表格的每一行用同一个高度：9px 纵向内边距加上 13px 正文行盒，每行约
+   33px；`.num` 上的 `tabular-nums` 让数字列对齐，同时标签列照常滚动。最后
+   一行去掉边框，这样表格不会在卡片边缘下多出一条自己的线。 */
 table.tbl tbody tr:last-child td { border-bottom: 0; }
 table.tbl.static tbody tr:last-child td { border-bottom: 0; }
 
-/* structural skeleton: shaped like the dashboard (stat cards + list rows) */
+/* 结构骨架屏：形状照着仪表盘来（统计卡片 + 列表行） */
 .skl-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 14px; }
 .skl-stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
 .skl-stat .skeleton { margin: 8px 0; }
@@ -1301,39 +1244,36 @@ table.tbl.static tbody tr:last-child td { border-bottom: 0; }
 .skl-lines .skeleton { margin: 5px 0; height: 10px; }
 @keyframes ak-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
 
-/* ---- software updates ---------------------------------------------- */
-/* Version comparison: current → latest, with the check button on the right.
-   Values come from the main process; nothing here hardcodes a colour.
-   `.spacer` inside the row is what pushes the button right; give it a flex
-   basis of 0 so the two version cells stay adjacent to the arrow instead of
-   each claiming a third of the card. */
+/* ---- 软件更新 ---------------------------------------------- */
+/* 版本对比：当前 → 最新，右侧是检查按钮。取值来自主进程；这里没有任何地方
+   硬编码颜色。行内的 `.spacer` 才是把按钮推到右边的东西；给它 0 的 flex
+   基准，好让两个版本单元格紧挨着箭头，而不是各自占掉卡片的三分之一。 */
 .upd-version { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; }
 .upd-version .spacer { margin-left: auto; flex: 1 1 0; min-width: 0; }
 .upd-version-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .upd-version-num { font-size: var(--fs-title); font-weight: 600; letter-spacing: .2px; }
 .upd-version-num.is-new { color: var(--accent); }
 .upd-arrow { color: var(--text-3); padding-bottom: 5px; }
-/* The update source: GitHub mark + owner/repo, one clickable control. It sits in
-   a `.set-control` cell, which is right-aligned on wide rows — the gap is what
-   keeps the mark from touching the owner text. */
+/* 更新源：GitHub 标志 + owner/repo，一个可点击控件。它坐在 `.set-control`
+   单元格里，而后者在宽行上是右对齐的 —— 这段间距正是让标志不会贴住
+   owner 文字的东西。 */
 .upd-source { display: inline-flex; align-items: center; gap: 6px; padding-left: 8px; padding-right: 10px; }
 .upd-source-mark { flex: none; display: block; }
 .upd-progress-line { margin-top: 10px; }
 .upd-progress-track { height: 6px; border-radius: var(--r-pill); background: var(--bar-bg); overflow: hidden; margin-top: 6px; }
 .upd-progress-fill { height: 100%; background: var(--accent); transition: width .25s ease; }
 .upd-ready { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-/* ---- update panel ----
-   `.upd-head-actions` is the button pair in the card head. It carries its own
-   right margin instead of relying on `.spacer`, so a card head that has no
-   `.spacer` sibling still puts the actions at the far edge. */
+/* ---- 更新面板 ----
+   `.upd-head-actions` 是卡片头里的那一对按钮。它自己带右外边距，而不是依赖
+   `.spacer`，所以一个没有 `.spacer` 兄弟节点的卡片头仍然能把操作区放到
+   最边上。 */
 .upd-head-actions {
   margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
 }
 .upd-changelog { display: flex; flex-direction: column; gap: 8px; }
-/* One release row, stacked: the version header on top, its notes underneath.
-   It used to be a single flex line, which put the notes BESIDE the header — a
-   wide release body squeezed into the right half while the header floated with
-   the rest of the row empty. */
+/* 一条发布记录，纵向堆叠：版本标题在上，它的说明在下。原先它是单行 flex，
+   于是说明被放到了标题**旁边** —— 一大段发布说明被挤进右半边，而标题独自
+   浮着，行里其余部分是空的。 */
 .upd-log-item {
   display: flex; flex-direction: column; align-items: stretch; gap: 8px;
   padding: 10px 12px; border: 1px solid var(--border);
@@ -1344,10 +1284,10 @@ table.tbl.static tbody tr:last-child td { border-bottom: 0; }
 .upd-log-main { flex: 1 1 180px; min-width: 0; }
 .upd-log-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .upd-log-ver { font-family: var(--mono); font-size: var(--fs-small); font-weight: 600; }
-/* The version label is the row's only link. It is underlined on hover/focus
-   (and dotted at rest is too noisy here) so it does not read as inert text,
-   and it keeps a visible focus ring: `role="link"` on a <span> is not
-   focusable for a keyboard user without tabindex, which app.js sets. */
+/* 版本号是这一行唯一的链接。它在 hover/focus 时加下划线（静止时就点线在这
+   太吵），这样它不会被读成无交互的文字，同时保留可见的焦点环：一个 <span> 上
+   的 `role="link"` 如果没有 tabindex，对键盘用户是不可聚焦的 —— tabindex 由
+   app.js 设置。 */
 .upd-log-ver.clickable { cursor: pointer; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px; }
 .upd-log-ver.clickable:hover { color: var(--accent); text-decoration-style: solid; }
 .upd-log-ver.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-xs); }
@@ -1365,59 +1305,56 @@ table.tbl.static tbody tr:last-child td { border-bottom: 0; }
 .mt-8 { margin-top: 8px; }
 .mt-14 { margin-top: 14px; }
 
-/* Height variants for textarea.editor.
+/* textarea.editor 的高度变体。
  *
- * These MUST be written as `textarea.editor.editor-x`: the base rule is
- * `textarea.editor { min-height: 300px }` (specificity 0,1,1), so a bare
- * `.editor-short { min-height: 76px }` (0,1,0) never wins. That is not a
- * theoretical concern — the MCP form asked for 76px boxes and silently got
- * 300px ones, which pushed the env field and the advanced JSON below the fold
- * of a scrollable modal. */
+ * 这些**必须**写成 `textarea.editor.editor-x`：基础规则是
+ * `textarea.editor { min-height: 300px }`（特指度 0,1,1），所以裸写
+ * `.editor-short { min-height: 76px }`（0,1,0）永远不会胜出。这不是理论上的
+ * 顾虑 —— MCP 表单要的是 76px 的框，实际悄悄拿到 300px，把 env 字段和高级
+ * JSON 顶到了可滚动弹窗的折线以下。 */
 textarea.editor.editor-short { min-height: 76px; font-family: var(--mono); font-size: var(--fs-micro); }
 textarea.editor.editor-tall { min-height: 200px; }
 textarea.editor.editor-taller { min-height: 230px; }
 input[readonly] { background: var(--surface-2); color: var(--text-2); cursor: default; }
 details > summary { cursor: pointer; user-select: none; }
 
-/* ================= responsive =================
- * The window declares a 1120×720 minimum in Rust (lib.rs), but a window can be
- * snapped to a half-screen tile narrower than that, and nothing in this sheet
- * may assume 1120px. Two breakpoints, each a complete answer on its own:
- *   900px — tablet: narrower rail, two-column stats, wrapping toolbar
- *   600px — narrow: icon rail only, one column, full-bleed overlays
- * Nothing here changes colour; every value still comes from the tokens. */
+/* ================= 响应式 =================
+ * 窗口在 Rust 里（lib.rs）声明了 1120×720 的最小尺寸，但窗口可以被吸附成比这
+ * 更窄的半个屏幕磁贴，所以本样式表里任何地方都不许假设有 1120px。两个断点，
+ * 每一个都自成完整答案：
+ *   900px —— 平板：更窄的侧栏、两列统计、折行的工具栏
+ *   600px —— 窄屏：只剩图标栏、单列、铺满视口的浮层
+ * 这里不改变任何颜色；每个取值仍然来自 token。 */
 
-/* Narrow-window fallback. The two dashboard panels stack at EVERY width (see
-   `.row-fill.col` above — side by side they clipped the agent table's own
-   Agent column to 68px), so this block is about the other half of the filling layout: below
-   1200px a filling layout stops paying. A 720px-tall window asked to divide
-   its height between two tables gets ~330px of body each, and the recent
-   panel — the shorter of the two — scrolls a 3-row list inside a 330px box.
-   From there the panels take their natural height and the view scrolls as a
-   whole, which is what the user expects from a window they shrank. */
+/* 窄窗回退。两块仪表盘面板在**任何**宽度下都是纵向堆叠（见上面的
+   `.row-fill.col` —— 并排时它们会把 agent 表自己的 Agent 列裁到 68px），
+   所以这一块讲的是铺满布局的另一半：低于 1200px，铺满布局开始不划算。
+   一个 720px 高的窗口要把高度分给两张表，每张只有约 330px 的主体，而
+   recent 面板 —— 两者中较短的那个 —— 要在 330px 的盒子里滚动一个只有 3 行的
+   列表。从这个宽度起，面板按自身内容定高，视图整体滚动，这也正是用户把窗口
+   缩小之后期待的行为。 */
 @media (max-width: 1200px) {
   .view-fill { height: auto; min-height: 0; display: block; }
   .card-fill { display: block; overflow-x: auto; }
   .card-scroll { overflow-x: auto; overflow-y: visible; }
   .skl-panel { display: block; overflow: visible; }
-  /* `flex: 1 1 0` distributes a *fixed* height. With `.view-fill` back to
-     `height:auto` there is no fixed height to distribute, so the two panels
-     were handed 0px each and collapsed to a 2px border (measured at 1120 /
-     900 / 600). Back to content height here; the view scrolls as a whole. */
+  /* `flex: 1 1 0` 分的是*固定*高度。`.view-fill` 改回 `height:auto` 之后就没有
+     固定高度可分了，于是两块面板各分到 0px、塌成 2px 的边框（在 1120 / 900 /
+     600 实测）。这里改回内容高度；视图整体滚动。 */
   .row-fill.col > .flex-1-min { flex: 0 0 auto; display: block; }
 }
 
 @media (max-width: 900px) {
   .app { grid-template-columns: 208px 1fr; }
   .app.collapsed { grid-template-columns: 60px 1fr; }
-  /* The toolbar must wrap into rows instead of overflowing the viewport. */
+  /* 工具栏必须折成多行，而不是溢出视口。 */
   .topbar { flex-wrap: wrap; row-gap: 10px; padding: 12px 16px; }
   .topbar-actions { margin-left: 0; flex-wrap: wrap; }
   .topbar-title { flex: 1 1 auto; }
   .search-wrap { flex: 1 1 100%; }
   .grid-4, .grid-3 { grid-template-columns: repeat(2, 1fr); }
   .skl-stats { grid-template-columns: repeat(2, 1fr); }
-  /* Two side-by-side cards need ~2×300px; below that they stack. */
+  /* 两张并排卡片需要约 2×300px；低于这个宽度就改为堆叠。 */
   .row { flex-direction: column; }
   .view { padding: 16px 16px 32px; }
   .drawer { width: 460px; }
@@ -1425,17 +1362,16 @@ details > summary { cursor: pointer; user-select: none; }
 }
 
 @media (max-width: 600px) {
-  /* Forced rail: at 600px a 60px icon column plus a usable content column is
-     the only split that fits, so the toggle's expanded state is overridden. */
+  /* 强制图标栏：在 600px 下，60px 的图标列加上一个可用的内容列是唯一放得下的
+     切分，所以折叠开关的展开状态在这里被覆盖。 */
   .app, .app.collapsed { grid-template-columns: 56px 1fr; }
   .brand-text, .nav-text, .nav-badge { display: none; }
   .brand, .nav-item { justify-content: center; }
-  /* Rail width (56px) is smaller than the brand row's content: 32px tile +
-     10px gap + 26px collapse toggle + 12px padding = 80px. A centred row that
-     overflows spills in BOTH directions, so the AK tile landed at left:-12px
-     and lost its left half (measured on the real build at 420/600px:
-     getBoundingClientRect().left < 0). Stacking the tile above the toggle
-     keeps both inside the rail at every width. */
+  /* 轨道宽度（56px）小于品牌行的内容：32px 色块 + 10px 间距 + 26px 折叠开关
+     + 12px 内边距 = 80px。一个溢出的居中行会向**两侧**溢出，于是 AK 色块落到
+     left:-12px，丢掉了左半边（在真实构建上按 420/600px 实测：
+     getBoundingClientRect().left < 0）。把色块叠到开关上方，两个在任何宽度下
+     都留在轨道之内。 */
   .brand { padding: 14px 0 10px; flex-direction: column; gap: 8px; }
   .side-toggle { margin-left: 0; }
   .nav-item { padding: 8px 0; }
@@ -1449,8 +1385,8 @@ details > summary { cursor: pointer; user-select: none; }
   .view { padding: 12px 12px 28px; }
   .set-control { max-width: 100%; justify-content: flex-start; }
   .set-row { flex-wrap: wrap; }
-  /* Overlays take the whole viewport: a 460px drawer under a 600px window
-     leaves a 140px dead strip the user cannot see behind. */
+  /* 浮层占满整个视口：600px 窗口下一条 460px 的抽屉会留下 140px 的死条，
+     用户看不穿它后面。 */
   .drawer { width: 100vw; max-width: 100vw; }
   .modal-scrim { padding: 10px; }
   .modal { max-height: 92vh; }
@@ -1462,9 +1398,9 @@ details > summary { cursor: pointer; user-select: none; }
   .upd-head-actions, .upd-log-actions { margin-left: 0; }
 }
 
-/* Respect the OS motion preference. Every animation in this sheet is
-   decorative (shimmer, pulse, slide, hover lift), so removing them changes no
-   information — it only removes movement for readers who asked for none. */
+/* 尊重操作系统的动效偏好。本样式表里的每一个动画都是装饰性的（微光、脉冲、
+   滑动、悬停抬起），去掉它们不会丢失任何信息 —— 只是为那些要求不要动效的
+   读者去掉运动。 */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: .001ms !important;

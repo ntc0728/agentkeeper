@@ -116,7 +116,7 @@ mod tests {
     //!
     //! 这里的一切都是生成的：请在
     //!
-    //!     npm run tauri:adapters      （scripts/gen-adapters-snapshots.js）
+    //!     npm run tauri:adapters      （scripts/gen-adapters-snapshots.js）   ← 生成快照的命令
     //!
     //! 之后、即每次改动 scripts/adapter-table.js 之后重跑。下面那两个 JSON
     //! 常量就是那个脚本的输出——把 os.homedir() 设成 FAKE_HOME 求值后的
@@ -379,17 +379,45 @@ mod tests {
 `;
 
 let src = fs.readFileSync(ADAPTERS_RS, 'utf8');
-// 在第一个生成块处截断，不管行尾是哪种：
-// 文件可能是 CRLF，而一个用 LF 拼写的标记就匹配不上它——
-// 于是 `indexOf` 返回 -1，`slice(0, -1)` 保留了全部内容，
-// 生成器就会在每次运行时都追加一份该块的副本。
-const marker = /\r?\n#\[cfg\(test\)\]\r?\nmod tests \{/;
-const m = marker.exec(src);
-if (m) {
-  src = src.slice(0, m.index);
+
+// 只替换两份快照常量，**不动**文件里的其他内容。
+//
+// 早先的写法是在 `#[cfg(test)] mod tests {` 处截断、再把整段生成代码追加回去。
+// 那样一来 `mod tests` 里手写的断言会被整段删掉——它们不在生成器的模板里。
+// 实测重跑旧版本会让 adapters.rs 少掉 84 行手写测试，所以改成定点替换：
+// 常量在文件里就换掉它的值，只有常量不存在时才退回到整体重建。
+const constPattern = (name) =>
+  new RegExp('(const ' + name + ': &str = r##")[\\s\\S]*?("##;)', 'm');
+
+function replaceConst(text, name, value) {
+  const re = constPattern(name);
+  if (!re.test(text)) return null;
+  return text.replace(re, '$1' + value + '$2');
 }
-src = src.replace(/\s+$/, '') + '\n' + rust;
-fs.writeFileSync(ADAPTERS_RS, src);
+
+const withTable = replaceConst(src, 'DECLARED_TABLE_JSON', tableJson);
+const withBoth = withTable === null
+  ? null
+  : replaceConst(withTable, 'RESOLVED_PATHS_JSON', resolvedJson);
+
+if (withBoth !== null) {
+  if (withBoth === src) {
+    console.log('[adapters] 快照常量已是最新');
+  } else {
+    fs.writeFileSync(ADAPTERS_RS, withBoth);
+    console.log('[adapters] 快照常量已更新');
+  }
+} else {
+  // 常量不在文件里（首次生成，或文件被裁剪过）——只有这种情况才整体重建测试块。
+  const marker = /\r?\n#\[cfg\(test\)\]\r?\nmod tests \{/;
+  const m = marker.exec(src);
+  if (!m) {
+    console.error('[adapters] 找不到快照常量，也不认识 mod tests 结构；中止，未写入任何文件');
+    process.exit(1);
+  }
+  fs.writeFileSync(ADAPTERS_RS, src.slice(0, m.index).replace(/\s+$/, '') + '\n' + rust);
+  console.log('[adapters] 已重建测试块');
+}
 
 const templates = Object.values(resolved).reduce(
   (n, v) => n + Object.keys(v.globalPaths).length + Object.keys(v.projectPaths).length,

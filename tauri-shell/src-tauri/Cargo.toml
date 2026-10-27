@@ -3,17 +3,16 @@ name = "agentkeeper-shell"
 version = "0.2.3"
 description = "AgentKeeper desktop shell (Tauri 2)"
 authors = ["AgentKeeper"]
+license = "MIT"
 edition = "2021"
 rust-version = "1.77"
-# The GUI binary — the ONLY binary in this crate. `cargo tauri build` refuses to
-# guess which of a crate's binaries is the app, and picking wrong silently
-# ships a CLI instead of the shell.
+# GUI 二进制 —— 这个 crate 里**唯一**的二进制。`cargo tauri build` 不会去猜哪个
+# 二进制才是应用，猜错就会把命令行工具当成外壳发出去。
 #
-# The other two binaries (`agentkeeper-mcp`, `ak-scan`) live in the
-# `agentkeeper-core` crate, which has no Tauri dependency. Keeping them here
-# would mean one crate, one dependency graph, one fat-LTO pass per binary:
-# the two headless CLIs would link a WebView stack they never call, and each
-# of them would pay a full cross-crate optimisation the GUI alone needs.
+# 另外两个二进制（`agentkeeper-mcp`、`ak-scan`）在 `agentkeeper-core` 里，那个
+# crate 不依赖 Tauri。把它们留在这里意味着一份依赖图、每个二进制各跑一遍 fat LTO：
+# 两个无界面工具会链接一个它们从不调用的 WebView 栈，还要各自承担只有 GUI 才需要的
+# 跨 crate 优化。
 default-run = "agentkeeper-shell"
 
 [lib]
@@ -27,19 +26,15 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
-# The asset core: scanning, validation, the store, the MCP server. It has no
-# Tauri dependency, so the headless binaries built from it stay small and link
-# fast. `lib.rs` re-exports it as `pub mod core`, so `core::…` paths — and the
-# integration tests' `agentkeeper_shell_lib::core::…` — read exactly as before.
+# 资产内核：扫描、校验、存储、MCP 服务。它不依赖 Tauri，所以由它构建的无界面
+# 二进制小而链接快。`lib.rs` 以 `pub mod core` 再导出它，因此 `core::…` 这类路径 ——
+# 以及集成测试里的 `agentkeeper_shell_lib::core::…` —— 读起来与以前完全一致。
 agentkeeper-core = { path = "../core" }
-# The shell itself only serialises command payloads. Everything else — the
-# scanner, the store, the YAML/TOML frontmatter, the HTTP client, DPAPI — is
-# the core's business, and the core owns those dependencies.
+# 外壳本身只负责命令载荷的序列化。其余全部 —— 扫描器、存储、YAML/TOML
+# frontmatter、HTTP 客户端、DPAPI —— 都是内核的事，依赖也由内核自己持有。
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 
-# The release / dev / test profiles live in the workspace root
-# (`tauri-shell/Cargo.toml`). A `[profile.*]` table only applies to the
-# package that declares it, so keeping them here would have left the core
-# crate's binaries on cargo's defaults — unoptimised and unstripped, shipped
-# 50% larger.
+# release / dev / test 三个 profile 放在工作区根（`tauri-shell/Cargo.toml`）。
+# `[profile.*]` 只对声明它的那份清单生效，写在这里会让 core 的二进制回到 cargo
+# 默认值 —— 不优化、不 strip，发出去的文件大 50%。

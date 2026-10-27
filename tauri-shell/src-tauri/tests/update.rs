@@ -29,7 +29,7 @@
 //!   断言的部分：Tauri 的参数→形参映射（也就是 `{token:null}`
 //!   能否完整抵达 `Request` —— `tauri::ipc::InvokeMessage` 的字段是
 //!   `pub(crate)`，所以集成测试造不出一个）以及渲染器那一半
-//!   （`app.js`）。
+//!   （`app.js` 那一侧）。
 //! * version semantics —— 版本辅助函数与固定
 //!   期望值的对比。`version.rs` 的单元测试
 //!   和上面的流水线已经证明了版本运算的*语义* ——
@@ -1715,7 +1715,7 @@ fn clearing_the_token_empties_it_in_the_status_and_in_settings_json() {
         .unwrap_or("")
         .starts_with("enc1:"));
 
-    // `app.js:1802` → `{token:null}` → `None`。
+    // 对应 `app.js:1802` 的那条路径：`{token:null}` → `None`（即清除）。
     let cleared = manager.set_token(None).expect("clear");
     assert_eq!(cleared["token"]["filled"], json!(false), "{}", cleared);
     assert_eq!(cleared["token"]["origin"], json!(null), "{}", cleared);
@@ -1784,7 +1784,7 @@ fn the_clear_button_payload_clears_and_a_bare_body_is_refused() {
 
 /// `#[tauri::command]` 实际上交给一个声明为 `Option<Value>` 的参数的东西。
 ///
-/// `CommandItem::deserialize_option`（`tauri-2.12.4/src/ipc/command.rs:146-157`）
+/// 具体看 `CommandItem::deserialize_option`（`tauri-2.12.4/src/ipc/command.rs:146-157`）
 /// 在请求体里查 `key`：缺席 → `visit_none()`，在场 → 委派给
 /// 那个值，而 `Value::deserialize_option` 也把 `Null` 映射成 `visit_none()`。
 /// 这里镜像它是因为 `InvokeMessage` 的字段是 `pub(crate)`，所以真正的

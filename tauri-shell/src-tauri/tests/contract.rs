@@ -1071,7 +1071,7 @@ fn asset_file_lists_are_capped_at_500() {
     }
 
     // 证明截断确实来自上限而不是夹具太小：磁盘上真的有 511 个文件
-    //（SKILL.md + f0..f509）。
+    //（一个 SKILL.md 加上 f0 到 f509 共 510 个）。
     let on_disk = std::fs::read_dir(&skill)
         .expect("skill dir")
         .filter(|e| e.as_ref().map(|x| x.path().is_file()).unwrap_or(false))

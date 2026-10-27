@@ -1,7 +1,8 @@
 // Tauri 构建脚本。
 //
 // `tauri_build::build()` 会把 `bundle.externalBin` 中声明的 sidecar
-// 复制到编译产物旁边，一旦其中有缺失就会直接构建失败：
+// 复制到编译产物旁边，一旦其中有缺失就会直接构建失败，报的是 Tauri 那句原文
+//（引号里是找不到的那个资源路径，意为"资源路径不存在"）：
 //
 //   resource path `binaries\agentkeeper-mcp-x86_64-pc-windows-msvc.exe` doesn't exist
 //

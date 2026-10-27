@@ -515,7 +515,7 @@ mod tests {
     //!
     //! 这里的一切都是生成的：跑
     //!
-    //!     npm run tauri:adapters      (scripts/gen-adapters-snapshots.js)   ← 生成快照的命令
+    //!     npm run tauri:adapters      （scripts/gen-adapters-snapshots.js）   ← 生成快照的命令
     //!
     //! 只要改过 scripts/adapter-table.js 就要重新生成。下面那两个 JSON 常量
     //! 就是该脚本的输出——用 os.homedir() 设为 FAKE_HOME 之后求值得到的适配器

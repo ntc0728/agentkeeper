@@ -1,24 +1,23 @@
-//! The MCP tool server, both in-process and as a real child process.
+//! MCP 工具服务器：既覆盖进程内调用，也覆盖真实子进程。
 //!
-//! * protocol — the JSON-RPC contract and the tool envelope. `core::mcp::dispatch`
-//!   is public and takes no `AppHandle`, so these run against a real keeper over
-//!   a temp store: no network, no stdio loop.
-//! * stdio — the same server **as a process**: real
-//!   stdin/stdout, real JSON-RPC 2.0. Calling `dispatch` in-process cannot catch
-//!   the failures that only exist once the server is a child process of an agent:
+//! * protocol —— JSON-RPC 契约与工具信封。`core::mcp::dispatch`
+//!   是公开的，且不接收 `AppHandle`，所以这些用例针对临时仓库上的
+//!   真实 keeper 运行：没有网络，也没有 stdio 循环。
+//! * stdio —— 同一个服务器**作为进程**：真实的
+//!   stdin/stdout，真实的 JSON-RPC 2.0。在进程内调用 `dispatch` 抓不到
+//!   那些只有服务器变成 agent 的子进程之后才会出现的失败：
 //!
-//!   * a `println!` anywhere in the tree corrupting the stream — an agent reads
-//!     stdout as a line-oriented JSON-RPC channel and one stray line breaks it;
-//!   * a response that is buffered and never flushed (the client waits forever);
-//!   * a notification that gets a reply, which desynchronises the client;
-//!   * `AK_STORE_ROOT` / `USERPROFILE` not reaching the process, so the server
-//!     silently works on the wrong store and the human never sees the write the
-//!     agent made;
-//!   * a non-zero exit on EOF, which an agent's supervisor reports as a crash.
+//!   * 代码树里任何一处 `println!` 都会污染这条流 —— agent 把
+//!     stdout 读作按行分隔的 JSON-RPC 通道，冒出一行杂音就把它弄坏了；
+//!   * 响应被缓冲却从不 flush（客户端会一直等下去）；
+//!   * 通知被回了消息，客户端因此失去同步；
+//!   * `AK_STORE_ROOT` / `USERPROFILE` 没传进该进程，服务器于是
+//!     悄悄对着错误的仓库干活，人永远看不到 agent 写下的东西；
+//!   * EOF 时以非零码退出，agent 的监管进程会把它报成崩溃。
 //!
-//!   The session is deliberately ordered like a real client: initialize →
-//!   initialized → tools/list → read tools → one write tool → protocol errors
-//!   → EOF.
+//!   会话顺序刻意与真实客户端一致：initialize →
+//!   initialized → tools/list → 读类工具 → 一个写工具 → 协议错误
+//!   → 以 EOF 收尾。
 
 mod common;
 
@@ -35,9 +34,9 @@ use std::time::Duration;
 use common::{cleanup, join, temp_root, write};
 
 /* ------------------------------------------------------------------ */
-/* protocol                                                            */
+/* 协议                                                                */
 /* ------------------------------------------------------------------ */
-/// A temp home + temp store, and a keeper bound to them.
+/// 一个临时 home + 一个临时仓库，以及绑定在它们上面的 keeper。
 struct Fixture {
     dir: PathBuf,
     home: String,
@@ -64,7 +63,7 @@ impl Drop for Fixture {
     }
 }
 
-/// `dispatch` with a JSON-RPC request.
+/// 用一条 JSON-RPC 请求调用 `dispatch`。
 fn rpc(keeper: &Keeper, id: u64, method: &str, params: Value) -> Value {
     mcp::dispatch(
         keeper,
@@ -72,8 +71,8 @@ fn rpc(keeper: &Keeper, id: u64, method: &str, params: Value) -> Value {
     )
 }
 
-/// `tools/call`, with the text payload parsed — every handler answers one text
-/// part holding JSON.
+/// `tools/call`，并把文本载荷解析出来 —— 每个处理器都只回一个装着 JSON
+/// 的 text part。
 fn call(keeper: &Keeper, tool: &str, args: Value) -> (Value, Value) {
     let resp = rpc(
         keeper,
@@ -90,11 +89,11 @@ fn call(keeper: &Keeper, tool: &str, args: Value) -> (Value, Value) {
 }
 
 /* ------------------------------------------------------------------ */
-/* protocol                                                            */
+/* 协议                                                                */
 /* ------------------------------------------------------------------ */
 
-// `initialize` — the handshake an agent client performs
-// before anything else.
+// `initialize` —— agent 客户端在做任何其它事情之前
+// 都要先完成的那次握手。
 #[test]
 fn initialize_answers_the_protocol_version_and_server_info() {
     let fx = Fixture::new("mcp-init");
@@ -118,8 +117,8 @@ fn ping_answers_an_empty_result_and_a_notification_is_not_answered() {
     let keeper = fx.keeper();
 
     assert_eq!(rpc(&keeper, 7, "ping", json!({}))["result"], json!({}));
-    // `handle_line` turns a `Null` response into "no reply", and a client that
-    // pipelined a notification would otherwise wait forever.
+    // `handle_line` 把 `Null` 响应转成「不回消息」，否则一个把通知
+    // 流水线式发送出去的客户端就会一直等下去。
     assert!(
         rpc(&keeper, 7, "notifications/initialized", json!({})).is_null(),
         "notifications are never answered"
@@ -145,7 +144,7 @@ fn an_unknown_method_and_an_unknown_tool_fail_cleanly() {
         .unwrap()
         .contains("unknown tool"));
 
-    // A malformed line answers a parse error instead of hanging the client.
+    // 格式错误的行要回一个解析错误，而不是把客户端挂住。
     let line = mcp::handle_line("not json at all").expect("a parse error is answered");
     assert_eq!(line["error"]["code"], json!(-32700));
     assert!(
@@ -154,7 +153,7 @@ fn an_unknown_method_and_an_unknown_tool_fail_cleanly() {
     );
 }
 
-// `tools/list` — every tool needs the three keys a client renders.
+// `tools/list` —— 每个工具都必须带上客户端渲染所需的三个键。
 #[test]
 fn tools_list_exposes_every_tool_with_a_schema() {
     let fx = Fixture::new("mcp-tools");
@@ -184,8 +183,8 @@ fn tools_list_exposes_every_tool_with_a_schema() {
             expected
         );
     }
-    // The retired tools must be gone from the *advertised* list too: a name an
-    // agent reads out of `tools/list` and then cannot call is a broken contract.
+    // 已退役的工具也必须从*对外公布*的列表里消失：agent 从 `tools/list`
+    // 里读到一个名字却调不动，那就是一份坏掉的契约。
     for retired in ["list_transactions", "rollback_transaction"] {
         assert!(
             !tools.iter().any(|t| t["name"] == json!(retired)),
@@ -196,9 +195,8 @@ fn tools_list_exposes_every_tool_with_a_schema() {
     }
 }
 
-// A tool that resolves with `ok: false` must still be marked `isError` — the
-// deliberate difference documented in the module
-// header.
+// 以 `ok: false` 解析的工具仍必须标记为 `isError` —— 这就是
+// 模块头部所记载的那处刻意差异。
 #[test]
 fn a_failed_tool_result_carries_is_error() {
     let fx = Fixture::new("mcp-iserror");
@@ -212,14 +210,14 @@ fn a_failed_tool_result_carries_is_error() {
     assert_eq!(body["ok"], json!(false), "{}", body);
     assert_eq!(resp["result"]["isError"], json!(true), "{}", resp);
 
-    // A retired tool is a protocol error (-32602), which is *also* `isError`:
-    // the distinction is that it never resolves a payload at all.
+    // 已退役的工具属于协议错误（-32602），它*同样*是 `isError`：
+    // 区别在于它根本不会解析出任何载荷。
     let (gone_resp, _) = call(&keeper, "rollback_transaction", json!({ "txId": "tx-1" }));
     assert_eq!(gone_resp["error"]["code"], json!(-32602), "{}", gone_resp);
 }
 
-// `set_baseline` answers a plain object, and the write path leaves only the
-// audit journal behind — there is no transaction directory any more.
+// `set_baseline` 回的是一个普通对象，而写入路径只会在身后留下
+// 审计日志 —— 现在不再有任何事务目录。
 #[test]
 fn set_baseline_answers_an_object_and_a_write_leaves_no_backup_tree() {
     let fx = Fixture::new("mcp-tx");
@@ -235,10 +233,10 @@ fn set_baseline_answers_an_object_and_a_write_leaves_no_backup_tree() {
 }
 
 /* ------------------------------------------------------------------ */
-/* the server as a process                                             */
+/* 作为进程的服务器                                                     */
 /* ------------------------------------------------------------------ */
-/// Every tool name `tools/list` must return, in order. A rename is a breaking
-/// change for an agent that already learned the name, so it is pinned.
+/// `tools/list` 必须按顺序返回的每一个工具名。改名对已经记住该名字的 agent
+/// 是破坏性变更，所以这里把它钉死。
 const TOOLS: [&str; 15] = [
     "list_assets",
     "read_asset",
@@ -262,20 +260,20 @@ struct Session {
     stdin: ChildStdin,
     out: Receiver<String>,
     err: Receiver<String>,
-    /// Every stdout line ever produced, for the "nothing but JSON-RPC" check.
+    /// 曾经产出的每一行 stdout，用于「除了 JSON-RPC 别无他物」的检查。
     seen: Vec<String>,
 }
 
 impl Session {
-    /// Spawn the shipped binary against a temp home and a temp store.
+    /// 对着一个临时 home 和一个临时仓库启动正式发布的二进制。
     fn spawn(tag: &str) -> (Session, std::path::PathBuf) {
         let dir = temp_root(tag);
         let home = join(&dir.to_string_lossy(), &["home"]);
         let root = join(&dir.to_string_lossy(), &["store"]);
         settings::ensure_store(&root).expect("ensure_store");
 
-        // Something for the read tools to find, so "empty because the scan
-        // found nothing" cannot be mistaken for "the tool works".
+        // 给读类工具放点东西可找，这样「空是因为扫描什么都没扫到」就不会
+        // 被误认成「工具正常」。
         write(
             &join(&home, &[".workbuddy", "skills", "pdf", "SKILL.md"]),
             "---\nname: pdf\ndescription: Extract text from PDFs\n---\n\n# pdf\n\nUse pdftotext.\n",
@@ -355,8 +353,8 @@ impl Session {
         self.send(id, "tools/call", json!({ "name": tool, "arguments": args }));
     }
 
-    /// The next stdout line, parsed. Panics on timeout so a hung server fails
-    /// the test with a message instead of blocking the suite forever.
+    /// 解析出的下一行 stdout。超时就 panic，以便卡死的服务器能让用例带着
+    /// 信息失败，而不是把整个测试套件永远堵住。
     fn next(&mut self) -> Value {
         let line = self
             .out
@@ -373,8 +371,8 @@ impl Session {
         parsed
     }
 
-    /// Assert nothing arrives within `ms` — used after notifications and
-    /// blank lines, which must stay silent.
+    /// 断言在 `ms` 毫秒内没有任何东西到达 —— 用在通知和空行之后，它们
+    /// 必须保持沉默。
     fn expect_silence(&mut self, ms: u64) {
         match self.out.recv_timeout(Duration::from_millis(ms)) {
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -385,8 +383,8 @@ impl Session {
         }
     }
 
-    /// `JSON.parse(result.content[0].text)` — the tool payload, unwrapped the
-    /// way a client does.
+    /// `JSON.parse(result.content[0].text)` —— 按客户端的方式把工具载荷
+    /// 拆出来。
     fn payload(resp: &Value) -> Value {
         let raw = resp["result"]["content"][0]["text"]
             .as_str()
@@ -400,7 +398,7 @@ fn the_server_speaks_json_rpc_over_stdio_and_keeps_stdout_clean() {
     let (mut s, dir) = Session::spawn("mcpstdio");
     let store_root = join(&dir.to_string_lossy(), &["store"]);
 
-    // --- handshake -----------------------------------------------------
+    // --- 握手 -----------------------------------------------------------
     s.send(
         1,
         "initialize",
@@ -418,19 +416,19 @@ fn the_server_speaks_json_rpc_over_stdio_and_keeps_stdout_clean() {
         "initialize: {init}"
     );
 
-    // A notification must never be answered. `initialized` is the one every
-    // real client sends, so a reply here would desynchronise all of them.
+    // 通知永远不能被回消息。`initialized` 是每个真实客户端都会发的，
+    // 所以这里回一句就会让它们全部失去同步。
     s.send_raw(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
     s.expect_silence(400);
 
-    // Proof the silence above was silence and not a stalled pipe: this ping
-    // answers immediately, and it is the *next* line on the wire.
+    // 证明上面的沉默确实是沉默、而不是管道卡住：这个 ping 立即得到回应，
+    // 而且它就是线上*下一*行。
     s.send(2, "ping", json!({}));
     let pong = s.next();
     assert_eq!(pong["id"], json!(2));
     assert_eq!(pong["result"], json!({}));
 
-    // --- tool catalogue ------------------------------------------------
+    // --- 工具目录 ------------------------------------------------------
     s.send(3, "tools/list", json!({}));
     let list = s.next();
     let tools = list["result"]["tools"].as_array().expect("tools array");
@@ -444,7 +442,7 @@ fn the_server_speaks_json_rpc_over_stdio_and_keeps_stdout_clean() {
         assert_eq!(t["inputSchema"]["type"], json!("object"), "{t}");
     }
 
-    // --- read-only tools ----------------------------------------------
+    // --- 只读工具 ------------------------------------------------------
     s.call(4, "list_assets", json!({}));
     let listed = Session::payload(&s.next());
     let assets = listed["assets"].as_array().expect("assets array");
@@ -460,8 +458,7 @@ fn the_server_speaks_json_rpc_over_stdio_and_keeps_stdout_clean() {
         assets[0]
     );
 
-    // Filtering has to happen server-side; an agent cannot fetch 1000 rows
-    // and sift them itself.
+    // 过滤必须发生在服务端；agent 不可能把 1000 行全捞回去自己筛。
     s.call(5, "list_assets", json!({ "kind": "skill" }));
     let only_skills = Session::payload(&s.next());
     for a in only_skills["assets"].as_array().unwrap() {
@@ -473,7 +470,7 @@ fn the_server_speaks_json_rpc_over_stdio_and_keeps_stdout_clean() {
     assert_eq!(read["ok"], json!(true), "read_asset: {read}");
     assert!(read["asset"]["file"].is_string(), "read_asset: {read}");
 
-    // Missing assetId is a tool error, flagged on the wrapper per the spec.
+    // 缺 assetId 属于工具错误，按规范在外层信封上标记出来。
     s.call(7, "read_asset", json!({}));
     let bad_read = s.next();
     assert_eq!(bad_read["result"]["isError"], json!(true), "{bad_read}");
@@ -493,10 +490,9 @@ fn the_server_speaks_json_rpc_over_stdio_and_keeps_stdout_clean() {
     assert!(health["items"].is_array(), "health_report: {health}");
     assert!(health["findings"].is_u64(), "health_report: {health}");
 
-    // --- a write tool ---------------------------------------------------
-    // The agent writes the real agent home, through the same transaction
-    // layer the UI uses: validated, atomically written, and journalled in
-    // audit.jsonl — with no backup tree on the side.
+    // --- 一个写工具 -----------------------------------------------------
+    // agent 通过 UI 所用的同一层事务写入真实的 agent home：校验、原子写入，
+    // 并记入 audit.jsonl —— 身旁不会留下任何备份目录。
     s.call(
         10,
         "create_skill",
@@ -534,8 +530,8 @@ Written by the regression test.
         written.starts_with(&store_root) == false,
         "the write must not land in the store: {written}"
     );
-    // Journalled: `txId` correlates the tool answer with its audit line, and
-    // nothing else survives the write.
+    // 已入账：`txId` 把工具应答与它的审计行对应起来，而这次写入除了它
+    // 什么都不会留下。
     let audit = std::fs::read_to_string(std::path::Path::new(&store_root).join("audit.jsonl"))
         .unwrap_or_default();
     assert!(
@@ -547,7 +543,7 @@ Written by the regression test.
         "the write must not create a backup tree"
     );
 
-    // --- protocol errors ----------------------------------------------
+    // --- 协议错误 ------------------------------------------------------
     s.send(11, "tools/nope", json!({}));
     let unknown_method = s.next();
     assert_eq!(unknown_method["id"], json!(11));
@@ -566,20 +562,19 @@ Written by the regression test.
     assert_eq!(parse_error["error"]["code"], json!(-32700));
     assert_eq!(parse_error["id"], Value::Null, "parse errors carry id:null");
 
-    // A request with no `id` is a notification even when the method is bogus:
-    // answering it would put a stray response on the wire.
+    // 没有 `id` 的请求即使方法名是假的也算通知：回了它就会往线上多塞
+    // 一条游离的响应。
     s.send_raw(r#"{"jsonrpc":"2.0","method":"tools/nope"}"#);
     s.expect_silence(400);
 
-    // Blank lines are not messages.
+    // 空行不是消息。
     s.send_raw("");
     s.send_raw("   ");
     s.expect_silence(300);
 
-    // --- stdout purity -------------------------------------------------
-    // Every line already parsed as JSON-RPC 2.0 inside `next()`. What is left
-    // to prove is that there were no *extra* lines: the count must equal the
-    // number of requests that must be answered (1–12 plus the parse error).
+    // --- stdout 纯净度 -------------------------------------------------
+    // 每一行在 `next()` 里都已经按 JSON-RPC 2.0 解析过了。剩下要证明的是
+    // 没有*多余*的行：行数必须等于必须被应答的请求数（1–12 加上那条解析错误）。
     assert_eq!(
         s.seen.len(),
         13,
@@ -591,8 +586,7 @@ Written by the regression test.
         assert!(!line.contains('\n'));
     }
 
-    // The store diagnostic belongs on stderr, where it cannot corrupt the
-    // protocol stream.
+    // 仓库诊断信息属于 stderr，在那儿它污染不了协议流。
     let diag = s
         .err
         .recv_timeout(Duration::from_secs(10))
@@ -602,7 +596,7 @@ Written by the regression test.
         "startup diagnostic missing from stderr: {diag:?}"
     );
 
-    // --- EOF -----------------------------------------------------------
+    // --- EOF（输入结束） -----------------------------------------------
     drop(s.stdin);
     let status = s.child.wait().expect("wait");
     assert_eq!(status.code(), Some(0), "closing stdin must exit 0");

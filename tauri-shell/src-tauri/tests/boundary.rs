@@ -83,7 +83,7 @@ fn verbatim_join(p: &str) -> String {
 /// 对同一个文件会回答"系统找不到指定的路径"（`os error 3`）——
 /// 但 `std::fs` 能绕过去。有三件事钉住了它的来源：
 /// 测试二进制**没有** `longPathAware` 清单，注册表开关是关的
-/// （`HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled = 0`），
+/// （注册表键就是 `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled = 0`），
 /// 并且本工具链的 `libstd` 里含有 `std::sys::path::windows::maybe_verbatim`
 /// —— 那个把绝对路径改写成 `\\?\` 形式的辅助函数。所以 store **不会**自己
 /// 加这个前缀，也不应该加：第二个前缀是无效的，而且无条件地加还会

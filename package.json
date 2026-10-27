@@ -2,7 +2,7 @@
   "name": "agentkeeper",
   "productName": "AgentKeeper",
   "version": "0.2.3",
-  "description": "Unified dashboard for discovering and managing agent assets: skills, MCP servers, plugins, rules and memory across multiple AI agents and projects.",
+  "description": "本地管理 AI 编码 Agent 资产的桌面应用：技能、MCP 服务、插件、规则与记忆文件，覆盖 17 种 Agent 与全局/项目两级作用域。",
   "repository": {
     "type": "git",
     "url": "https://github.com/ntc0728/agentkeeper.git"
@@ -40,7 +40,9 @@
     "mcp",
     "plugins",
     "rules",
-    "memory"
+    "memory",
+    "tauri",
+    "rust"
   ],
   "license": "MIT"
 }
