@@ -8,8 +8,9 @@
 //! 契约（不要改这些签名——另外两个模块是照着它们编译的）：
 //!
 //! * `parse(src) -> Result<Value, String>` —— 完整的 YAML 1.2。`Err` 里带一条
-//!   给人读的消息；调用方会把它变成
-//!   `config file is corrupt, refusing to overwrite: <path>`。
+//!   给人读的消息（原文是 "config file is corrupt, refusing to overwrite"，
+//!   再接上 `<path>`）；调用方会把它变成
+//!   `config file is corrupt, refusing to overwrite: <path>` 这句英文。
 //! * `stringify(&Value) -> String` —— 块风格、两空格缩进、**绝不折行**
 //!   （`YAML.stringify(v, {lineWidth: 0})`），而且**不带末尾换行**
 //!   （`stringifyYamlSubset` 会把它剥掉）。
@@ -95,8 +96,8 @@ fn emit_seq(items: &[Value], indent: usize) -> Vec<String> {
             Some(text) => out.push(format!("{}- {}", pad(indent), text)),
             None => {
                 // npm 会把 map 项的第一个键放在短横线那一行上：
-                //   - name: a
-                //     value: b
+                //   - name: a          （第一个键跟在短横线后）
+                //     value: b         （其余键各占一行，缩进两格）
                 let mut sub = emit_node(item, indent + 2);
                 let head = {
                     let first = sub[0].strip_prefix(&pad(indent + 2)).unwrap_or(&sub[0]);

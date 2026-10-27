@@ -57,7 +57,7 @@ sidecar，打包器把 `agentkeeper-mcp.exe` 放进安装目录。
 tauri-shell/target/release/agentkeeper-mcp.exe
 ```
 
-> 安装版路径为实测值：`tauri.conf.json` 的 `windows.nsis.installMode = "currentUser"`，
+> 安装版路径由 `tauri.conf.json` 的 `windows.nsis.installMode = "currentUser"` 决定：
 > NSIS 安装器（`/S` 静默、不传 `/D=`）默认落到 `%LOCALAPPDATA%\AgentKeeper`，
 > **不需要管理员权限**；卸载用同目录的 `uninstall.exe /S`。
 > 表里 `%APPDATA%\AgentKeeper\agentkeeper` 那份存储**不在**安装目录里，卸载不会清掉它。

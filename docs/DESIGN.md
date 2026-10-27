@@ -30,7 +30,7 @@
 
 ## 1. 开源对标与差异化
 
-调研了三个同类成熟项目（截至 2026-10）：
+与三个同类成熟项目做了对照（截至 2026 年 10 月）：
 
 ### 1.1 Claude Code Organizer（`@mcpware/claude-code-organizer`）
 
@@ -318,9 +318,9 @@ validate ──► capture ──► atomic write ──► journal ──► [a
   部分 agent 会把空目录也枚举出来。
 - **损坏的 JSON 显式中止**，不当作空配置覆盖，避免静默丢掉兄弟条目。
 
-**写完之后的现场**（安装版二进制，`AK_STORE_ROOT` 指向临时 store 时应当如此）：
-MCP 调 `create_skill` 后 `C:\Users\<你>\.workbuddy\skills\<name>\SKILL.md` **已存在**，
-`audit.jsonl` 里有该 `txId` 的一行，且 `<store>` 下**不会**出现 `backups/`。
+**一次写入的预期结果**：
+MCP 调 `create_skill` 之后，`~/.workbuddy/skills/<name>/SKILL.md` 文件存在，
+`audit.jsonl` 中有一行对应这个 `txId`，且 store 根目录下不会出现 `backups/`。
 
 ### 4.3 校验规则（节选）
 
@@ -425,9 +425,9 @@ cd tauri-shell && cargo test --workspace   # 单元 + 集成，断言数随覆�
 集成测试不再重复——两边调用的是同一个函数。下载、调度、journal 这类有状态的端到端行为两层都保留：
 core 侧用 mock 定位快，集成侧用真实 HTTP / 文件系统验证真实路径。
 
-**不写指向已删除文档的引用**。本项目的前身是 JavaScript 实现，迁到 Rust 后留下了大量
-「参考实现 §9」「IPC-contract section 5」这类引用——指向的文档已经不存在，读者无法查阅，
-编号也没有意义。注释只写**行为本身**（「保存设置会追加一条审计记录」），不写指向某个编号的指针。
+**不写指向已删除文档的引用**
+「参考实现 §9」「IPC-contract section 5」这类指针在文档重组后极易失效：读者无法查阅，
+编号也失去意义。注释只写**行为本身**（「保存设置会追加一条审计记录」），不写指向某个编号的指针。
 JS 语言的**语义事实**（`String(1.0)` 是 `"1"`、`\s` 的空白集、`javascript:` 是 URL scheme）
 要保留——那是 Rust 代码这么写的理由，与是否还有 JS 实现无关。
 

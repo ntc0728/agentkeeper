@@ -64,9 +64,8 @@ beta 通道的关键分叉：**当前跑的是不是预发布版**。
 | 数据目录（store 根） | `%APPDATA%\AgentKeeper\agentkeeper` | settings / projects / 审计日志都在这里；可用环境变量 `AK_STORE_ROOT` 覆盖 |
 | 程序安装落点 | `%LOCALAPPDATA%\AgentKeeper` | 由 NSIS（`installMode = "currentUser"`）决定，不需要管理员权限。应用不读也不知道它的位置，只负责把安装包下载到 `updates/` 再交给系统安装器 |
 
-> **实测值**：`/S` 静默安装 → EXIT=0、耗时 0.64s，默认装到
-> `%LOCALAPPDATA%\AgentKeeper`，即 `C:\Users\<你>\AppData\Local\AgentKeeper`。
-> 这不是从 `installer.nsi` 推算的；`installMode` 一改，这个落点就跟着变。
+> 静默安装（`/S`）的默认目标是 `%LOCALAPPDATA%\AgentKeeper`。这个落点由 NSIS 的
+> `installMode` 决定：改成 per-machine 就会变，所以不要把它当成常量硬编码。
 
 store 根的同一约定在 Rust 侧也有一份实现（`tauri-shell/src-tauri/src/lib.rs` 的
 `store_root()`），与这里保持一致。

@@ -595,7 +595,7 @@ mod tests {
                         // 从而丢掉客户端尚未读到的回复。
                         // 那就是在并行 `cargo test` 下间歇出现的
                         // `os error 10053`，以及客户端抛出的那句
-                        // "Error encountered in the status line"。
+                        // "Error encountered in the status line"（状态行还没读完就断了）。
                         //
                         // 超时或对端关闭会打破循环，而回复仍会写出：这是一个桩
                         // 服务器，一个被截断的 GET 头不改变它所应答的内容。

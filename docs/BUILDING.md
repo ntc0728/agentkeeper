@@ -97,9 +97,9 @@ npm test -- --list     # 打印计划，不执行
 代价是产物大 20%（shell 10.4 → 12.5 MiB，安装包 3.63 → ~4.0 MiB）。这个交换划算，因为 release
 profile 现在只用来**出包**，而迭代走 dev profile。
 
-### 出包仍然超过 60 秒——原因不在配置
+### 冷启动出包的成本构成
 
-第一次出包（`target/` 是空的）要编译整个依赖图：
+`target/` 为空时，出包要编译整个依赖图：
 
 | 阶段 | 耗时 |
 |---|---|
@@ -107,72 +107,42 @@ profile 现在只用来**出包**，而迭代走 dev profile。
 | 补上 tauri 依赖（336 crate） | 157 s |
 | 打包（makensis + zip） | ~15 s |
 
-**日常迭代不受影响**——`target/` 是热的，`cargo tauri dev` 只要 ~8 s。60 秒的目标只对「冷启动出包」
-有意义，而那 157 秒是 Tauri 依赖图的一次性成本。
+这是一次性成本。`target/` 热起来之后 `cargo tauri dev` 约 8 s，日常迭代不受影响。
 
-### 出包增量编译：77 s → 18 s
+### 增量编译
 
-`#[tauri::command]` 宏的实例化成本（见下节）在它被合并命令方案解决之前，
-`scripts/package-release.js` 给出包路径设了 `CARGO_INCREMENTAL=1`，用编译缓存换时间：
+`scripts/package-release.js` 给包路径设了 `CARGO_INCREMENTAL=1`，用编译缓存换时间：
 
 | 场景 | 耗时 |
 |---|---|
-| 全量出包（首次/清缓存后） | ~100 s |
-| 热出包（只改 shell 源码后 `npm run tauri:bundle`） | **~18 s**（全流程含打包） |
+| 全量出包（首次 / 清缓存后） | ~100 s |
+| 热出包（只改 shell 源码后 `npm run tauri:bundle`） | **~18 s**（含打包） |
 
-代价与边界：
+需要注意的边界：
 
-* release 树常驻一个 **incremental 缓存（约 0.8 GB）**——它是产物不是残留，`tauri:clean` 默认**不删它**，
-  删了热出包就退回 77 s。
-* `npm run check` 的 `tree` 闸门与之配套：它守的是**总体积上限（6.5 GiB）**，不是「某类文件必须消失」。
+* release 树会常驻一份 **incremental 缓存（约 0.8 GB）**。它是产物不是残留，`npm run tauri:clean`
+  默认**不删它** —— 删了热出包就退回 77 s。
+* `npm run check` 的 `tree` 闸门守的是**总体积上限（6.5 GiB）**，不是「某类文件必须消失」。
   pdb、rlib、rmeta、incremental 都算产物，全部保留并计入体积。
 * 该开关只在 `package-release.js` 的 env 里生效，手动 `cargo` 命令与 dev 构建不受影响
   （env 层优先级高于 `.cargo/config.toml` 的 `[build] incremental = false`）。
 
-### 第二阶段：真正的瓶颈
+### 编译时间主要花在哪
 
-改一行 shell 代码要 77 s，其中 77 s 全在 **codegen**（`--lib` 77 s / `--bins` 2 s，链接只占 2 s）。
-原因已定位到 `#[tauri::command]` 宏：
+改一行 shell 代码的热重编约 77 s，其中绝大部分在 codegen。主要来源是 `#[tauri::command]`
+宏：每个命令都会实例化一遍 tauri 的泛型运行时（`CommandArg` / `Invoke` / `Resolver`）。
 
 | 对照实验 | rlib 大小 | 增量编译 |
 |---|---|---|
-| 只用 tauri 类型，不用任何宏 | 0.01 MB | **0 s** |
-| 37 个普通函数 + serde 派生 | 0.03 MB | **1 s** |
-| 37 个 `#[tauri::command]` | **82 MB** | **77 s** |
+| 只用 tauri 类型，不用任何宏 | 0.01 MB | 0 s |
+| 41 个普通函数 + serde 派生 | 0.03 MB | 1 s |
+| 41 个 `#[tauri::command]` | 82 MB | 77 s |
 
-宏为每个命令实例化一遍 tauri 的泛型运行时（`CommandArg` / `Invoke` / `Resolver`），37 次就是 82 MB。
+**当前状态**：41 个命令全部注册在 `lib.rs` 的 `generate_handler!` 里，一次改动会重编整个
+shell crate。要压缩这个成本，可行方向是把同域命令合并成带 `op` 参数的 dispatch —— 代价是
+`tauri-shell/tauri-bridge.js` 的调用形状要跟着改，属于破坏性变更，必须同步改前端并跑全量测试。
 
-可行的方向只有两个：
-
-1. **减少 `#[tauri::command]` 的数量** —— 37 个 command 全部被前端真实调用（`tauri-bridge.js` 里
-   39 个名字），没有一个是死的，所以只能**合并**：把同域的命令收成一个带 `op` 参数的 dispatch。
-   代价：前端 `tauri-bridge.js` 要跟着改，命令名从 37 个变成几个，接口形状变了。
-2. **不用宏注册** —— `invoke_handler` 接受 `Fn(Invoke<R>) -> bool`，可以手写分发。但要构造
-   `InvokeMessage` / `InvokeResolver`，耦合 tauri 内部 API，脆弱。
-
-两者都是破坏性改动，需要单独一轮设计与验证。在它们完成之前，热出包走上面的
-增量编译路径（77 s → 18 s）。
-
-### 第二阶段的建议路径
-
-按「收益 / 风险」排序，第一步是零风险的：
-
-**第 0 步（零风险，先做）**：把 37 个 command 按域分组，**只移动代码位置**，不改数量。
-先验证「分组后编译时间不变」——这排除了「宏成本来自某个特定命令」的可能，也顺便让第 1 步的
-diff 变小。
-
-**第 1 步**：合并 `update_*` 家族的 13 个 command 为 1 个 `update(op, payload)`。
-这 13 个是同一子系统的同一批 IPC，合并后前端 `tauri-bridge.js` 里 13 个函数变成 1 个带 `op`
-参数的函数。预期 rlib 从 82 MB 降到约 30 MB，增量编译从 77 s 降到约 30 s。
-
-**第 2 步**：同样处理 `open_*`（4 个）、`save_*` / `delete_*`（8 个）等。
-
-**第 3 步**：如果还差，再评估手写 `Invoke` 注册。
-
-每一步都要跑 `npm run test:all`（333 个测试里有一批直接断言 IPC 形状），并对照
-`tauri-shell/tauri-bridge.js` 与 `src/renderer/app.js` 的调用点。
-
-> **不要**用「把 command 挪到别的 crate」来降成本——宏在哪个 crate 展开都要实例化一遍泛型运行时。
+> 迁移 command 到别的 crate 不会降低这个成本：宏在哪个 crate 展开都要实例化一遍泛型运行时。
 
 ---
 

@@ -2,13 +2,13 @@
 //!
 //! 契约（不要改这些签名——`keeper.rs` 是照着它们编译的）：
 //!
-//! * `parse(src) -> Result<Value, String>`
-//! * `stringify(&Value) -> Result<String, String>`
-//! * `splice_server(raw, server, section) -> String` —— 用 `section` 替换
+//! * 解析：`parse(src) -> Result<Value, String>`
+//! * 序列化：`stringify(&Value) -> Result<String, String>`
+//! * 拼接：`splice_server(raw, server, section) -> String` —— 用 `section` 替换
 //!   `[mcp_servers.<server>]` 所在的整段区域（含嵌套子表），若这个 server 是
 //!   新的则追加。该区域之外的每一个字节——注释也算在内——都必须活下来。
-//! * `remove_server(raw, server) -> String`
-//! * `line_diff(old, new) -> Vec<Value>`
+//! * 删除：`remove_server(raw, server) -> String`
+//! * 行级差异：`line_diff(old, new) -> Vec<Value>`
 //!
 //! 这些手术辅助函数是 `spliceTomlServer`、`removeTomlServer`、
 //! `findTomlServerRegion` 和 `lineDiff` 的逐字节移植，连怪癖也一并照搬：
@@ -54,7 +54,7 @@ fn to_json(value: toml::Value) -> Value {
     }
 }
 
-/// `TOML.stringify()`
+/// 对应参考实现的 `TOML.stringify()`（值转 TOML 文本）。
 pub fn stringify(value: &Value) -> Result<String, String> {
     toml::to_string(value).map_err(|e| e.to_string())
 }
@@ -152,7 +152,7 @@ fn collapse_newlines(s: &str) -> String {
     out
 }
 
-/// `spliceTomlServer(raw, server, sectionText)`
+/// 对应参考实现的 `spliceTomlServer(raw, server, sectionText)`：换掉或追加一整段。
 pub fn splice_server(raw: &str, server: &str, section: &str) -> String {
     let eol = if raw.contains("\r\n") { "\r\n" } else { "\n" };
     let mut lines = split_lines(raw);
@@ -177,7 +177,7 @@ pub fn splice_server(raw: &str, server: &str, section: &str) -> String {
     }
 }
 
-/// `removeTomlServer(raw, server)`
+/// 对应参考实现的 `removeTomlServer(raw, server)`：删掉该 server 的整段区域。
 pub fn remove_server(raw: &str, server: &str) -> String {
     let eol = if raw.contains("\r\n") { "\r\n" } else { "\n" };
     let mut lines = split_lines(raw);

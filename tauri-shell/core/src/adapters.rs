@@ -1,8 +1,8 @@
 //! Agent 适配器表——受支持 agent 的声明式清单。
 //!
-//! 共 17 个 agent，声明顺序固定：workbuddy、claude-code、
-//! codex、cursor、opencode、gemini-cli、copilot、windsurf、cline、amp、
-//! continue、roo、goose、zed、warp、pi、dsh。跨 agent 共享目录
+//! 共 17 个 agent，声明顺序固定：先是 workbuddy、claude-code、
+//! 然后是 codex、cursor、opencode、gemini-cli、copilot、windsurf、cline、amp、
+//! continue、roo、goose、zed、warp、pi，最后是 dsh。跨 agent 共享目录
 //! （`~/.agents/skills`，即 [`SHARED_SKILLS_DIR`]）*不*在其中：它本身并不属于
 //! 任何一个 agent，而 scan.rs 会把它当作独立的伪 agent（`shared`）暴露出来，
 //! 所以它从不计入这 17 个里。
@@ -515,7 +515,7 @@ mod tests {
     //!
     //! 这里的一切都是生成的：跑
     //!
-    //!     npm run tauri:adapters      (scripts/gen-adapters-snapshots.js)
+    //!     npm run tauri:adapters      (scripts/gen-adapters-snapshots.js)   ← 生成快照的命令
     //!
     //! 只要改过 scripts/adapter-table.js 就要重新生成。下面那两个 JSON 常量
     //! 就是该脚本的输出——用 os.homedir() 设为 FAKE_HOME 之后求值得到的适配器

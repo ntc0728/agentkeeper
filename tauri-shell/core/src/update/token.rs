@@ -3,12 +3,11 @@
 //! 令牌会提高 API 配额（60 → 5000 次/小时），因此属于凭据：`settings.json`
 //! 里的明文副本会跟着每一次导出、每一次换机一起走。存储的值在
 //! Windows 上由 DPAPI 包装、在 macOS 上由 Keychain 包装、在 Linux 上由
-//! libsecret 包装，因此换到另一台机器上毫无用处。信封格式就是 `enc1:` 前缀
-//! 后面接一段 base64 编码的 DPAPI 密文（原文见下方代码块，逐字保留）：
+//! libsecret 包装，因此换到另一台机器上毫无用处。信封的形态是
+//! `enc1:` 前缀后接一段 base64 文本（编码对象是对 UTF-8 令牌做 DPAPI 加密后
+//! 的密文），即下式所示：
 //!
-//! ```text
-//! enc1: + base64( CryptProtectData(token_utf8) )   ← 前缀 + 对 UTF-8 令牌做 DPAPI 加密后的 base64
-//! ```
+//! `enc1:` 前缀 + base64( `CryptProtectData(token_utf8)` 的结果 )
 //!
 //! 在 Windows 上这是无熵、用户作用域的 DPAPI，所以在这台机器上写入的令牌
 //! 能被同一用户在这里读回。（已由往返测试验证；只有在机器上确实存在这种

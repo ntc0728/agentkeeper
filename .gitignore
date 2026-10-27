@@ -46,6 +46,11 @@ demo/
 # ---- generated screenshots ----
 docs/ui-*.png
 docs/screenshot.log
+# 视觉回归基线是**本机**工具产物：截图里带着本机的资产数量、路径与时间戳，
+# 换一台机器必然不同，提交它等于往公开仓库塞一堆机器相关的大二进制。
+# 用 `npm run ui:baseline` 在本机生成，`npm run ui:baseline:check` 比对。
+.ui-baseline/
+docs/ui-baseline/
 
 # ---- local state & secrets ----
 .env

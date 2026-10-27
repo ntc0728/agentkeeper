@@ -249,7 +249,7 @@ fn numeric_identifier(text: &str) -> Option<f64> {
 
 /// semver 规则 11：数字标识符按数值比较（`beta.2 < beta.10`），
 /// 数字排在字母数字之后，较短的前缀排在前面
-/// （`1.0.0-alpha < 1.0.0-alpha.1`）。
+/// 例如 `1.0.0-alpha` 就排在 `1.0.0-alpha.1` 之前）。
 pub fn compare_prerelease(left: &str, right: &str) -> Ordering {
     let a: Vec<&str> = left.split('.').collect();
     let b: Vec<&str> = right.split('.').collect();

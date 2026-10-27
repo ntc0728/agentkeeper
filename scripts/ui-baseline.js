@@ -3,7 +3,7 @@
 /**
  * 视觉回归冒烟基线。
  *
- *   node scripts/ui-baseline.js capture          # 写入 docs/ui-baseline/
+ *   node scripts/ui-baseline.js capture          # 写入本机 .ui-baseline/（不入库）
  *   node scripts/ui-baseline.js compare          # 与基线比像素
  *   node scripts/ui-baseline.js compare --strict # 有漂移就以非 0 退出
  *
@@ -38,7 +38,14 @@ const zlib = require('zlib');
 const http = require('http');
 
 const ROOT = path.join(__dirname, '..');
-const BASELINE = path.join(ROOT, 'docs', 'ui-baseline');
+/**
+ * 基线目录放在本机、不入库。
+ *
+ * 截图里带着本机的资产数量、安装路径与时间戳，换一台机器必然不同；把它提交进公开
+ * 仓库只会塞进一堆机器相关的大二进制，而且永远对不上别人的机器。它是开发者的本机
+ * 回归工具，不是仓库产物。
+ */
+const BASELINE = path.join(ROOT, '.ui-baseline');
 const TMP = path.join(ROOT, '.ui-baseline-tmp');
 const PORT = Number(process.env.AK_CDP_PORT || 9222);
 
@@ -274,7 +281,7 @@ async function main(argv) {
   if (command === 'capture') {
     console.log(`[ui-baseline] capture ${VIEWPORT.width}x${VIEWPORT.height} → ${path.relative(ROOT, BASELINE)}`);
     await captureViews(BASELINE);
-    console.log('[ui-baseline] baseline written — commit it with the change it belongs to');
+    console.log('[ui-baseline] 基线已更新（本机，不进仓库）；改动确认无误后再 commit 代码本身');
     return 0;
   }
   /**
