@@ -1,18 +1,17 @@
-//! Asset model — the asset shape, field for field.
+//! 资产模型——资产长什么样，一个字段对一个字段。
 //!
-//! The output is built as `serde_json::Value` rather than a typed struct on
-//! purpose: the renderer treats every field as optional, and a typed struct
-//! would make it far too easy to silently *drop* a field the UI reads
-//! (omitting `summary.byOrigin`, for instance, breaks the renderer).
-//! Explicit `null`s keep the wire shape identical to what the renderer reads.
+//! 输出刻意建成 `serde_json::Value` 而不是有类型的结构体：渲染层把每个字段都当作
+//! 可选的，而用结构体太容易悄悄*丢掉*一个 UI 要读的字段
+//! （比如漏掉 `summary.byOrigin`，渲染层就坏了）。
+//! 显式写出的 `null` 让线上形态与渲染层读到的完全一致。
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// sha256 of `str`, truncated to 16 hex chars — the identity primitive used for
-/// fingerprints, ids and project slugs.
+/// 对 `str` 求 sha256，截断到 16 个十六进制字符——指纹、id 和 project slug
+/// 都靠它做身份标识。
 pub fn hash16(s: &str) -> String {
     let mut h = Sha256::new();
     h.update(s.as_bytes());
@@ -28,8 +27,8 @@ pub fn hash16(s: &str) -> String {
     out
 }
 
-/// `slug(s)` — lowercase, everything outside `[a-z0-9一-龥]` collapsed to a
-/// single dash, edges trimmed, falling back to "unnamed".
+/// `slug(s)`——转小写，`[a-z0-9一-龥]` 之外的字符一律折叠成
+/// 一个连字符，两端去掉，兜底为 "unnamed"。
 pub fn slug(s: &str) -> String {
     let src = if s.is_empty() { "unnamed" } else { s };
     let lowered = src.trim().to_lowercase();
@@ -56,7 +55,7 @@ pub fn slug(s: &str) -> String {
     }
 }
 
-/// `plugin_origin(meta)` — cached / marketplace / managed.
+/// `plugin_origin(meta)`——cached / marketplace / managed 三者之一。
 pub fn plugin_origin(rel_label: &str, is_marketplace: bool) -> &'static str {
     let low = rel_label.to_lowercase();
     if low.contains("cache") || low.contains("marketplace") || low.contains("extensions") {
@@ -68,7 +67,7 @@ pub fn plugin_origin(rel_label: &str, is_marketplace: bool) -> &'static str {
     "managed"
 }
 
-/// JS truthiness of a JSON value (`!!v`): only null/false/0/""/NaN are falsy.
+/// JSON 值按 JS 真值规则（`!!v`）判定：只有 null/false/0/""/NaN 为假。
 pub fn js_truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,
@@ -79,7 +78,7 @@ pub fn js_truthy(v: &Value) -> bool {
     }
 }
 
-/// Render a JSON value the way JS string coercion would in `String(v)`.
+/// 按 JS 的 `String(v)` 字符串强制转换规则渲染一个 JSON 值。
 pub fn js_string(v: &Value) -> String {
     match v {
         Value::Null => "null".to_string(),
@@ -91,12 +90,12 @@ pub fn js_string(v: &Value) -> String {
 }
 
 /* ------------------------------------------------------------------ */
-/* timestamps                                                          */
+/* 时间戳                                                             */
 /* ------------------------------------------------------------------ */
 
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    // Howard Hinnant's days-from-civil, inverted. Avoids pulling in chrono
-    // for the single thing this project needs: JS-compatible ISO strings.
+    // Howard Hinnant 的 days-from-civil 的逆运算。本项目只需要一件事——JS 兼容的
+    // ISO 字符串——为此不值得把 chrono 拉进来。
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = (z - era * 146_097) as u64;
@@ -109,7 +108,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// ISO-8601 in UTC: millisecond precision, `Z` suffix.
+/// UTC 下的 ISO-8601：毫秒精度，`Z` 后缀。
 pub fn iso_from_millis(ms: i64) -> String {
     let secs = ms.div_euclid(1000);
     let millis = ms.rem_euclid(1000);
@@ -134,12 +133,11 @@ pub fn iso_from_systemtime(t: SystemTime) -> Option<String> {
 }
 
 /* ------------------------------------------------------------------ */
-/* paths                                                               */
+/* 路径                                                               */
 /* ------------------------------------------------------------------ */
 
-/// Windows paths use backslashes; a `PathBuf` built
-/// from a token like `~/.workbuddy` keeps stray forward slashes. Every path
-/// that reaches the renderer goes through here so the strings match.
+/// Windows 路径用反斜杠；由 `~/.workbuddy` 这类 token 拼出的 `PathBuf`
+/// 会留下零散的正斜杠。凡是交给渲染层的路径都过这里，这样字符串才对得上。
 pub fn norm_str(p: &Path) -> String {
     let s = p.to_string_lossy();
     if cfg!(windows) {
@@ -149,8 +147,7 @@ pub fn norm_str(p: &Path) -> String {
     }
 }
 
-/// Join `base` and `rel` (`rel` uses forward slashes), normalised the
-/// same way `norm_str` does.
+/// 拼接 `base` 与 `rel`（`rel` 用正斜杠），按 `norm_str` 同样的方式规范化。
 pub fn join_native(base: &Path, rel: &str) -> PathBuf {
     let cleaned = if cfg!(windows) {
         rel.replace('/', "\\")
@@ -160,7 +157,7 @@ pub fn join_native(base: &Path, rel: &str) -> PathBuf {
     base.join(cleaned)
 }
 
-/// Basename of `p`.
+/// `p` 的文件名部分。
 pub fn basename(p: &str) -> String {
     Path::new(p)
         .file_name()
@@ -168,8 +165,8 @@ pub fn basename(p: &str) -> String {
         .unwrap_or_else(|| p.to_string())
 }
 
-/// Basename of `p` with `ext` stripped — only on an exact, case-sensitive
-/// match, so `README.MD` keeps its extension.
+/// `p` 的文件名部分去掉 `ext`——只在完全一致、区分大小写时才去掉，
+/// 所以 `README.MD` 会保留它的扩展名。
 pub fn basename_strip(p: &str, ext: &str) -> String {
     let b = basename(p);
     match b.strip_suffix(ext) {
@@ -179,12 +176,12 @@ pub fn basename_strip(p: &str, ext: &str) -> String {
 }
 
 /* ------------------------------------------------------------------ */
-/* asset factory                                                       */
+/* 资产工厂                                                           */
 /* ------------------------------------------------------------------ */
 
 pub const ASSET_KINDS: [&str; 5] = ["skill", "mcp", "plugin", "rule", "memory"];
 
-/// Asset id: `<kind>:<slug>:<agent>:<scope>:<project>:<hash(dir)>`.
+/// 资产 id：`<kind>:<slug>:<agent>:<scope>:<project>:<hash(dir)>`。
 pub fn asset_id(
     kind: &str,
     name: &str,
@@ -207,7 +204,7 @@ pub fn asset_id(
     }
 }
 
-/// Everything `make_asset` accepts, with the defaults applied.
+/// `make_asset` 接受的全部字段，默认值已经填好。
 #[derive(Default)]
 pub struct NewAsset {
     pub kind: &'static str,
@@ -299,10 +296,9 @@ pub fn make_asset(f: NewAsset) -> Value {
     })
 }
 
-/// Slice to `n` UTF-16 code units, on a character
-/// boundary. A cut can split a surrogate pair and leave a lone
-/// surrogate; a Rust `String` cannot hold one, so the preview may be at most
-/// one character shorter. Display-only field.
+/// 按 UTF-16 码元切到 `n` 个，落在字符边界上。切点可能
+/// 劈开代理对、留下一个孤立代理项；Rust 的 `String` 装不下这种，
+/// 所以预览最多短一个字符。仅供展示的字段。
 pub fn js_slice(s: &str, n: usize) -> String {
     if s.encode_utf16().count() <= n {
         return s.to_string();

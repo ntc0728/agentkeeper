@@ -1,14 +1,11 @@
-//! AgentKeeper Rust core.
+//! AgentKeeper 的 Rust 内核。
 //!
-//! Deliberately free of any Tauri/UI dependency: the same code backs the
-//! desktop command and the headless `ak-scan` binary. Two implementations of
-//! the same logic must never exist side by side — the invariants would drift
-//! silently.
+//! 刻意不依赖任何 Tauri/UI：同一份代码同时支撑桌面端命令和无界面的 `ak-scan`
+//! 二进制。同一套逻辑的两份实现绝不能并存——不变量会悄无声息地漂移。
 //!
-//! It lives in its own crate rather than beside the Tauri shell so that this
-//! guarantee is enforced by the compiler rather than by convention: nothing
-//! here can reach a Tauri type even by accident, because the dependency does
-//! not exist. The shell depends on this crate; this crate depends on nobody.
+//! 它自己独立成一个 crate 而不是挨着 Tauri 外壳，就是为了让这条保证由编译器
+//! 来强制执行，而不是靠约定：这里连意外碰到 Tauri 类型都不可能，因为那个依赖
+//! 根本不存在。外壳依赖本 crate；本 crate 谁也不依赖。
 
 pub mod adapters;
 pub mod assets;
@@ -30,41 +27,40 @@ pub mod validate;
 pub mod yaml;
 
 /* ------------------------------------------------------------------ */
-/* JS `String.prototype.trim()`                                        */
+/* JS 的 `String.prototype.trim()`                                    */
 /* ------------------------------------------------------------------ */
 
-/// `String.prototype.trim()`'s whitespace class, i.e. ECMAScript
-/// `WhiteSpace` + `LineTerminator` + U+FEFF.
+/// `String.prototype.trim()` 的空白字符类，即 ECMAScript 的
+/// `WhiteSpace` + `LineTerminator` + U+FEFF 三部分之和。
 ///
-/// It is *not* Unicode `White_Space`, which is what Rust's `str::trim` uses;
-/// the two disagree at both edges — Rust strips U+0085 (JS keeps it) and keeps
-/// U+FEFF (JS strips it). Every module that mirrors a JS `.trim()` calls this
-/// one definition — the update/validate/toml paths share it rather than
-/// carrying a private copy, which is exactly the fork-then-drift shape to
-/// avoid.
+/// 它*不是* Unicode 的 `White_Space`——Rust 的 `str::trim` 用的才是那个；
+/// 两者在两个边界上判断相反：Rust 会去掉 U+0085（JS 保留它），却保留
+/// U+FEFF（JS 去掉它）。凡是模仿 JS `.trim()` 的模块都调用这唯一一份
+/// 定义——update/validate/toml 几条路径共用它，而不是各自拷一份，
+/// 那正是"先分叉再漂移"、必须避免的形态。
 pub fn is_ecma_whitespace(c: char) -> bool {
     matches!(
         c,
-        '\u{0009}'..='\u{000D}'  // TAB, LF, VT, FF, CR
-        | '\u{0020}'             // SPACE
-        | '\u{00A0}'             // NBSP
-        | '\u{1680}'             // OGHAM SPACE MARK
-        | '\u{2000}'..='\u{200A}' // EN QUAD .. HAIR SPACE
-        | '\u{2028}'             // LINE SEPARATOR
-        | '\u{2029}'             // PARAGRAPH SEPARATOR
-        | '\u{202F}'             // NARROW NBSP
-        | '\u{205F}'             // MEDIUM MATHEMATICAL SPACE
-        | '\u{3000}'             // IDEOGRAPHIC SPACE
+        '\u{0009}'..='\u{000D}'  // TAB、LF、VT、FF、CR
+        | '\u{0020}'             // 空格
+        | '\u{00A0}'             // NBSP（不换行空格）
+        | '\u{1680}'             // 欧甘文空格
+        | '\u{2000}'..='\u{200A}' // EN QUAD .. HAIR SPACE（各种宽度的空格）
+        | '\u{2028}'             // 行分隔符
+        | '\u{2029}'             // 段分隔符
+        | '\u{202F}'             // 窄 NBSP
+        | '\u{205F}'             // 中数学空格
+        | '\u{3000}'             // 全角空格
         | '\u{FEFF}'             // ZWNBSP / BOM
     )
 }
 
-/// `s.trim()` — see [`is_ecma_whitespace`].
+/// `s.trim()`——见 [`is_ecma_whitespace`]。
 pub fn ecma_trim(s: &str) -> &str {
     s.trim_matches(is_ecma_whitespace)
 }
 
-/// `s.trimEnd()` — see [`is_ecma_whitespace`].
+/// `s.trimEnd()`——见 [`is_ecma_whitespace`]。
 pub fn ecma_trim_end(s: &str) -> &str {
     s.trim_end_matches(is_ecma_whitespace)
 }
@@ -73,20 +69,20 @@ pub fn ecma_trim_end(s: &str) -> &str {
 mod trim_tests {
     use super::{ecma_trim, ecma_trim_end};
 
-    /// The two code points where Rust's `str::trim` and JS disagree.
+    /// Rust 的 `str::trim` 与 JS 判断不一致的那两个码点。
     #[test]
     fn trims_the_ecma_set_not_rusts_whitespace_set() {
-        // U+FEFF: JS trims it, Rust's `str::trim` does not.
+        // U+FEFF：JS 会 trim 掉，Rust 的 `str::trim` 不会。
         assert_eq!(ecma_trim("\u{feff}x\u{feff}"), "x");
         assert_ne!("\u{feff}x\u{feff}".trim(), "x");
-        // U+0085 (NEL): Rust trims it, JS does not.
+        // U+0085（NEL）：Rust 会 trim 掉，JS 不会。
         assert_eq!(ecma_trim("\u{85}x\u{85}"), "\u{85}x\u{85}");
         assert_eq!("\u{85}x\u{85}".trim(), "x");
     }
 
     #[test]
     fn trims_the_ecma_set() {
-        // WhiteSpace + LineTerminator, both ends.
+        // WhiteSpace + LineTerminator，两端都要 trim。
         for c in [
             '\u{09}', '\u{0a}', '\u{0b}', '\u{0c}', '\u{0d}', '\u{20}', '\u{a0}', '\u{1680}',
             '\u{2000}', '\u{200a}', '\u{2028}', '\u{2029}', '\u{202f}', '\u{205f}', '\u{3000}',
@@ -95,7 +91,7 @@ mod trim_tests {
             let s = format!("{c}x{c}");
             assert_eq!(ecma_trim(&s), "x", "U+{:04X} must trim", c as u32);
         }
-        // Neither U+0085 nor the zero-width non-joiners are JS whitespace.
+        // U+0085 和零宽不连字符都不是 JS 的空白字符。
         for c in ['\u{85}', '\u{180e}', '\u{200b}', '\u{200c}', '\u{200d}'] {
             let s = format!("{c}x{c}");
             assert_eq!(
@@ -123,7 +119,7 @@ mod trim_tests {
     fn trim_end_only_touches_the_tail() {
         assert_eq!(ecma_trim_end("  x  "), "  x");
         assert_eq!(ecma_trim_end("\u{feff}x\u{feff}"), "\u{feff}x");
-        // U+0085 is not JS whitespace, so it survives at the tail too.
+        // U+0085 不是 JS 的空白字符，所以它在尾部也照样保留。
         assert_eq!(ecma_trim_end("x\u{85}"), "x\u{85}");
     }
 }

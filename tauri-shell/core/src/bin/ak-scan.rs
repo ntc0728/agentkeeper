@@ -1,34 +1,32 @@
-//! `ak-scan` — headless scanner.
+//! `ak-scan`——无界面扫描器。
 //!
-//! Prints the exact `ak:scan` payload as JSON so a reference payload can be
-//! diffed field by field. That is the guard against a silent data change:
-//! every field of every asset is compared, not a summary count.
+//! 它把 `ak:scan` 载荷原样打成 JSON，这样参考载荷可以逐字段 diff。这是防数据悄悄
+//! 变化的闸门：比较的是每一条资产的每一个字段，而不是一个汇总计数。
 //!
-//! Usage:
-//!   ak-scan [user_home] [store_root]        scan payload
-//!   ak-scan --read <asset_id> [home] [root] `read_asset` payload for one asset
-//!   ak-scan --settings-get [root]           merged settings
-//!   ak-scan --settings-save [root] <json>   apply a settings patch
-//!   ak-scan --search-url <json_opts>        the exact registry URL
-//!   ak-scan --search <json_opts>            live registry search payload
+//! 用法：
+//!   ak-scan [user_home] [store_root]        扫描载荷
+//!   ak-scan --read <asset_id> [home] [root] 单条资产的 `read_asset` 载荷
+//!   ak-scan --settings-get [root]           合并后的设置
+//!   ak-scan --settings-save [root] <json>   应用一次设置补丁
+//!   ak-scan --search-url <json_opts>        精确的 registry URL
+//!   ak-scan --search <json_opts>            实时的 registry 搜索载荷
 //!
-//! `--read` runs the scan first (the command does the same on a cold cache), so
-//! the drawer's response can be diffed against `read_asset`.
+//! `--read` 会先跑一次扫描（冷缓存时命令本身也这么做），这样抽屉的返回结果就能
+//! 和 `read_asset` 对比。
 //!
-//! The `--settings-*` modes exist for the same reason: they make the one write
-//! path in this crate reachable without a GUI, so "does saving actually reach
-//! disk on this machine" can be answered from a shell instead of by clicking.
+//! `--settings-*` 这几种模式存在的理由相同：它们让本 crate 里唯一的那条写入路径
+//! 脱离 GUI 也能触达，于是"在这台机器上保存到底有没有落盘"可以从 shell 里回答，
+//! 而不用靠点鼠标。
 //!
-//! `--search-url` is the useful one: it lifts the URL builder out of
-//! the process so the string can be diffed byte-for-byte, including the
-//! space-as-`+` encoding and the clamp order.
+//! 最有用的是 `--search-url`：它把 URL 拼装器从进程里提出来，于是那串字符可以
+//! 逐字节 diff，包括空格编成 `+` 以及各参数取整（clamp）的先后顺序。
 
 use agentkeeper_core::{assets, discover, registry, scan, settings, validate};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // Modes that never need a scan: keep them first so they stay fast.
+    // 这些模式都不需要扫描：放在最前面，保证它们够快。
     match args.get(1).map(|s| s.as_str()) {
         Some("--settings-get") => {
             let root = args.get(2).cloned().unwrap_or_else(default_store);
@@ -131,7 +129,7 @@ fn main() {
     let (payload, timings) = scan::scan_payload(&home, &projects);
     let total = started.elapsed().as_millis();
 
-    // Timings go to stderr so stdout stays a single clean JSON document.
+    // 计时信息走 stderr，好让 stdout 保持为一份干净的 JSON 文档。
     let detail: Vec<String> = timings
         .iter()
         .map(|(k, ms)| format!("{}={}ms", k, ms))
@@ -157,11 +155,10 @@ fn main() {
     print_json(&out);
 }
 
-/// `@path` reads the JSON from a file instead of the argument list.
+/// `@path` 形式从文件读 JSON，而不是从参数列表。
 ///
-/// Windows caps a command line at ~32k characters, and a validator fixture
-/// with a 200 KB body blows straight through that — the spawn fails with a
-/// bare "argument list too long" that looks like a code bug.
+/// Windows 命令行上限约 32k 字符，而一份带 200 KB body 的校验器用例直接把它撑爆
+/// ——spawn 只会报一句干巴巴的 "argument list too long"，看起来像代码 bug。
 fn read_indirect(arg: &str) -> Result<String, String> {
     match arg.strip_prefix('@') {
         None => Ok(arg.to_string()),
@@ -185,8 +182,8 @@ fn default_home() -> String {
 }
 
 fn default_store() -> String {
-    // Same root as `src/lib.rs` / `src/core/mcp.rs`: `<APPDATA>\AgentKeeper`
-    // (productName, not the package name) plus the "agentkeeper" subdirectory.
+    // 与 `src/lib.rs` / `src/core/mcp.rs` 同一个根：`<APPDATA>\AgentKeeper`
+    // （是 productName，不是包名）再加一级 "agentkeeper" 子目录。
     if let Ok(explicit) = std::env::var("AK_STORE_ROOT") {
         return explicit;
     }

@@ -1,10 +1,9 @@
-//! Markdown frontmatter parsing.
+//! Markdown frontmatter 解析。
 //!
-//! YAML is parsed with a real parser, and an invalid document falls back to a
-//! tolerant scalar scan. That fallback is not cosmetic: Cursor `.mdc` files
-//! routinely contain `globs: **/*.ts`, and `*` is reserved in YAML, so a
-//! strict-only parser would report "no frontmatter" on exactly the files the
-//! Rules view exists to show.
+//! YAML 用真正的解析器解析，文档不合法时退回宽容的标量扫描。这个兜底不是为了
+//! 好看：Cursor 的 `.mdc` 文件里经常写着 `globs: **/*.ts`，而 `*` 在 YAML 里是
+//! 保留字符，所以只用严格解析器，恰恰会在 Rules 视图存在的意义所要展示的那些
+//! 文件上报"没有 frontmatter"。
 
 use serde_json::{json, Map, Value};
 
@@ -15,8 +14,8 @@ pub struct Frontmatter {
     pub order: Vec<String>,
 }
 
-/// `findKeySeparator` — the first `:` that ends a key, ignoring quoted
-/// colons and colons with no following whitespace (so `http://x` is safe).
+/// `findKeySeparator`——结束一个 key 的第一个 `:`，跳过被引号包住的冒号，
+/// 以及后面不跟空白的冒号（所以 `http://x` 是安全的）。
 pub fn find_key_separator(body: &str) -> Option<usize> {
     let mut quote: Option<char> = None;
     for (idx, ch) in body.char_indices() {
@@ -53,8 +52,8 @@ fn unquote_key(k: &str) -> String {
     t.to_string()
 }
 
-/// Split `---\n...\n---\nbody`. A file that merely starts with `---` but
-/// never closes is treated as having no frontmatter, same as the reference regex.
+/// 切分 `---\n...\n---\nbody`。只是开头有 `---` 却始终没闭合的文件，按没有
+/// frontmatter 处理，与参考实现的正则一致。
 pub fn parse(text: &str) -> Frontmatter {
     let norm = text.strip_prefix('\u{feff}').unwrap_or(text);
 
@@ -67,7 +66,7 @@ pub fn parse(text: &str) -> Frontmatter {
         };
     }
 
-    // First line must be exactly `---` plus optional spaces/tabs.
+    // 首行必须正好是 `---`，后面只允许可选的空格、制表符。
     let first_line_end = match norm.find('\n') {
         Some(i) => i,
         None => {
@@ -90,7 +89,7 @@ pub fn parse(text: &str) -> Frontmatter {
     }
 
     let raw_start = first_line_end + 1;
-    // Scan line by line for the closing fence.
+    // 逐行找闭合的那道围栏。
     let mut pos = raw_start;
     while pos <= norm.len() {
         let line_end = norm[pos..]
@@ -163,8 +162,8 @@ fn parse_yaml(raw: &str) -> Value {
         Ok(Value::Null) => json!({}),
         Ok(v @ Value::Object(_)) => v,
         Ok(other) => {
-            // A scalar/mapping-with-non-string-keys document: keep the
-            // tolerant reading rather than inventing an object.
+            // 文档是标量、或者是键不是字符串的映射：保留宽容读法的结果，
+            // 而不是凭空造一个对象出来。
             let tolerant = parse_tolerant(raw);
             if tolerant.as_object().map(|m| !m.is_empty()).unwrap_or(false) {
                 tolerant
@@ -176,8 +175,8 @@ fn parse_yaml(raw: &str) -> Value {
     }
 }
 
-/// Best-effort `key: scalar` extraction for frontmatter that is not valid
-/// YAML. Nested structures are deliberately not recovered.
+/// 对不是合法 YAML 的 frontmatter，尽力而为地提取 `key: scalar`。
+/// 嵌套结构是有意不恢复的。
 pub fn parse_tolerant(src: &str) -> Value {
     let mut out = Map::new();
     for line in src.split('\n') {
@@ -218,8 +217,8 @@ pub fn parse_tolerant(src: &str) -> Value {
     Value::Object(out)
 }
 
-/// `-?\d+(\.\d+)?` → Number. Integral results are emitted as integers so
-/// they serialise exactly like JS numbers (`1`, not `1.0`).
+/// `-?\d+(\.\d+)?` → Number。整数结果按整数输出，这样序列化出来和 JS 数字
+/// 一模一样（`1`，而不是 `1.0`）。
 fn parse_js_number(s: &str) -> Option<Value> {
     let body = s.strip_prefix('-').unwrap_or(s);
     if body.is_empty() {
@@ -253,13 +252,11 @@ fn number_from_f64(f: f64) -> Value {
     }
 }
 
-/// `serializeFrontmatter(data, body, order)` — rebuild `---…---\nbody`.
+/// `serializeFrontmatter(data, body, order)`——重建 `---…---\nbody`。
 ///
-/// Field order is a courtesy to the file's author: the caller passes the key
-/// order recovered from the raw text, and any key the data gained later is
-/// appended rather than shuffled in. Only the *order* comes from the hint —
-/// the values always come from `data`, so a stale hint cannot resurrect a
-/// deleted field.
+/// 字段顺序是对文件作者的照顾：调用方传入从原文里还原出来的 key 顺序，数据后来
+/// 新增的 key 一律追加在末尾而不是插进来打乱。提示只提供*顺序*——
+/// 值永远来自 `data`，所以过期的提示不可能把已删除的字段复活。
 pub fn serialize(data: &Value, body: &str, order: &[&str]) -> String {
     let mut ordered = Map::new();
     if let Value::Object(m) = data {
@@ -275,8 +272,8 @@ pub fn serialize(data: &Value, body: &str, order: &[&str]) -> String {
         }
     }
     let front = crate::yaml::stringify(&Value::Object(ordered));
-    // `body.startsWith('\n') ? body.slice(1) : body` — the blank line after the
-    // closing fence is already supplied by the fence itself.
+    // `body.startsWith('\n') ? body.slice(1) : body`——闭合围栏后面那个空行
+    // 由围栏自己补上。
     let body = body.strip_prefix('\n').unwrap_or(body);
     format!("---\n{}\n---\n{}", front, body)
 }

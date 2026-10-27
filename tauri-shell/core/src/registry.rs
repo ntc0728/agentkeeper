@@ -20,8 +20,8 @@
 //!   它会解析符号链接，并在 Windows 上产出带 `\\?\` 前缀的逐字路径，那会改变
 //!   存储的字符串、id 哈希以及 `p.dir` 的每一个消费者。
 //! * `id` 是 `proj-` 加上 `name || basename(abs)` 的 slug（截到 32 个 UTF-16
-//!   码元）加上 `-` 加上哈希的前 6 个字符；这个上限基于 UTF-16，所以用
-//!   `model::js_slice`。
+//!   码元）加上 `-` 加上哈希的前 6 个字符；这个上限基于 UTF-16，所以改用
+//!   `model::js_slice` 来切。
 //! * `load()` 吞掉每一个错误并退回 `[]`。
 //! * `remove()` 即使 id 没匹配上也会保存。
 //! * `seed()` 按目录列表顺序迭代 —— 操作系统顺序，从不排序 —— 并且对一个
@@ -319,7 +319,7 @@ pub fn remove(id: &str) -> Value {
 ///
 /// 非目录和以点开头的名字在尝试 `add` 之前就被跳过；
 /// 其余一切都走正常的重复/存在性检查，所以第二次运行会把每个项目都报告为
-/// `already registered`。
+/// `already registered`（已注册）。
 pub fn seed(store_root: &str, root_dir: &str) -> Value {
     ensure_loaded(store_root);
     let mut added: Vec<Value> = Vec::new();
@@ -383,7 +383,7 @@ mod tests {
         dir.to_string_lossy().into_owned()
     }
 
-    /// The literal two-space-indent shape for a fixed project.
+    /// 一个固定项目下、字面的两空格缩进形态。
     #[test]
     fn render_uses_the_two_space_indent_shape() {
         let projects = vec![json!({
@@ -414,11 +414,11 @@ mod tests {
         assert!(!abs.contains("/."));
         if cfg!(windows) {
             assert_eq!(abs, r"C:\work\agentkeeper\src");
-            // A path that does not exist still resolves; no filesystem access.
+            // 不存在的路径照样能解析；这里完全不碰文件系统。
             assert_eq!(resolve_path(r"C:\nope\nope\..\x"), r"C:\nope\x");
-            // Trailing separators are dropped, like Node's path.resolve.
+            // 结尾的分隔符会被丢掉，和 Node 的 path.resolve 一样。
             assert_eq!(resolve_path("C:/work/agentkeeper/"), r"C:\work\agentkeeper");
-            // Expected values checked against this host's lexical resolution.
+            // 期望值是对着本机词法解析的结果核出来的。
             for (input, want) in [
                 (r"C:\work\demo\..\demo\.\sub", r"C:\work\demo\sub"),
                 (r"C:\work\demo\", r"C:\work\demo"),
@@ -427,15 +427,14 @@ mod tests {
             ] {
                 assert_eq!(resolve_path(input), want, "resolve {:?}", input);
             }
-            // `path.basename` on a drive root is '', not the path itself.
+            // 对盘符根目录做 `path.basename` 得到的是 ''，而不是路径本身。
             assert_eq!(js_basename(r"C:\"), "");
             assert_eq!(js_basename(r"C:\a\b\"), "b");
         }
     }
 
-    /// Everything that touches the process-wide singleton lives in this one
-    /// test: cargo runs test functions in parallel, and two of them pointing
-    /// the same `OnceLock` at different temp roots would race.
+    /// 所有碰进程级单例的用例都放在这一个测试里：cargo 并行跑各个测试函数，
+    /// 两个测试把同一个 `OnceLock` 指向不同的临时根目录就会互相踩。
     #[test]
     fn registry_round_trip_load_add_duplicate_remove_seed() {
         let root = temp_root("roundtrip");
@@ -448,11 +447,11 @@ mod tests {
         std::fs::create_dir_all(&demo).unwrap();
         let demo_s = demo.to_string_lossy().into_owned();
 
-        // A missing projects.json loads as an empty registry.
+        // projects.json 缺失时加载成一份空注册表。
         reload(&store_s);
         assert!(list().is_empty());
 
-        // --- add ------------------------------------------------------
+        // --- 添加 -----------------------------------------------------
         let a = add(&demo_s, None);
         assert_eq!(a["ok"], json!(true), "add must succeed: {}", a);
         let p = a["project"].clone();
@@ -473,7 +472,7 @@ mod tests {
         assert_eq!(list().len(), 1);
         assert_eq!(get(p["id"].as_str().unwrap()).unwrap()["id"], p["id"]);
 
-        // --- byte-identical file -------------------------------------
+        // --- 文件字节完全一致 -----------------------------------------
         let body = std::fs::read_to_string(&file).unwrap();
         let q = |v: &Value| serde_json::to_string(v).unwrap();
         let expected = format!(
@@ -487,14 +486,14 @@ mod tests {
         assert!(!body.ends_with('\n'), "save() writes no trailing newline");
         assert_eq!(body, render(&list()), "the file is render(list())");
 
-        // --- duplicate, case-insensitive ------------------------------
+        // --- 重复添加，大小写不敏感 -----------------------------------
         let mixed = demo_s.replace("demo", "DEMO");
         let dup = add(&mixed, Some("other"));
         assert_eq!(dup["ok"], json!(false));
         assert_eq!(dup["error"], json!("project already registered"));
         assert_eq!(list().len(), 1, "a rejected add must not mutate state");
 
-        // --- duplicate of a missing directory reports duplicate ------
+        // --- 重复添加一个已缺失的目录，报重复 -------------------------
         let gone = store.join("work").join("gone");
         std::fs::create_dir_all(&gone).unwrap();
         let gone_s = gone.to_string_lossy().into_owned();
@@ -507,7 +506,7 @@ mod tests {
             "the duplicate check precedes the existence check"
         );
 
-        // --- add of a genuinely missing directory --------------------
+        // --- 添加一个确实不存在的目录 ---------------------------------
         let missing = store.join("work").join("absent");
         let missing_s = missing.to_string_lossy().into_owned();
         let m = add(&missing_s, None);
@@ -517,7 +516,7 @@ mod tests {
             json!(format!("directory not found: {}", resolve_path(&missing_s)))
         );
 
-        // --- add with an explicit name -------------------------------
+        // --- 显式指定名字添加 -----------------------------------------
         let named = store.join("work").join("folder");
         std::fs::create_dir_all(&named).unwrap();
         let named_s = named.to_string_lossy().into_owned();
@@ -530,12 +529,12 @@ mod tests {
                 &hash16(&resolve_path(&named_s))[..6]
             ))
         );
-        // An empty name is falsy and falls back to the basename.
+        // 空名字是假值，会退回用目录名。
         let empty = add(&named_s, Some(""));
         assert_eq!(empty["ok"], json!(false), "same dir, so duplicate");
         assert_eq!(list().len(), 3);
 
-        // --- remove ---------------------------------------------------
+        // --- 删除 -----------------------------------------------------
         let id = p["id"].as_str().unwrap().to_string();
         let rm = remove(&id);
         assert_eq!(rm, json!({ "ok": true, "removed": 1 }));
@@ -549,7 +548,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
         assert_eq!(before, render(&list()));
 
-        // --- seed -----------------------------------------------------
+        // --- 做种 -----------------------------------------------------
         let seed_root = store.join("demo-projects");
         for name in ["alpha", "beta", ".hidden"] {
             std::fs::create_dir_all(seed_root.join(name)).unwrap();
@@ -584,8 +583,8 @@ mod tests {
             json!(norm_str(&seed_root.join("alpha")))
         );
 
-        // Missing root, empty root argument, and a file as root: two empty
-        // arrays, never an error.
+        // 根目录缺失、根目录参数为空、以及根目录其实是个文件：都只返回两个空
+        // 数组，从不报错。
         assert_eq!(
             seed(&store_s, &store.join("nope").to_string_lossy()),
             json!({ "added": [], "skipped": [] })
@@ -596,7 +595,7 @@ mod tests {
             json!({ "added": [], "skipped": [] })
         );
 
-        // --- reload picks the file back up ----------------------------
+        // --- 重新加载会把文件重新读回来 -------------------------------
         reload(&store_s);
         assert_eq!(list().len(), 4);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), render(&list()));
@@ -618,7 +617,7 @@ mod tests {
         std::fs::write(&file, r#"{"projects":[]}"#).unwrap();
         assert!(load_from(&file).is_empty());
 
-        // Arbitrary extra fields survive a load untouched.
+        // 任意多余字段都会原封不动地活过一次加载。
         std::fs::write(
             &file,
             r#"{"projects":[{"id":"x","dir":"C:\\a","extra":1}]}"#,
