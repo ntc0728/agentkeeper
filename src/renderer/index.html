@@ -40,6 +40,17 @@
         <button class="nav-item" data-view="settings"><span class="nav-ico">⚙</span><span class="nav-text">Settings</span><span class="nav-badge warn hidden" id="nav-update-badge">!</span></button>
       </nav>
 
+      <!-- 常驻状态条。扫描时间与待处理数以前只在一条 toast 里出现过一次，之后
+           就再也查不到；而「现在看到的数字是什么时候的」正是这个应用最需要回答的
+           问题（写入直接落盘，资产随时可能被别的工具改掉）。 -->
+      <div class="side-foot" id="side-foot">
+        <span class="side-dot" id="side-dot" aria-hidden="true"></span>
+        <span class="side-foot-text" id="side-status" aria-live="polite"></span>
+        <!-- 图标轨道下的短读数（见 styles.css `.side-foot-short`）。窄屏里状态
+             徽标全被 display:none，这是「有几项待处理」唯一还看得见的地方；
+             与长文案同时存在于无障碍树之外的那一半由 aria-live 承担。 -->
+        <span class="side-foot-short" id="side-short" aria-hidden="true"></span>
+      </div>
     </aside>
 
     <main class="main">
