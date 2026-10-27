@@ -1,6 +1,6 @@
 [package]
 name = "agentkeeper-shell"
-version = "0.2.3"
+version = "0.2.4"
 description = "AgentKeeper desktop shell (Tauri 2)"
 authors = ["AgentKeeper"]
 license = "MIT"

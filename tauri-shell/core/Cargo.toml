@@ -1,6 +1,6 @@
 [package]
 name = "agentkeeper-core"
-version = "0.2.3"
+version = "0.2.4"
 description = "AgentKeeper asset core: scanning, validation, store, MCP server — no Tauri dependency"
 authors = ["AgentKeeper"]
 license = "MIT"

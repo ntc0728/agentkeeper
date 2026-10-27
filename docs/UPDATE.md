@@ -208,12 +208,14 @@ npm run tauri:bundle           # 前端 → dist，构建，归档到 release/
 | 8 | `cargo tauri build` + `package-release.js --no-build` | 产物落在 `tauri-shell/target/release/bundle/nsis/` 与 `release/*.zip` |
 | 9 | `softprops/action-gh-release@v2` | 上传**安装包 exe + 便携 zip**；tag 含 `beta` / `rc` / `alpha` 时自动标记 pre-release |
 
-**两条发布通道**：
+**两条构建通道**：
 
 | 触发 | 结果 |
 |---|---|
-| push tag `vX.Y.Z` | 正式版，版本号从 tag 戳进构建 |
-| push 到 `main` | **Pre-release** `v<树内版本>-ci.<run_number>` —— 每次提交都上 Releases 页，但 GitHub 的 `/releases/latest` 自动排除 pre-release，稳定通道用户不受影响；`-ci.N` 按 semver 排在正式版之下 |
+| push tag `vX.Y.Z` | 正式发布：版本号从 tag 戳进构建，安装包与便携包挂到该 tag 的 Release 上 |
+| push 到 `main` | **只构建，不发布**：同一套产物作为该次运行的 Artifacts 上传（`agentkeeper-windows-x64`，保留 30 天），Releases 页不会多出任何条目 |
+
+推 `main` 不发布是有意的：早先每次推 `main` 都会生成一条 `v<版本>-ci.<run>` 预发布，把真正的版本埋在 CI 噪音下面（应用内更新器本来就不看预发布，那些条目纯属杂物）。需要某个提交的产物时，从该次运行的 Artifacts 下载即可。
 
 > **⚠️ 版本号必须回写 `Cargo.toml` + `tauri.conf.json`（第 5 步）——这是整条发布链最容易翻车的地方。**
 >
