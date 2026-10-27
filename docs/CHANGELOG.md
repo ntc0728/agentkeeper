@@ -1,11 +1,8 @@
 # 改动记录 → Release 说明
 
 发版说明（Release body）不是自动生成的。本仓库不走 Pull Request，GitHub 的
-`generate_release_notes` 只会产出一行
-
-```
-**Full Changelog**: https://github.com/ntc0728/agentkeeper/compare/v0.2.0...v0.2.1
-```
+`generate_release_notes` 只会产出一条形如「两个 tag 之间的提交对比链接」的单行
+文本，其中不含任何面向使用者的改动描述。
 
 而**应用内的更新面板显示的就是这段文字**。所以说明必须人手写，并且按人读得懂的
 格式写在仓库里。
