@@ -85,15 +85,20 @@ function walk(dir, out = []) {
 }
 
 function filesFor(pattern) {
-  const base = path.join(ROOT, path.dirname(pattern));
-  const ext = path.basename(pattern);
-  if (!fs.existsSync(base)) return [];
+  // `**` 不能直接丢给 `path.dirname()`：它会把 `src/**` 当成字面目录名拼出来，
+  // 目录不存在就静默返回空数组。之前 `tauri-shell/src-tauri/src/**/*.rs` 就是这样
+  // 一直匹配 0 个文件，`lib.rs`（348 行注释）从未被统计，覆盖率虚高。
+  // 基准目录取第一个 `**` 之前的部分。
+  const globAt = pattern.indexOf('**');
+  const basePart = globAt >= 0 ? pattern.slice(0, globAt) : path.dirname(pattern);
+  const base = path.join(ROOT, basePart || '.');
+  const ext = path.extname(pattern.replace(/\*\*/g, '').replace(/^\*+/, ''));
+  if (!fs.existsSync(base)) {
+    throw new Error(`注释体检：路径不存在 ${basePart}（来自 ${pattern}）`);
+  }
   const all = walk(base);
-  if (ext === '*.js') return all.filter((f) => f.endsWith('.js'));
-  if (ext === '*.rs') return all.filter((f) => f.endsWith('.rs'));
-  if (ext === '*.yml') return all.filter((f) => f.endsWith('.yml'));
-  if (ext === 'build.rs') return all.filter((f) => f.endsWith('build.rs'));
-  return all.filter((f) => f.endsWith(path.extname(ext)));
+  if (!ext) return all.filter((f) => f.endsWith('build.rs'));
+  return all.filter((f) => f.endsWith(ext));
 }
 
 const seen = new Set();

@@ -520,20 +520,20 @@ mod tests {
     //! 只要改过 scripts/adapter-table.js 就要重新生成。下面那两个 JSON 常量
     //! 就是该脚本的输出——用 os.homedir() 设为 FAKE_HOME 之后求值得到的适配器
     //! 表，外加针对它解析出来的每一条路径模板。绝不要手工编辑它们：手改过的
-    //! 快照断言的是编辑者当时相信的东​西，而不是这张表实际说了什么。
+    //! 快照断言的是编辑者当时相信的内容，而不是这张表实际说了什么。
     use super::*;
     use crate::model::join_native;
     use serde_json::Value;
     use std::path::Path;
 
-    /// Fake user home / project root the snapshot below was taken with.
-    /// Nothing here touches the real machine — every assertion compares
-    /// strings produced by the two adapter tables for the same fake input.
+    /// 下面这份快照是在这个假用户主目录 / 项目根目录下取的。
+    /// 这里没有任何东西会碰到真实机器——每一条断言比较的都是两张适配器表
+    /// 在同一份假输入上产出的字符串。
     const FAKE_HOME: &str = "C:/ak-parity-home";
     const FAKE_PROJECT: &str = "C:/ak-parity-project";
 
-    /// scripts/adapter-table.js loaded with os.homedir() === FAKE_HOME, plus the
-    /// family and notes fields.
+    /// scripts/adapter-table.js 在 os.homedir() === FAKE_HOME 下加载的结果，外加
+    /// family 和 notes 两个字段。
     const DECLARED_TABLE_JSON: &str = r##"{
  "fakeHome": "C:/ak-parity-home",
  "fakeProject": "C:/ak-parity-project",
@@ -1285,10 +1285,9 @@ mod tests {
  ]
 }"##;
 
-    /// Every path template of every adapter, resolved on the reference side:
-    /// path.resolve(home, rel) for globals and path.resolve(proj.dir, rel) for
-    /// projects, with home coming from resolveHome() in
-    /// scripts/adapter-table.js.
+    /// 每一个适配器的每一条路径模板，都在参考侧解析过：
+    /// global 用 path.resolve(home, rel)，project 用 path.resolve(proj.dir, rel)，
+    /// 其中 home 来自 scripts/adapter-table.js 里的 resolveHome()。
     const RESOLVED_PATHS_JSON: &str = r##"{
   "workbuddy": {"home":"C:/ak-parity-home/.workbuddy","globalPaths":{"globals.skills:skills":"C:\\ak-parity-home\\.workbuddy\\skills","globals.plugins:plugins/cache":"C:\\ak-parity-home\\.workbuddy\\plugins\\cache","globals.plugins:plugins/marketplaces":"C:\\ak-parity-home\\.workbuddy\\plugins\\marketplaces","globals.rules:SOUL.md":"C:\\ak-parity-home\\.workbuddy\\SOUL.md","globals.rules:IDENTITY.md":"C:\\ak-parity-home\\.workbuddy\\IDENTITY.md","globals.rules:USER.md":"C:\\ak-parity-home\\.workbuddy\\USER.md","globals.rules:BOOTSTRAP.md":"C:\\ak-parity-home\\.workbuddy\\BOOTSTRAP.md","globals.memory:MEMORY.md":"C:\\ak-parity-home\\.workbuddy\\MEMORY.md","globals.memory:memory":"C:\\ak-parity-home\\.workbuddy\\memory","globals.mcp:mcp.json":"C:\\ak-parity-home\\.workbuddy\\mcp.json","globals.mcp:mcp-approvals.json":"C:\\ak-parity-home\\.workbuddy\\mcp-approvals.json","globals.mcp:mcp-tool-list.json":"C:\\ak-parity-home\\.workbuddy\\mcp-tool-list.json"},"projectPaths":{"projects.skills:.workbuddy/skills":"C:\\ak-parity-project\\.workbuddy\\skills","projects.rules:.workbuddy/rules":"C:\\ak-parity-project\\.workbuddy\\rules","projects.rules:AGENTS.md":"C:\\ak-parity-project\\AGENTS.md","projects.rules:CLAUDE.md":"C:\\ak-parity-project\\CLAUDE.md","projects.memory:.workbuddy/memory":"C:\\ak-parity-project\\.workbuddy\\memory","projects.memory:.workbuddy/MEMORY.md":"C:\\ak-parity-project\\.workbuddy\\MEMORY.md","projects.mcp:.workbuddy/mcp.json":"C:\\ak-parity-project\\.workbuddy\\mcp.json","projects.plugins:.workbuddy/plugins":"C:\\ak-parity-project\\.workbuddy\\plugins"}},
   "claude-code": {"home":"C:/ak-parity-home/.claude","globalPaths":{"globals.skills:skills":"C:\\ak-parity-home\\.claude\\skills","globals.plugins:plugins":"C:\\ak-parity-home\\.claude\\plugins","globals.rules:CLAUDE.md":"C:\\ak-parity-home\\.claude\\CLAUDE.md","globals.rules:settings.json":"C:\\ak-parity-home\\.claude\\settings.json","globals.memory:CLAUDE.md":"C:\\ak-parity-home\\.claude\\CLAUDE.md","globals.mcp:.mcp.json":"C:\\ak-parity-home\\.claude\\.mcp.json","globals.mcp:settings.json":"C:\\ak-parity-home\\.claude\\settings.json","globals.mcp:mcp.json":"C:\\ak-parity-home\\.claude\\mcp.json"},"projectPaths":{"projects.skills:.claude/skills":"C:\\ak-parity-project\\.claude\\skills","projects.rules:.claude/CLAUDE.md":"C:\\ak-parity-project\\.claude\\CLAUDE.md","projects.rules:CLAUDE.md":"C:\\ak-parity-project\\CLAUDE.md","projects.rules:AGENTS.md":"C:\\ak-parity-project\\AGENTS.md","projects.memory:.claude/memory":"C:\\ak-parity-project\\.claude\\memory","projects.memory:CLAUDE.local.md":"C:\\ak-parity-project\\CLAUDE.local.md","projects.mcp:.mcp.json":"C:\\ak-parity-project\\.mcp.json","projects.mcp:.claude/settings.json":"C:\\ak-parity-project\\.claude\\settings.json","projects.plugins:.claude/plugins":"C:\\ak-parity-project\\.claude\\plugins"}},
@@ -1341,10 +1340,9 @@ mod tests {
         v.iter().map(|s| (*s).to_string()).collect()
     }
 
-    /// Compare two paths the way the filesystem does. path.resolve rewrites
-    /// every separator to the native one, while this implementation keeps the slash that
-    /// resolve_home preserved after the tilde, so the raw strings can differ in
-    /// separator only. What must match is the directory they name.
+    /// 按文件系统的方式比较两个路径。path.resolve 会把每一个分隔符都改写成
+    /// 平台原生的那一种，而本实现保留了 resolve_home 在波浪号之后留存的斜杠，
+    /// 所以原始字符串只可能在分隔符上不同。真正必须一致的是它们所指的目录。
     fn same_path(js: &str, rust: &str) -> bool {
         fn norm(s: &str) -> String {
             s.replace('\\', "/")
@@ -1352,7 +1350,7 @@ mod tests {
         norm(js) == norm(rust)
     }
 
-    /// 17 adapters, declaration order preserved, every field identical.
+    /// 17 个适配器，声明顺序保持不变，每个字段都完全一致。
     #[test]
     fn the_declared_table_and_the_rust_one_agree_field_for_field() {
         let js = declared_agents_json();
@@ -1393,7 +1391,7 @@ mod tests {
                 id
             );
 
-            // notes is undefined on every adapter but two.
+            // notes 在除两个之外的所有适配器上都是 undefined。
             let declared_notes = j["notes"].as_str().map(|s| s.to_string());
             assert_eq!(
                 r.notes.map(|s| s.to_string()),
@@ -1402,7 +1400,7 @@ mod tests {
                 id
             );
 
-            // family is a plain field; this implementation derives it from the id.
+            // family 是一个普通字段；本实现是从 id 推导出来的。
             assert_eq!(
                 family(r.id),
                 j["family"].as_str().unwrap_or_default(),
@@ -1484,8 +1482,8 @@ mod tests {
         }
     }
 
-    /// Every declared id resolves here, and an unknown id resolves to nothing instead
-    /// of a guessed path.
+    /// 每一个声明过的 id 都能在这里解析出来，而未知 id 解析出空，而不是
+    /// 一个靠猜的路径。
     #[test]
     fn by_id_covers_every_declared_agent() {
         for j in declared_agents_json() {
@@ -1496,9 +1494,9 @@ mod tests {
         assert!(by_id("claude-cod").is_none());
     }
 
-    /// Byte-exact: only the tilde is substituted, the rest of the token —
-    /// including the slash right behind it — stays as written. path.resolve
-    /// would normalise it away, so this asserts the raw string.
+    /// 逐字节精确：只有波浪号被替换，记号的其余部分——包括紧跟在它后面的那个
+    /// 斜杠——都保持原样。path.resolve 会把它规范化掉，所以这里断言的是原始
+    /// 字符串。
     #[test]
     fn resolve_home_substitutes_the_home_placeholder_byte_for_byte() {
         assert_eq!(
@@ -1518,7 +1516,7 @@ mod tests {
                 want
             );
         }
-        // A bare tilde is the home itself; a token without one passes through.
+        // 单独的波浪号就是主目录本身；不带波浪号的记号原样穿过。
         assert_eq!(resolve_home("~", FAKE_HOME).as_deref(), Some(FAKE_HOME));
         assert_eq!(resolve_home("", FAKE_HOME), None);
         assert_eq!(
@@ -1527,12 +1525,11 @@ mod tests {
         );
     }
 
-    /// The blind spot asset parity cannot see: a template that resolves to the
-    /// wrong directory is invisible while neither build has that directory.
+    /// 资产对齐看不见的盲区：当两边的构建都没有那个目录时，一条解析到错误
+    /// 目录的模板是完全隐形的。
     ///
-    /// Driven from the Rust table (what this implementation walks) and checked
-    /// against the snapshot in both directions — a template must exist on
-    /// both sides, and the snapshot must not carry one we dropped.
+    /// 驱动源是 Rust 表（也就是本实现实际遍历的那张表），并且与快照做双向
+    /// 核对——模板必须在两边都存在，而快照也不能带着一条我们已经删掉的模板。
     #[test]
     fn every_path_template_resolves_under_the_declared_home() {
         let resolved = resolved_paths_json();
@@ -1608,8 +1605,8 @@ mod tests {
         );
     }
 
-    /// The shared directory is a constant rather than an adapter, so it drifts
-    /// easily: assert both the token and its expansion.
+    /// 共享目录是一个常量而不是一个适配器，所以它很容易漂移：这里把记号本身
+    /// 和它的展开结果都断言一遍。
     #[test]
     fn shared_skills_dir_is_the_declared_constant() {
         let table = declared_table_json();

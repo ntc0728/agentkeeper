@@ -1,51 +1,45 @@
-//! YAML 1.2 emit + parse, matching the `yaml` npm package closely enough that
-//! a write followed by the agent's own reader is a no-op.
+//! YAML 1.2 的输出与解析，紧贴 `yaml` npm 包的行为到这种程度：我们写一次文件，
+//! 随后 agent 用它自己的读取器读回去，等于什么都没发生。
 //!
-//! Two callers:
-//!   * `frontmatter::serialize` — SKILL.md / rule frontmatter
-//!   * `keeper::upsert_mcp` / `delete_mcp` — YAML-shaped MCP configs
+//! 两个调用方：
+//!   * `frontmatter::serialize` —— SKILL.md / rule 的 frontmatter
+//!   * `keeper::upsert_mcp` / `delete_mcp` —— YAML 形态的 MCP 配置
 //!
-//! Contract (do not change the signatures — two other modules are compiled
-//! against them):
+//! 契约（不要改这些签名——另外两个模块是照着它们编译的）：
 //!
-//! * `parse(src) -> Result<Value, String>` — full YAML 1.2. `Err` carries a
-//!   human-readable message; callers turn that into
-//!   `config file is corrupt, refusing to overwrite: <path>`.
-//! * `stringify(&Value) -> String` — block style, two-space indent, **never
-//!   wrapped** (`YAML.stringify(v, {lineWidth: 0})`), and with **no trailing
-//!   newline** (`stringifyYamlSubset` strips it).
+//! * `parse(src) -> Result<Value, String>` —— 完整的 YAML 1.2。`Err` 里带一条
+//!   给人读的消息；调用方会把它变成
+//!   `config file is corrupt, refusing to overwrite: <path>`。
+//! * `stringify(&Value) -> String` —— 块风格、两空格缩进、**绝不折行**
+//!   （`YAML.stringify(v, {lineWidth: 0})`），而且**不带末尾换行**
+//!   （`stringifyYamlSubset` 会把它剥掉）。
 //!
-//! Parsing is delegated to `serde_yaml_ng` (the same parser
-//! `frontmatter::parse_yaml` uses, so the two can never disagree). An empty
-//! document arrives as `Value::Null`; the reference callers spell that `|| {}` and
-//! the Rust ones do the same.
+//! 解析交给 `serde_yaml_ng`（就是 `frontmatter::parse_yaml` 用的那个解析器，所以
+//! 两者不可能给出不一致的结果）。空文档进来是 `Value::Null`；参考侧的调用方把它
+//! 写成 `|| {}`，Rust 侧也一样处理。
 //!
-//! Emitting is hand-written rather than `serde_yaml_ng::to_string` because the
-//! npm package is called with `lineWidth: 0` and serde_yaml wraps at 80
-//! columns. Round-trip fidelity is the hard requirement: for every value `v`,
-//! `parse(&stringify(&v)) == v`, integers staying integers and floats staying
-//! floats. Cosmetic differences from the npm emitter, all documented here:
+//! 输出是手写的，而不是用 `serde_yaml_ng::to_string`，因为 npm 包是按
+//! `lineWidth: 0` 调用的，而 serde_yaml 会在 80 列处折行。往返保真是硬要求：
+//! 对每个值 `v` 都有 `parse(&stringify(&v)) == v`，整数仍然是整数、浮点仍然是
+//! 浮点。与 npm 输出器之间的外观差异，都在这里记录清楚：
 //!
-//!   * multi-line strings are written as one double-quoted line with `\n`
-//!     escapes instead of a `|` literal block (a block would also be correct,
-//!     but chomping/indentation edge cases are not worth the round-trip risk);
-//!   * strings that need quoting are double-quoted; npm prefers single quotes
-//!     when the string contains no escapes;
-//!   * a plain string is kept unquoted whenever it re-parses as that exact
-//!     string, which is decided by actually parsing the candidate, not by
-//!     pattern-matching YAML's reserved words.
+//!   * 多行字符串写成一行双引号字符串加 `\n` 转义，而不是 `|` 字面量块
+//!     （用块本来也是正确的，但 chomping / 缩进的边界情况不值得冒往返的风险）；
+//!   * 需要引号的字符串一律用双引号；字符串里没有转义时 npm 更偏好单引号；
+//!   * 只要一段裸字符串重新解析回来还是同一个字符串，就保持不加引号——这是靠
+//!     真正去解析那个候选串来判定的，而不是靠模式匹配 YAML 的保留字。
 //!
-//! Everything else (block style, two-space indent, `- key: value` sequence
-//! layout, `{}` / `[]` for empty collections, key order) follows npm's output.
+//! 其余部分（块风格、两空格缩进、`- key: value` 序列布局、空集合写成 `{}` /
+//! `[]`、键的顺序）都跟随 npm 的输出。
 
 use serde_json::{Map, Value};
 
-/// `YAML.parse()` — `Err(String)` on a syntax error.
+/// `YAML.parse()` —— 语法错误时返回 `Err(String)`。
 pub fn parse(src: &str) -> Result<Value, String> {
     serde_yaml_ng::from_str::<Value>(src).map_err(|e| e.to_string())
 }
 
-/// `YAML.stringify(v, { lineWidth: 0 })` minus the trailing newline.
+/// `YAML.stringify(v, { lineWidth: 0 })`，去掉末尾那一个换行。
 pub fn stringify(value: &Value) -> String {
     emit_node(value, 0).join("\n")
 }
@@ -54,8 +48,7 @@ fn pad(indent: usize) -> String {
     " ".repeat(indent)
 }
 
-/// Scalar or empty collection rendered on one line; `None` for anything that
-/// has to be written as a nested block.
+/// 标量或空集合渲染在同一行；凡是必须写成嵌套块的都返回 `None`。
 fn inline(value: &Value) -> Option<String> {
     match value {
         Value::Null => Some("null".to_string()),
@@ -101,7 +94,7 @@ fn emit_seq(items: &[Value], indent: usize) -> Vec<String> {
         match inline(item) {
             Some(text) => out.push(format!("{}- {}", pad(indent), text)),
             None => {
-                // npm puts the first key of a map item on the dash line:
+                // npm 会把 map 项的第一个键放在短横线那一行上：
                 //   - name: a
                 //     value: b
                 let mut sub = emit_node(item, indent + 2);
@@ -125,9 +118,8 @@ fn format_key(key: &str) -> String {
     }
 }
 
-/// A key is safe unquoted when `key: x` parses back to exactly that one entry.
-/// The probe costs one tiny parse per key, which is nothing next to the file
-/// write it is about to be part of.
+/// 当 `key: x` 解析回来恰好就是那一条时，这个键不加引号是安全的。这次探测对每个
+/// 键只多花一次极小的解析，和它即将参与的那次文件写入相比不值一提。
 fn plain_key_ok(key: &str) -> bool {
     if key.is_empty() || key.chars().any(is_control) {
         return false;
@@ -148,9 +140,9 @@ fn scalar(s: &str) -> String {
     }
 }
 
-/// `true` when `s` written bare still reads back as the same string. This is
-/// the definition npm's emitter approximates: anything that resolves to a
-/// number, boolean, null, timestamp or a different structure gets quoted.
+/// 当 `s` 裸着写出去、读回来仍然是同一个字符串时为 `true`。这正是 npm 输出器
+/// 近似逼近的那条定义：凡是会被解析成数字、布尔、null、时间戳或另一种结构的，
+/// 都要加引号。
 fn plain_ok(s: &str) -> bool {
     if s.is_empty() || s.starts_with(' ') || s.ends_with(' ') {
         return false;
@@ -165,8 +157,7 @@ fn is_control(c: char) -> bool {
     (c as u32) < 0x20 || c == '\u{7f}'
 }
 
-/// YAML double-quoted scalar. UTF-8 passes through unchanged; only the quote,
-/// the backslash and control characters are escaped.
+/// YAML 双引号标量。UTF-8 原样穿过；只有引号、反斜杠和控制字符需要转义。
 fn double_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -264,11 +255,11 @@ mod tests {
     #[test]
     fn long_lines_are_not_wrapped() {
         let long = "word ".repeat(80).trim_end().to_string();
-        // A 400-character scalar must stay on the one line its key owns.
+        // 400 个字符的标量必须老老实实待在它那个键所占的这一行上。
         let text = stringify(&json!({ "body": long }));
         assert_eq!(text.lines().count(), 1, "value was wrapped: {:?}", text);
         assert!(text.ends_with(&long));
-        // A bare scalar is one line too.
+        // 裸标量同样只有一行。
         let bare = stringify(&json!(long));
         assert_eq!(bare.lines().count(), 1);
         assert_eq!(bare, long);
@@ -279,7 +270,7 @@ mod tests {
         assert_eq!(parse("# only a comment\n").unwrap(), Value::Null);
         let err = parse("a: [1, 2").unwrap_err();
         assert!(!err.is_empty());
-        // Corrupt input must be an error, never a silent empty object.
+        // 损坏的输入必须报错，绝不能悄悄变成空对象。
         assert!(parse("\t- broken: [").is_err());
     }
 }

@@ -1,28 +1,26 @@
-//! TOML round-trip and comment-preserving section surgery, plus `line_diff()`.
+//! TOML 往返编解码、保留注释的分节手术，外加 `line_diff()`。
 //!
-//! Contract (do not change the signatures — `keeper.rs` is compiled against
-//! them):
+//! 契约（不要改这些签名——`keeper.rs` 是照着它们编译的）：
 //!
 //! * `parse(src) -> Result<Value, String>`
 //! * `stringify(&Value) -> Result<String, String>`
-//! * `splice_server(raw, server, section) -> String` — replace the
-//!   `[mcp_servers.<server>]` region (including nested subtables) with
-//!   `section`, or append it when the server is new. Every byte outside that
-//!   region — comments included — must survive.
+//! * `splice_server(raw, server, section) -> String` —— 用 `section` 替换
+//!   `[mcp_servers.<server>]` 所在的整段区域（含嵌套子表），若这个 server 是
+//!   新的则追加。该区域之外的每一个字节——注释也算在内——都必须活下来。
 //! * `remove_server(raw, server) -> String`
 //! * `line_diff(old, new) -> Vec<Value>`
 //!
-//! The splice helpers are byte-for-byte ports of `spliceTomlServer`,
-//! `removeTomlServer`, `findTomlServerRegion` and `lineDiff`, including the
-//! quirks: `\r?\n` line splitting that keeps a trailing empty line, the
-//! `\n{3,}` collapse that only ever fires for LF files (CRLF never contains
-//! three adjacent `\n`), and `\s` being the whitespace set the format defines.
+//! 这些手术辅助函数是 `spliceTomlServer`、`removeTomlServer`、
+//! `findTomlServerRegion` 和 `lineDiff` 的逐字节移植，连怪癖也一并照搬：
+//! 按 `\r?\n` 切行会留下末尾的空行；`\n{3,}` 折叠只对 LF 文件才会触发
+//! （CRLF 里永远不会出现三个相邻的 `\n`）；`\s` 用的是这个格式本身定义的
+//! 空白字符集。
 //!
-//! `stringify` emits a document with `toml::to_string`, which produces the
-//! `[mcp_servers.<name>]` header followed by its keys and a
-//! `[mcp_servers.<name>.env]` subtable — the same shape `@iarna/toml` writes.
-//! Its exact spacing only needs to be valid TOML because the result is spliced
-//! textually and re-parsed afterwards.
+//! `stringify` 用 `toml::to_string` 输出文档，它会生成
+//! `[mcp_servers.<name>]` 表头、其下的各个键，以及
+//! `[mcp_servers.<name>.env]` 子表——和 `@iarna/toml` 写出来的形状一致。
+//! 它具体的空格排布只需要是合法 TOML 就行，因为结果随后是按文本拼接、再重新
+//! 解析的。
 
 use std::sync::OnceLock;
 
@@ -31,16 +29,15 @@ use serde_json::{Map, Value};
 
 use super::{ecma_trim, ecma_trim_end};
 
-/// `TOML.parse()` — `Err(String)` on a syntax error.
+/// `TOML.parse()` —— 语法错误时返回 `Err(String)`。
 pub fn parse(src: &str) -> Result<Value, String> {
     let doc: toml::Value = toml::from_str(src).map_err(|e| e.message().to_string())?;
     Ok(to_json(doc))
 }
 
-/// TOML datetimes have no `serde_json::Value` counterpart; the reference side gets a
-/// `Date` and only ever stringifies it back, so keeping the literal text is
-/// the closest faithful mapping (and, unlike a hard error, does not make a
-/// config with a timestamp look corrupt).
+/// TOML 的 datetime 在 `serde_json::Value` 里没有对应类型；参考侧拿到的是一个
+/// `Date`，而它只会把这东西再转回字符串，所以保留字面文本是最忠实的映射
+/// （而且，与直接报错不同，这不会让一份带时间戳的配置看起来像是损坏了）。
 fn to_json(value: toml::Value) -> Value {
     match value {
         toml::Value::String(s) => Value::String(s),
@@ -63,11 +60,11 @@ pub fn stringify(value: &Value) -> Result<String, String> {
 }
 
 /* ------------------------------------------------------------------ */
-/* Section surgery                                                     */
+/* 分节手术                                                             */
 /* ------------------------------------------------------------------ */
 
-/// `String(x).split(/\r?\n/)` — a trailing separator yields a trailing empty
-/// element, and a lone `\r` does not split.
+/// `String(x).split(/\r?\n/)` —— 末尾的分隔符会产出一个末尾的空元素，而单独的
+/// `\r` 不会触发切分。
 fn split_lines(raw: &str) -> Vec<String> {
     raw.split('\n')
         .map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
@@ -87,7 +84,7 @@ fn any_header_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^\s*\[\s*([^\]]+?)\s*\]\s*$").unwrap())
 }
 
-/// `cleanTomlKey` — strip the brackets, trim, then peel one layer of quotes.
+/// `cleanTomlKey` —— 去掉方括号，trim，再剥掉一层引号。
 fn clean_key(h: &str) -> String {
     let t = ecma_trim(h.trim_start_matches('[').trim_end_matches(']'));
     let b = t.as_bytes();
@@ -106,8 +103,8 @@ struct Region {
     end: usize,
 }
 
-/// `findTomlServerRegion` — the header line plus every following line, up to
-/// (not including) the next header that is a different table.
+/// `findTomlServerRegion` —— 表头那一行，加上紧随其后的每一行，直到
+/// （但不包含）下一个指向别的表的表头为止。
 fn find_region(lines: &[String], server: &str) -> Option<Region> {
     let head = header_re(server);
     let start = lines.iter().position(|l| head.is_match(l))?;
@@ -128,8 +125,8 @@ fn find_region(lines: &[String], server: &str) -> Option<Region> {
     Some(Region { start, end })
 }
 
-/// `s.replace(/\n{3,}/g, '\n\n')` — runs of bare `\n` only, so CRLF files are
-/// untouched, exactly like the reference regex.
+/// `s.replace(/\n{3,}/g, '\n\n')` —— 只处理纯 `\n` 构成的连续段，所以 CRLF 文件
+/// 不受影响，与参考正则完全一致。
 fn collapse_newlines(s: &str) -> String {
     fn flush(run: usize, out: &mut String) {
         if run >= 3 {
@@ -193,11 +190,11 @@ pub fn remove_server(raw: &str, server: &str) -> String {
 }
 
 /* ------------------------------------------------------------------ */
-/* Diff                                                                */
+/* 差异                                                                 */
 /* ------------------------------------------------------------------ */
 
-/// `lineDiff(a, b)` → `[{t:'mod',n,old,next} | {t:'del',n,old} | {t:'add',n,next}]`,
-/// truncated to 400 entries.
+/// `lineDiff(a, b)` 产出 `[{t:'mod',n,old,next} | {t:'del',n,old} | {t:'add',n,next}]`，
+/// 截断到 400 条。
 pub fn line_diff(old: &str, new: &str) -> Vec<Value> {
     let a = split_lines(old);
     let b = split_lines(new);
@@ -259,10 +256,9 @@ k = 1";
 
     #[test]
     fn splice_replaces_only_the_server_region() {
-        // A comment sitting between two tables belongs to the *preceding*
-        // region (the reference region ends at the next header line, whatever is in
-        // between), so "# between" goes away with alpha; "# tail comment"
-        // still belongs to beta and is not touched.
+        // 夹在两张表之间的注释属于它*前面*那个区域（参考实现的区域在下一行
+        // 表头处就结束了，不管中间放的是什么），所以 "# between" 会跟着 alpha
+        // 一起消失；"# tail comment" 仍然属于 beta，不会被碰。
         let section = "[mcp_servers.alpha]\ncommand = \"new-cmd\"\nenv = { A = \"1\" }\n";
         let expected = "# agentkeeper: keep this header\n\
 \n\
@@ -317,9 +313,8 @@ k = 1\n";
     #[test]
     fn crlf_is_preserved() {
         let raw = "# top\r\n[mcp_servers.a]\r\ncommand = \"x\"\r\n";
-        // The region runs to end of file and swallows the trailing empty
-        // element produced by the final CRLF, and the section's own trailing
-        // newline is stripped — same as the reference port.
+        // 这个区域一直延伸到文件末尾，把末尾那个 CRLF 产生的空元素也一起吞掉，
+        // 同时 section 自带的末尾换行会被剥掉——与参考移植的行为一致。
         let out = splice_server(raw, "a", "[mcp_servers.a]\ncommand = \"y\"\n");
         assert_eq!(out, "# top\r\n[mcp_servers.a]\r\ncommand = \"y\"");
         assert!(!out.replace("\r\n", "").contains('\n'));
@@ -333,7 +328,7 @@ k = 1\n";
         let raw = "[mcp_servers.a]\ncommand = \"x\"\n[other]\n\n\n\nk = 1\n";
         let out = splice_server(raw, "a", "[mcp_servers.a]\ncommand = \"y\"\n");
         assert_eq!(out, "[mcp_servers.a]\ncommand = \"y\"\n[other]\n\nk = 1\n");
-        // Two newlines stay two; only three or more collapse.
+        // 两个换行还是两个；只有三个及以上才会被折叠。
         assert_eq!(collapse_newlines("a\n\nb"), "a\n\nb");
         assert_eq!(collapse_newlines("a\n\n\nb"), "a\n\nb");
         assert_eq!(collapse_newlines("a\n\n\n\n\nb"), "a\n\nb");

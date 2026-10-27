@@ -1,17 +1,16 @@
-//! AgentKeeper — Tauri shell.
+//! AgentKeeper 的 Tauri 外壳。
 //!
-//! The asset scanner lives in Rust (`agentkeeper-core`): `bootstrap` / `scan`
-//! return real data to the renderer in `src/renderer/app.js`, and every command
-//! answers with the response *shape* the renderer reads — a command that
-//! returned `{}` would prove nothing.
+//! 资产扫描器住在 Rust 里（`agentkeeper-core`）：`bootstrap` / `scan`
+//! 把真实数据返回给 `src/renderer/app.js` 中的渲染层，而每个命令都以
+//! 渲染层实际读取的响应*形状*作答——一个返回 `{}` 的命令什么也证明不了。
 //!
-//! The project list reaches the UI through `scan`; projects are added through
-//! `pick_project`, the only registry mutation path the renderer has.
+//! 项目列表经由 `scan` 到达 UI；项目的添加只走 `pick_project`，
+//! 这是渲染层唯一能改动注册表的路径。
 
-// The core is a separate crate so that it cannot reach a Tauri type. It is
-// re-exported under the name `core`, so every path below — and the integration
-// tests' `agentkeeper_shell_lib::core::…` — reads exactly as it did when the
-// modules lived in this crate.
+// core 是独立的 crate，这样它就不可能碰到任何 Tauri 类型。它在这里以
+// `core` 这个名字重新导出，于是下面每一条路径——以及集成测试里的
+// `agentkeeper_shell_lib::core::…`——读起来都跟这些模块还住在本 crate
+// 里时一模一样。
 pub use agentkeeper_core as core;
 
 use serde::{Deserialize, Serialize};
@@ -19,13 +18,13 @@ use serde_json::{json, Map, Value};
 
 use core::adapters::{resolve_home, Agent, AGENTS, SHARED_SKILLS_DIR};
 
-/// Payload shapes match what the renderer passes in.
+/// 载荷形状与渲染层传进来的保持一致。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetArgs {
     pub asset_id: Option<String>,
     pub content: Option<String>,
-    /// `distribute` sends `[{agentId, scope, projectId}]` — objects, not ids.
+    /// `distribute` 发的是 `[{agentId, scope, projectId}]`——是对象，不是 id。
     pub targets: Option<Vec<Value>>,
 }
 
@@ -41,15 +40,14 @@ fn user_home() -> String {
 }
 
 fn store_root() -> String {
-    // `AK_STORE_ROOT` wins, then the platform default directory.
+    // `AK_STORE_ROOT` 优先，其次才是平台默认目录。
     //
-    // It is NOT `<APPDATA>\agentkeeper`: the user-data directory resolves to
-    // `<APPDATA>\<productName>` — `productName` ("AgentKeeper") wins over the
-    // package `name` — and an `agentkeeper` subdirectory is appended. Getting
-    // this wrong does not fail loudly, it silently
-    // starts from an empty store beside the real one: no settings, no
-    // projects, no transaction journal. Verified against the directory that
-    // actually holds `settings.json` / `projects.json` on this machine.
+    // 它**不是** `<APPDATA>\agentkeeper`：用户数据目录解析成
+    // `<APPDATA>\<productName>`——`productName`（"AgentKeeper"）压过包里的
+    // `name`——然后再接上一个 `agentkeeper` 子目录。这里搞错不会响亮地
+    // 失败，而是悄无声息地从真实存储旁边的空存储起步：没有设置、没有
+    // 项目、没有事务日志。已对着本机上真正装着 `settings.json` /
+    // `projects.json` 的那个目录核对过。
     if let Ok(explicit) = std::env::var("AK_STORE_ROOT") {
         return explicit;
     }
@@ -57,7 +55,7 @@ fn store_root() -> String {
     let base = match std::env::var("APPDATA") {
         Ok(appdata) => appdata,
         Err(_) => match std::env::var("HOME") {
-            // The fallback anchor is `~/.config`.
+            // 回退时的锚点是 `~/.config`。
             Ok(home) => format!("{}{}.config", home, sep),
             Err(_) => ".".to_string(),
         },
@@ -65,8 +63,8 @@ fn store_root() -> String {
     format!("{0}{1}AgentKeeper{1}agentkeeper", base, sep)
 }
 
-/// The store for this call. Every command that touches the store builds it
-/// through here, so the store root can never disagree between them.
+/// 本次调用用的存储。每一个要碰存储的命令都从这里构造它，
+/// 于是各命令之间不可能出现存储根不一致。
 fn open_store() -> core::store::Store {
     core::store::Store::new(&store_root())
 }
@@ -102,8 +100,8 @@ fn project_paths_json(p: &core::adapters::ProjectPaths) -> Value {
     m.insert("rules".into(), json!(p.rules));
     m.insert("memory".into(), json!(p.memory));
     m.insert("mcp".into(), json!(p.mcp));
-    // `projects.plugins` is omitted entirely when the adapter declares none,
-    // and the scanner treats "absent" and "empty" differently.
+    // 适配器没声明插件时 `projects.plugins` 整个被省掉，
+    // 而扫描器对“缺席”和“空”是区别对待的。
     if let Some(plugins) = p.plugins {
         m.insert("plugins".into(), json!(plugins));
     }
@@ -117,16 +115,16 @@ fn agent_json(agent: &Agent, home: &str) -> Value {
         "vendor": agent.vendor,
         "accent": agent.accent,
         "home": home,
-        // Presence is enough: any entry counts, not just a directory.
+        // 只要存在就算：任何条目都作数，不只限于目录。
         "installed": std::path::Path::new(home).exists(),
         "globals": paths_json(&agent.globals),
         "projects": project_paths_json(&agent.projects)
     })
 }
 
-/// Startup tracing. A packaged GUI process cannot be watched through stdout,
-/// so the few milestones that matter are appended to a file instead. Disabled
-/// unless `AK_TRACE` names a writable path — a release build never writes one.
+/// 启动期追踪。打包后的 GUI 进程没法通过 stdout 观察，所以那几个要紧的
+/// 里程碑改为追加进一个文件。除非 `AK_TRACE` 指向一个可写路径，否则它是
+/// 关闭的——发布构建永远不会写这种文件。
 fn trace(msg: &str) {
     use std::io::Write;
     let Ok(path) = std::env::var("AK_TRACE") else {
@@ -149,10 +147,9 @@ fn trace(msg: &str) {
     }
 }
 
-/// WebView2 runtime presence, recorded before the window is built. If the
-/// loader cannot find the runtime the webview never finishes loading and the
-/// window stays hidden forever — indistinguishable from a hung app without
-/// this line.
+/// WebView2 运行时的存在情况，在窗口建起来之前记一笔。如果加载器找不到
+/// 这个运行时，webview 就永远加载不完，窗口也就永远隐藏着——没有这一行，
+/// 它与一个卡死的应用毫无区别。
 fn trace_webview2() {
     let candidates = [
         r"C:\Program Files (x86)\Microsoft\EdgeWebView\Application",
@@ -178,48 +175,44 @@ fn trace_webview2() {
             trace(&format!("webview2 dir={} MISSING", dir));
         }
     }
-    // WEBVIEW2_BROWSER_EXECUTABLE_FOLDER is what the loader honours when the
-    // runtime is not registered system-wide.
+    // 运行时没有在全系统注册时，加载器只认
+    // WEBVIEW2_BROWSER_EXECUTABLE_FOLDER 这个环境变量。
     match std::env::var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER") {
         Ok(v) => trace(&format!("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER={}", v)),
         Err(_) => trace("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER unset"),
     }
 }
 
-// --- IPC thread budget ----------------------------------------------------
+// --- IPC 线程预算 ---------------------------------------------------------
 //
-// How a command is declared is a performance decision, not a style one: a
-// synchronous `fn` runs **on the IPC thread**, so everything it blocks on is
-// time the window cannot repaint, cannot toast "working…" and cannot process
-// the next click. The rule below is what decides `async` + `spawn_blocking`
-// (the pattern `scan` established):
+// 一个命令怎么声明是性能决策，不是风格问题：同步的 `fn` 跑在 **IPC 线程**上，
+// 于是它阻塞的一切都是窗口不能重绘、不能弹出“处理中……”提示、不能处理
+// 下一次点击的时间。下面这条规则决定了什么时候用 `async` + `spawn_blocking`
+// （也就是 `scan` 立下的那个模式）：
 //
-// * heavy → move it to the blocking pool when the command
-//     - walks a directory tree (`scan`, `distribute`'s copy per target),
-//     - reads or writes a file whose size the store does not bound
-//       (`audit.jsonl` grows with use; `audit`/`local_stats` parse the whole
-//       journal on every call), or
-//     - opens a socket (`search_registry`, `update_check`, `update_download`)
-//       or spawns a process (`install_skill`, `export/import_bundle`,
-//       `update_install`).
-// * light → stays a synchronous `fn` when its entire IO is one small JSON
-//   document the schema bounds (`get_settings`, `save_settings`,
-//   `update_status`, `update_*_settings`/`token`/`skip`/`progress`/`cancel`) or
-//   one asset file the editor already holds in memory (`save_markdown`, `diff`,
-//   `save_skill`, `upsert_mcp`, the deletes). A thread hop plus a serialization
-//   step would buy nothing, and `bootstrap` additionally *must* be synchronous:
-//   it runs before the window paints, so nothing else can reply first.
+// * 重 → 放进阻塞池，当命令
+//     - 遍历目录树（`scan`、`distribute` 对每个目标的拷贝），
+//     - 读写存储不限制大小的文件（`audit.jsonl` 随使用增长；`audit` /
+//       `local_stats` 每次调用都要解析整本日志），或
+//     - 打开套接字（`search_registry`、`update_check`、`update_download`）
+//       或拉起进程（`install_skill`、`export/import_bundle`、
+//       `update_install` 这类命令）。
+// * 轻 → 保持同步 `fn`，当它的全部 IO 是一份 schema 约束得住的小 JSON
+//   文档（`get_settings`、`save_settings`、`update_status`、
+//   `update_*_settings`/`token`/`skip`/`progress`/`cancel`）或编辑器早已
+//   握在内存里的单个资产文件（`save_markdown`、`diff`、`save_skill`、
+//   `upsert_mcp`、那几个删除）。一次线程跳转外加一步序列化什么也换不来，
+//   而 `bootstrap` 另外还*必须*是同步的：它在窗口绘制之前运行，
+//   所以没有别的命令能抢在它前面答复。
 //
-// The return shapes are identical either way — every one of these commands
-// answers a JSON `Value` (or `Result<Value, String>`), and the renderer only
-// ever awaits a promise.
+// 无论走哪条路，返回形状都一模一样——这里每个命令都以 JSON `Value`（或
+// `Result<Value, String>`）作答，渲染层也只会 await 一个 promise。
 
 #[tauri::command]
 fn bootstrap() -> Value {
     let root = store_root();
-    // Creating the store tree here means the shell works against a fresh
-    // profile on first launch instead of failing on a missing meta.json or
-    // audit.jsonl.
+    // 在这里就把存储目录树建出来，意味着首次启动时外壳能对着一个全新的
+    // 用户配置工作，而不是因为缺 meta.json 或 audit.jsonl 而失败。
     let _ = core::settings::ensure_store(&root);
     seed_first_run(&root);
     let home = user_home();
@@ -236,12 +229,11 @@ fn bootstrap() -> Value {
     })
 }
 
-/// First-run seeding: only when the registry is empty and
-/// the bundled demos actually resolve.
+/// 首轮播种：只在注册表为空、且随包附带的演示项目确实解析得出来时才做。
 ///
-/// Running it from `bootstrap` rather than a one-shot startup hook is safe
-/// because `registry.add` rejects duplicates — so a second window load is a
-/// no-op, not a second copy of every demo project.
+/// 把它挂在 `bootstrap` 上而不是做成一次性的启动钩子是安全的，因为
+/// `registry.add` 会拒绝重复项——所以第二次加载窗口是个空操作，
+/// 而不是把每个演示项目再复制一遍。
 fn seed_first_run(store_root: &str) {
     core::registry::ensure_loaded(store_root);
     if !core::registry::list().is_empty() {
@@ -253,10 +245,10 @@ fn seed_first_run(store_root: &str) {
     core::registry::seed(store_root, &dir);
 }
 
-/// Locate the bundled demo-project seed directory.
+/// 定位随包附带的演示项目种子目录。
 ///
-/// `AK_DEMO_PROJECTS` wins; otherwise a sibling directory next to the
-/// executable (packaged) or a few levels above it (dev build).
+/// `AK_DEMO_PROJECTS` 优先；否则依次是可执行文件旁边的同级目录（打包版）
+/// 或往上几层的目录（开发构建）。
 fn demo_project_root() -> Option<String> {
     if let Ok(explicit) = std::env::var("AK_DEMO_PROJECTS") {
         let p = std::path::PathBuf::from(&explicit);
@@ -266,8 +258,8 @@ fn demo_project_root() -> Option<String> {
     }
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    // dev:      target/<profile>/ -> src-tauri -> tauri-shell -> <repo>
-    // packaged: <install>/         -> <install>
+    // 开发构建: target/<profile>/ -> src-tauri -> tauri-shell -> <repo>
+    // 打包版本: <install>/         -> <install>
     let candidates = [
         dir.join("demo-projects"),
         dir.join("../../../../demo-projects"),
@@ -279,8 +271,8 @@ fn demo_project_root() -> Option<String> {
         .map(|c| c.to_string_lossy().to_string())
 }
 
-/// The real scanner. Runs off the UI thread: even at ~200ms, blocking the
-/// main thread on a file walk is exactly the failure this command prevents.
+/// 真正的扫描器。不在 UI 线程上跑：即便只要约 200ms，把主线程卡在一次
+/// 文件遍历上也正是这个命令要避免的那种故障。
 #[tauri::command]
 async fn scan() -> Result<Value, String> {
     let home = user_home();
@@ -309,15 +301,15 @@ async fn scan() -> Result<Value, String> {
     .map_err(|e| format!("scan task failed: {}", e))
 }
 
-/// Settings defaults and reads live in `core::settings`, next
-/// to the atomic write they belong with — the command layer only adapts shapes.
+/// 设置的默认值与读取都住在 `core::settings` 里，紧挨着它们所属的那次
+/// 原子写入——命令层只负责适配形状。
 #[tauri::command]
 fn get_settings() -> Value {
     core::settings::read(&store_root())
 }
 
-/// Saves settings. Returns the `{ ok, settings }` envelope; a failed
-/// write reports `ok: false` rather than a success the disk never saw.
+/// 保存设置。返回 `{ ok, settings }` 信封；写入失败时报告 `ok: false`，
+/// 而不是报一个磁盘从未见过的成功。
 #[tauri::command]
 fn save_settings(settings: Value) -> Value {
     core::settings::save(&store_root(), &settings)
@@ -330,9 +322,9 @@ fn remove_project(id: String) -> Value {
     core::registry::remove(&id)
 }
 
-/// `ak:pick-project` — multi-select folder picker, then `registry.add` per
-/// folder. Cancelling must report `{ok:false, canceled:true}`: the renderer
-/// checks `r.canceled` before touching `r.added`.
+/// `ak:pick-project` —— 多选文件夹选择器，然后对每个文件夹调用一次
+/// `registry.add`。取消时必须报告 `{ok:false, canceled:true}`：渲染层会先
+/// 检查 `r.canceled`，再决定要不要碰 `r.added`。
 #[tauri::command]
 async fn pick_project(app: tauri::AppHandle) -> Value {
     use tauri_plugin_dialog::DialogExt;
@@ -363,10 +355,10 @@ async fn pick_project(app: tauri::AppHandle) -> Value {
     json!({ "ok": true, "added": added_items, "skipped": skipped })
 }
 
-/// `read_asset` — the asset drawer's only data source.
+/// `read_asset` —— 资产抽屉唯一的数据来源。
 ///
-/// Async + `spawn_blocking` because a cold cache triggers a scan; doing that on
-/// the UI thread would stall the whole app for the length of the scan.
+/// 用 async + `spawn_blocking`，因为缓存是冷的时候会触发一次扫描；
+/// 在 UI 线程上做这件事会让整个应用卡住，卡的时长等于一次扫描的时长。
 #[tauri::command]
 async fn read_asset(args: AssetArgs) -> Result<Value, String> {
     let Some(asset_id) = args.asset_id else {
@@ -379,13 +371,12 @@ async fn read_asset(args: AssetArgs) -> Result<Value, String> {
         .map_err(|e| format!("read_asset task failed: {}", e))
 }
 
-// --- write path: store/keeper transaction layer ---------------------------
+// --- 写路径：store/keeper 事务层 -------------------------------------------
 //
-// Every mutation goes through `Store::transaction` (validate → in-memory undo
-// snapshot → atomic rename → audit), so a failed write always leaves the tree as
-// it was. A write that answers `{ ok: true }` without touching a file is a fake
-// success — worse than a refusal, because silently-wrong data looks exactly like
-// correct data.
+// 每一次变更都走 `Store::transaction`（校验 → 内存内撤销快照 → 原子改名 →
+// 审计），所以一次失败的写入总是把目录树留在原样。一次没碰任何文件却答复
+// `{ ok: true }` 的写入是假成功——比拒绝更糟，因为悄悄出错的数据
+// 看上去与正确的数据一模一样。
 
 fn missing_asset_id() -> Value {
     json!({ "ok": false, "error": "assetId is required" })
@@ -399,7 +390,7 @@ fn save_markdown(args: AssetArgs) -> Value {
     open_keeper().save_markdown(&asset_id, &content)
 }
 
-/// Line diff between the file on disk and the editor buffer.
+/// 磁盘上的文件与编辑器缓冲区之间的逐行 diff。
 #[tauri::command]
 fn diff(args: AssetArgs) -> Value {
     let Some(asset_id) = args.asset_id else {
@@ -434,11 +425,10 @@ fn delete_asset(args: AssetArgs) -> Value {
     open_keeper().delete_asset(&asset_id)
 }
 
-/// `ak:distribute` — copy one asset to other agents' / projects' directories.
+/// `ak:distribute` —— 把一个资产拷贝到其他 agent / 项目目录。
 ///
-/// One directory copy plus one `store.transaction` per target, so this is heavy
-/// IO by the rule above: distributing to
-/// five agents would freeze the window for the whole copy.
+/// 每个目标一次目录拷贝外加一次 `store.transaction`，所以按上面的规则这属于
+/// 重 IO：分发到五个 agent 会让窗口冻结整个拷贝过程。
 #[tauri::command]
 async fn distribute(args: AssetArgs) -> Value {
     let Some(asset_id) = args.asset_id else {
@@ -455,12 +445,11 @@ async fn distribute(args: AssetArgs) -> Value {
         )
 }
 
-/// Seed the asset cache before a baseline read/write.
+/// 在一次基线读/写之前把资产缓存喂饱。
 ///
-/// Both baseline commands are only meaningful over a scan, and the cache starts
-/// empty after launch, so a cold Health page would otherwise run the *whole*
-/// scan on the IPC thread. Shared here so the two commands cannot drift apart
-/// on when they scan.
+/// 两个基线命令都只在一次扫描的结果之上才有意义，而缓存启动后是空的，
+/// 所以冷启动下的健康页否则会在 IPC 线程上跑*整场*扫描。在这里共享出来，
+/// 是为了让这两个命令不会在“什么时候扫描”上各走各的。
 fn ensure_scan_cache(root: &str) {
     if core::assets::cached_count() > 0 {
         return;
@@ -470,9 +459,9 @@ fn ensure_scan_cache(root: &str) {
     let _ = core::scan::scan_payload(&home, &projects);
 }
 
-/// `ak:baseline-diff` — compares the current scan against `baseline.json`.
-/// Read-only, and the one call the Health page blocks on — which is why it must
-/// not block the IPC thread: on a cold cache it runs a full scan first.
+/// `ak:baseline-diff` —— 把当前扫描结果与 `baseline.json` 比较。
+/// 只读，且是健康页唯一会阻塞等待的调用——正因如此它绝不能阻塞 IPC 线程：
+/// 缓存冷的时候它会先跑一整场扫描。
 #[tauri::command]
 async fn baseline_diff() -> serde_json::Value {
     tauri::async_runtime::spawn_blocking(|| {
@@ -495,12 +484,12 @@ async fn set_baseline() -> serde_json::Value {
     .unwrap_or_else(|e| json!({ "ok": false, "error": format!("baseline task failed: {}", e) }))
 }
 
-/// `ak:audit` → the store's audit reader. Returns a **plain array**: the renderer
-/// calls `audit.filter(...)` on it directly.
+/// `ak:audit` → 存储的审计读取器。返回一个**纯数组**：渲染层直接在它上面
+/// 调用 `audit.filter(...)`。
 ///
-/// Heavy on the blocking pool: `audit.jsonl` is append-only and unbounded, so
-/// this reads and parses the whole journal on every call (it only stops adding
-/// to the result at `limit`, after parsing).
+/// 放在阻塞池上算重活：`audit.jsonl` 是只追加且无上限的，所以每次调用都要
+/// 读取并解析整本日志（它只是在解析之后、到了 `limit` 才停止往结果里
+/// 添加）。
 #[tauri::command]
 async fn audit(opts: serde_json::Value) -> serde_json::Value {
     tauri::async_runtime::spawn_blocking(move || {
@@ -525,12 +514,11 @@ async fn audit(opts: serde_json::Value) -> serde_json::Value {
     .unwrap_or_else(|e| json!({ "ok": false, "error": format!("audit task failed: {}", e) }))
 }
 
-/// `ak:local-stats` → `{ ok, counts: { scans, writes, failed } }`.
+/// `ak:local-stats` → `{ ok, counts: { scans, writes, failed } }` 这样的回应。
 ///
-/// Counted from `audit.jsonl` on every call, not stored: the journal is already
-/// the source of truth and a second counter could disagree with it. Nothing
-/// leaves the machine — this only feeds the Settings row. The full-journal parse
-/// is why it runs on the blocking pool.
+/// 每次调用都从 `audit.jsonl` 现数，不做存储：日志本身就是唯一事实来源，
+/// 再放一个计数器就可能与它不一致。什么都不会离开这台机器——它只喂设置页
+/// 那一行。整本日志的解析正是它跑在阻塞池上的原因。
 #[tauri::command]
 async fn local_stats() -> serde_json::Value {
     tauri::async_runtime::spawn_blocking(|| {
@@ -559,25 +547,23 @@ async fn local_stats() -> serde_json::Value {
     .unwrap_or_else(|e| json!({ "ok": false, "error": format!("stats task failed: {}", e) }))
 }
 
-/// `ak:ui-error` — the renderer's crash channel.
+/// `ak:ui-error` —— 渲染层的崩溃通道。
 ///
-/// One JSON object per line appended to `<store_root>/ui-errors.jsonl`, trimmed
-/// to the newest 200 lines (read-trim-write, oldest dropped first) so a renderer
-/// stuck in an error loop cannot grow the file without bound. `message` and
-/// `stack` are each cut to 4096 bytes on a UTF-8 char boundary. Never panics: a
-/// failed write answers `{"ok":false,"error":...}` and goes to stderr; success
-/// answers `{"ok":true,"count":<lines kept>}`.
+/// 每行一个 JSON 对象追加到 `<store_root>/ui-errors.jsonl`，并裁剪到最新的
+/// 200 行（读取-裁剪-写回，最旧的先丢），这样卡在报错循环里的渲染层就无法
+/// 让文件无限增长。`message` 与 `stack` 各自在 UTF-8 字符边界上截到 4096
+/// 字节。绝不 panic：写入失败答复 `{"ok":false,"error":...}` 并写 stderr；
+/// 成功答复 `{"ok":true,"count":<保留的行数>}`。
 ///
-/// Synchronous on purpose: bounded file, bounded payload, and it is the *last*
-/// thing a broken renderer does — routing it through the blocking pool would
-/// queue it behind whatever work the crash is complaining about.
+/// 故意做成同步：文件有界、载荷有界，而且它是坏掉的渲染层做的*最后*一件事
+/// ——把它绕去阻塞池，只会让它排在崩溃本身正在抱怨的那堆工作后面。
 #[tauri::command]
 fn ui_error(payload: Value) -> Value {
     core::settings::ui_error(&store_root(), &payload)
 }
 
-/// `search_registry` — real network, 6 s deadline, never throws. Off the UI
-/// thread because DNS on a cold resolver is easily the slowest thing here.
+/// `search_registry` —— 真网络，6 秒截止，绝不抛错。不在 UI 线程上跑，因为
+/// 冷解析器上的 DNS 很容易就是这里最慢的环节。
 #[tauri::command]
 async fn search_registry(opts: Value) -> Value {
     tauri::async_runtime::spawn_blocking(move || core::discover::search_registry(&opts))
@@ -585,11 +571,11 @@ async fn search_registry(opts: Value) -> Value {
         .unwrap_or_else(|e| json!({ "ok": false, "error": format!("registry task failed: {}", e) }))
 }
 
-/// `ak:install-skill` — the agent check runs before anything else, exactly as
-/// in the IPC handler, so an unknown id fails without spawning git.
+/// `ak:install-skill` —— agent 校验排在任何事情之前，与 IPC 处理器里完全
+/// 一样，这样一个未知 id 会直接失败，不会去拉起 git。
 ///
-/// The clone + `store.transaction` half is not wired: it fails loudly rather
-/// than reporting an install that never happened.
+/// 克隆 + `store.transaction` 那半边还没接上：它会响亮地失败，而不是报告一次
+/// 从未发生过的安装。
 #[tauri::command]
 async fn install_skill(payload: Value) -> Value {
     let agent_id = payload
@@ -610,9 +596,9 @@ async fn install_skill(payload: Value) -> Value {
     .unwrap_or_else(|e| json!({ "ok": false, "error": format!("install task failed: {}", e) }))
 }
 
-/// `ak:export-bundle` — pick a destination folder, then write the bundle there.
-/// Cancelling reports `{ok:false, canceled:true}` so the renderer does not toast
-/// a failure the user caused on purpose.
+/// `ak:export-bundle` —— 选一个目标文件夹，然后把 bundle 写到那里。
+/// 取消时报告 `{ok:false, canceled:true}`，这样渲染层就不会为用户故意做出的
+/// 取消弹一条失败提示。
 #[tauri::command]
 async fn export_bundle(app: tauri::AppHandle, asset_ids: Vec<String>) -> Value {
     use tauri_plugin_dialog::DialogExt;
@@ -631,7 +617,7 @@ async fn export_bundle(app: tauri::AppHandle, asset_ids: Vec<String>) -> Value {
         .unwrap_or_else(|e| json!({ "ok": false, "error": format!("export task failed: {}", e) }))
 }
 
-/// `ak:import-bundle` — pick the folder that *contains* `agentkeeper-bundle/`.
+/// `ak:import-bundle` —— 选那个*包含* `agentkeeper-bundle/` 的文件夹。
 #[tauri::command]
 async fn import_bundle(app: tauri::AppHandle) -> Value {
     use tauri_plugin_dialog::DialogExt;
@@ -649,12 +635,12 @@ async fn import_bundle(app: tauri::AppHandle) -> Value {
         .unwrap_or_else(|e| json!({ "ok": false, "error": format!("import task failed: {}", e) }))
 }
 
-// --- update channels ------------------------------------------------------
+// --- 更新通道 -------------------------------------------------------------
 //
-// The state machine lives in `core::update::manager`; these commands are the
-// thin adapter the renderer's `window.ak.update*` surface expects. A failed
-// update action returns `{ok:false,error}` rather than throwing, because the
-// renderer's promise chain has a single `if (!r.ok) toast(r.error)` path.
+// 状态机住在 `core::update::manager` 里；这些命令是渲染层
+// `window.ak.update*` 表面所期望的那层薄适配器。一次失败的更新操作返回
+// `{ok:false,error}` 而不是抛错，因为渲染层的 promise 链只有一条
+// `if (!r.ok) toast(r.error)` 路径。
 
 fn upd<T: std::fmt::Display>(r: Result<Value, T>) -> Value {
     r.unwrap_or_else(|e| json!({ "ok": false, "error": e.to_string() }))
@@ -676,58 +662,52 @@ async fn update_check() -> Value {
         .unwrap_or_else(|e| json!({ "ok": false, "error": format!("update task failed: {}", e) }))
 }
 
-/// `ak:update-releases` — the changelog list for the About panel.
+/// `ak:update-releases` —— 关于面板用的更新日志列表。
 ///
-/// A **plain array** of `{ version, date, url, notes, prerelease }`, newest
-/// first, because the renderer maps over it directly; a failure answers
-/// `{ ok: false, error }` with the same convention as every other command
-/// (`if (!r.ok) toast(r.error)`).
+/// 一个 `{ version, date, url, notes, prerelease }` 的**纯数组**，最新的在
+/// 前，因为渲染层直接对它做 map；失败时按与其他每个命令相同的约定
+/// 答复 `{ ok: false, error }`（`if (!r.ok) toast(r.error)`）。
 ///
-/// Heavy by the rule above — it opens a socket — so it goes on the blocking
-/// pool.
+/// 按上面的规则算重活——它会打开套接字——所以放到阻塞池上。
 #[tauri::command]
 async fn update_releases(limit: Option<usize>) -> Value {
     tauri::async_runtime::spawn_blocking(move || update_releases_from(&store_root(), limit))
         .await
-        // A panic in the blocking task is an update-task failure like any other,
-        // and reusing `update task failed` keeps it inside the sentence the
-        // renderer dictionary already translates — a new phrasing here would
-        // reach an English-only UI as raw text.
+        // 阻塞任务里发生 panic 与其他任何更新任务失败并无二致，而沿用
+        // `update task failed` 能让它留在渲染层词典已经翻译过的那句话里
+        // ——这里换一种新说法，只会以原始文本的形式落到一个纯英文的 UI 上。
         .unwrap_or_else(|e| json!({ "ok": false, "error": format!("update task failed: {}", e) }))
 }
 
-/// How many releases `ak:update-releases` returns when the caller names no
-/// limit, and the ceiling it clamps to.
+/// 调用方没指定上限时 `ak:update-releases` 返回多少条，以及它钳制到的
+/// 天花板。
 ///
-/// The ceiling is GitHub's own `per_page` maximum: asking for more silently
-/// returns one page, so a larger `limit` would be a promise the request cannot
-/// keep. 20 matches what the panel shows without scrolling.
+/// 这个天花板就是 GitHub 自己的 `per_page` 最大值：要得更多只会悄悄退回
+/// 一页，所以一个更大的 `limit` 会是一个这个请求兑现不了的承诺。20 与面板
+/// 不用滚动就能显示的数量一致。
 const RELEASES_DEFAULT: usize = 20;
 const RELEASES_MAX: usize = 100;
 
-/// The pure half of `ak:update-releases`, with the store root as a parameter.
+/// `ak:update-releases` 的纯逻辑那一半，存储根作为参数传进来。
 ///
-/// Split out so a test can point it at a temp profile and a loopback GitHub
-/// mock without touching the process-global `AK_STORE_ROOT` — same reason the
-/// update integration tests build their own `UpdateManager` instead of using
-/// `ensure_manager`.
+/// 单独拆出来，是为了让测试能把它指向一个临时 profile 和一个回环的 GitHub
+/// mock，而不必碰进程全局的 `AK_STORE_ROOT`——与更新集成测试自建
+/// `UpdateManager` 而不用 `ensure_manager` 是同一个理由。
 ///
-/// `pub` for that integration test only; the IPC surface is [`update_releases`].
+/// `pub` 只为那个集成测试；IPC 表面是 [`update_releases`]。
 ///
-/// Everything below is borrowed from the existing update pipeline rather than
-/// reimplemented: the settings keys, [`normalize_repo`]'s validation rule, the
-/// token store, and the transport (with its GitHub header set, redirect budget
-/// and 4 MiB body cap). The one thing that is deliberately *not* reused is
-/// `pick_listed_release`, which collapses a release list to the single highest
-/// version — the opposite of what a changelog needs.
+/// 下面的一切都是从既有的更新流水线上借来的，而不是重写一遍：设置键、
+/// [`normalize_repo`] 的校验规则、令牌存储，以及传输层（连同它那套 GitHub
+/// 请求头、重定向预算和 4 MiB 响应体上限）。唯一刻意*不*复用的是
+/// `pick_listed_release`，它把一份版本列表塌缩成最高的那一个版本——恰好与
+/// 更新日志需要的相反。
 pub fn update_releases_from(root: &str, limit: Option<usize>) -> Value {
     let wanted = limit.unwrap_or(RELEASES_DEFAULT).clamp(1, RELEASES_MAX);
 
     let s = core::settings::read(root);
     let text = |key: &str| s.get(key).and_then(|v| v.as_str()).unwrap_or("");
-    // Same assembly as `UpdateManager::settings_cfg`: an unusable `updateRepo`
-    // falls back to the built-in one rather than disabling the feature, and the
-    // API base is stored without a trailing slash.
+    // 与 `UpdateManager::settings_cfg` 相同的组装方式：不可用的 `updateRepo`
+    // 回退到内置那一个，而不是把功能关掉；API 基地址存的时候不带尾斜杠。
     let configured = core::update::manager::normalize_repo(text("updateRepo"));
     let repo = if configured.is_empty() {
         core::update::manager::BUILT_IN_REPO.to_string()
@@ -742,11 +722,11 @@ pub fn update_releases_from(root: &str, limit: Option<usize>) -> Value {
         api_base
     };
 
-    // `normalize_repo` already restricts the charset, so the value needs no
-    // percent-encoding.
+    // `normalize_repo` 已经把字符集限制住了，所以这个值不需要再做
+    // 百分号编码。
     let url = format!("{}/repos/{}/releases?per_page={}", api_root, repo, wanted);
-    // Same credential source `UpdateManager` uses: a UI-saved token wins over
-    // the environment, and the transport adds no header for an absent one.
+    // 与 `UpdateManager` 相同的凭据来源：UI 保存的令牌压过环境变量，
+    // 而令牌缺席时传输层不会加任何请求头。
     let token = core::update::token::TokenStore::new(root).effective();
 
     let payload = match core::update::http::fetch_release_json(
@@ -755,10 +735,9 @@ pub fn update_releases_from(root: &str, limit: Option<usize>) -> Value {
         core::update::manager::NETWORK_TIMEOUT_MS,
     ) {
         Ok(payload) => payload,
-        // `fetch_release_json` already phrases every failure the way the update
-        // panel shows it (transport, rate limit, HTTP status), and the
-        // dictionary covers those strings, so the error is passed through as-is
-        // rather than reworded into a second, untranslated sentence.
+        // `fetch_release_json` 已经把每种失败都措辞成更新面板展示它的样子
+        // （传输、限流、HTTP 状态码），而词典覆盖了那些句子，所以这个错误
+        // 原样透传，而不是改写成一个第二句尚未翻译的话。
         Err(error) => {
             return json!({ "ok": false, "error": error.to_string() });
         }
@@ -770,14 +749,14 @@ pub fn update_releases_from(root: &str, limit: Option<usize>) -> Value {
 
     let rows: Vec<Value> = items
         .iter()
-        // A draft is an unfinished note with no publish date; listing it in a
-        // public changelog would show a version nobody can install. This is the
-        // same rule `pick_listed_release` applies before it picks.
+        // 草稿是一条没有发布日期的未完成公告；把它列进公开更新日志，等于
+        // 展示一个谁都装不上的版本。这与 `pick_listed_release` 在挑之前
+        // 所用的规则是同一条。
         .filter(|item| item.get("draft") != Some(&Value::Bool(true)))
         .map(|item| {
-            // `release_from_api` is what caps `notes` at 8000 bytes and
-            // synthesises a `pageUrl` when GitHub omits one; re-deriving either
-            // here would give the changelog different limits than the panel.
+            // 把 `notes` 截到 8000 字节、以及在 GitHub 省略时合成
+            // `pageUrl` 的正是 `release_from_api`；在这里重新推导任何一项，
+            // 都会让更新日志与面板的界限不一致。
             let release = core::update::version::release_from_api(
                 item,
                 core::update::version::ReleaseOptions {
@@ -792,12 +771,11 @@ pub fn update_releases_from(root: &str, limit: Option<usize>) -> Value {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
             json!({
-                // `release_from_api` strips the `v` prefix, so the panel shows
-                // `0.2.1` rather than `v0.2.1` — same spelling as the update
-                // banner.
+                // `release_from_api` 剥掉了 `v` 前缀，所以面板显示的是
+                // `0.2.1` 而不是 `v0.2.1`——与更新横幅的写法一致。
                 "version": release.get("tag").cloned().unwrap_or(Value::Null),
-                // `YYYY-MM-DD` out of the RFC 3339 stamp; an unparseable or
-                // missing one stays empty rather than becoming "Invalid Date".
+                // 从 RFC 3339 时间戳里切出 `YYYY-MM-DD`；解析不了或缺失的
+                // 保持为空，而不是变成 "Invalid Date"。
                 "date": published.get(..10).unwrap_or(""),
                 "url": release.get("pageUrl").cloned().unwrap_or(Value::Null),
                 "notes": release.get("notes").cloned().unwrap_or(Value::Null),
@@ -809,39 +787,37 @@ pub fn update_releases_from(root: &str, limit: Option<usize>) -> Value {
     Value::Array(rows)
 }
 
-/// `ak:update-settings`.
+/// `ak:update-settings` 命令。
 ///
-/// The handler validates the patch before the manager sees it, and so does
-/// this one. The guard is not in [`UpdateManager::save_settings`] because
-/// `clampMinutes` has to stay reachable: `save_settings` clamps `0` → `1`, and
-/// the IPC layer rejects the `0` before it gets there. See
-/// [`UpdateManager::save_settings_checked`], which is what keeps that ordering
-/// under test.
+/// IPC 处理器会在 manager 看到补丁之前先校验它，这一个也一样。这道守卫不在
+/// [`UpdateManager::save_settings`] 里，因为 `clampMinutes` 必须保持可达：
+/// `save_settings` 把 `0` 钳成 `1`，而 IPC 层会在这个 `0` 走到那里之前就
+/// 拒掉它。见 [`UpdateManager::save_settings_checked`]，正是它让这个先后
+/// 顺序处在测试之下。
 #[tauri::command]
 fn update_save_settings(patch: serde_json::Value) -> serde_json::Value {
     upd(update_manager().save_settings_checked(&patch))
 }
 
-/// `ak:update-token`.
+/// `ak:update-token` 命令。
 ///
-/// `null` clears the token (`set_token(None)`); a string replaces it; a body
-/// without a `token` key is an error, never a silent delete.
+/// `null` 清除令牌（`set_token(None)`）；字符串替换它；一个没有 `token` 键的
+/// 请求体是错误，绝不悄悄删掉。
 ///
-/// The parameter is the **raw request body**, not `token: Option<Value>`, and
-/// there is a concrete reason. The renderer's "clear" button sends `null`
-/// (`app.js:1802`, the renderer's clear button), which a `String` parameter cannot
-/// deserialize — the invoke was rejected and the click reported
-/// an error instead of clearing. `Option<Value>` deserializes, but cannot
-/// finish the job: Tauri's `CommandItem::deserialize_option`
-/// (`tauri-2.12.4/src/ipc/command.rs:146-157`) calls `visit_none()` both for
-/// a missing key and for `Value::Null`, so `{}` and `{token:null}` are the same
-/// `None` by the time this body runs. Those two cases are separable only in the
-/// raw body, so that is what has to reach [`core::update::manager::token_arg`].
+/// 参数是**原始请求体**，而不是 `token: Option<Value>`，这有具体的原因。
+/// 渲染层的“清除”按钮发的是 `null`（`app.js:1802`，渲染层的清除按钮），
+/// 这是 `String` 参数反序列化不了的——那次 invoke 被拒，点击结果报了一个
+/// 错误，而不是把令牌清掉。`Option<Value>` 能反序列化，却完不成这件事：
+/// Tauri 的 `CommandItem::deserialize_option`
+/// （`tauri-2.12.4/src/ipc/command.rs:146-157`）对缺失的键和 `Value::Null`
+/// 都调用 `visit_none()`，所以到这个函数体运行时，`{}` 和 `{token:null}`
+/// 已经是同一个 `None`。这两种情况只在原始请求体里才分得开，所以必须让
+/// 原始请求体到达 [`core::update::manager::token_arg`]。
 #[tauri::command]
 fn update_set_token(request: tauri::ipc::Request<'_>) -> serde_json::Value {
     match request.body() {
         tauri::ipc::InvokeBody::Json(payload) => upd(update_manager().set_token_checked(payload)),
-        // `asObject(payload) || {}` — a non-object body has no `token` field.
+        // `asObject(payload) || {}` —— 非对象的请求体没有 `token` 字段。
         _ => json!({
             "ok": false,
             "error": core::update::manager::ERR_TOKEN_FIELD_REQUIRED
@@ -868,9 +844,9 @@ fn update_cancel() -> serde_json::Value {
     update_manager().cancel()
 }
 
-/// Starts the installer. Spawning a process is a blocking wait on the OS
-/// (shell-Execute plus the child's first second), so it runs on the blocking
-/// pool — the user sees the window stay responsive while the installer spins up.
+/// 启动安装程序。拉起进程是一次对 OS 的阻塞等待（shell-Execute 加上子进程的
+/// 第一秒），所以它跑在阻塞池上——安装程序转起来的过程中，用户看到的是窗口
+/// 依旧响应。
 #[tauri::command]
 async fn update_install(path: String) -> serde_json::Value {
     tauri::async_runtime::spawn_blocking(move || upd(update_manager().install(&path)))
@@ -883,38 +859,36 @@ fn update_skip(version: String) -> serde_json::Value {
     update_manager().skip(Some(&version))
 }
 
-// --- automatic checks -----------------------------------------------------
+// --- 自动检查 -------------------------------------------------------------
 //
-// A 30 s timer calls `UpdateManager::tick()` and forwards the result to the
-// renderer as `update-event`, which is what `onUpdateEvent` listens for. The
-// `updateCheck` setting drives it.
+// 一个 30 秒的定时器调用 `UpdateManager::tick()`，并把结果作为
+// `update-event` 转给渲染层，`onUpdateEvent` 监听的就是它。由
+// `updateCheck` 设置驱动。
 
-/// Wake-up interval. Deliberately a fixed tick rather than
-/// `interval * 60_000`: the configured interval can be 24 hours, and a long
-/// sleep drifts across suspend/resume (a laptop that wakes hours late would
-/// check hours late, or never). Each tick re-reads the persisted deadline, so a
-/// suspended machine checks once after waking.
+/// 唤醒间隔。刻意用一个固定的 tick，而不是 `interval * 60_000`：配置的间隔
+/// 可能是 24 小时，而长时间休眠会跨过挂起/恢复漂移（一台晚醒几小时的笔记本
+/// 会晚几小时检查，或者干脆不检查）。每个 tick 都重读持久化的截止时间，
+/// 所以一台被挂起的机器在唤醒后只检查一次。
 const UPDATE_TICK: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// First pass 4 s after boot. Not a
-/// request in itself — [`core::update::manager::UpdateManager::tick`] answers
-/// `None` unless a check is actually due, so restarting the app does not burn
-/// the anonymous API quota.
+/// 启动后 4 秒的第一轮。它本身不是一次请求——除非确实该检查了，
+/// [`core::update::manager::UpdateManager::tick`] 都答 `None`，所以重启应用
+/// 不会烧掉匿名 API 配额。
 const UPDATE_FIRST_TICK: std::time::Duration = std::time::Duration::from_secs(4);
 
-/// Granularity of a scheduler wait, so a shutdown request is noticed within
-/// this long instead of after a whole interval.
+/// 一次调度等待的粒度，这样关停请求能在这个时长内被察觉，
+/// 而不是等满一个完整间隔。
 const SCHEDULER_SLICE: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// Raised when the app is exiting; the scheduler polls it between slices.
+/// 应用退出时被置起；调度器在各切片之间轮询它。
 static UPDATE_SCHEDULER_STOP: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Sleep up to `total`, waking every [`SCHEDULER_SLICE`] to look at `stop`.
+/// 最多睡 `total`，每 [`SCHEDULER_SLICE`] 醒一次去看 `stop`。
 ///
-/// `false` = the wait was cut short by a stop request, `true` = the whole delay
-/// elapsed. Split out of the thread so the shutdown behaviour can be tested
-/// without a window and without waiting 30 s for a case that must not take 30 s.
+/// `false` = 这次等待被一个停止请求截断，`true` = 整个延迟走完。从线程体里
+/// 拆出来，是为了在没有窗口、也不用为一个本不该花 30 秒的用例真等 30 秒的
+/// 情况下测关停行为。
 pub(crate) fn scheduler_wait(
     stop: &std::sync::atomic::AtomicBool,
     total: std::time::Duration,
@@ -938,13 +912,12 @@ pub(crate) fn scheduler_wait(
     }
 }
 
-/// The scheduler thread body.
+/// 调度线程体。
 ///
-/// `tick()` is the entire policy: it re-reads `updateCheck` /
-/// `updateCheckMinutes` from `settings.json` on every call and returns `None`
-/// when auto-check is off, when a check is already in flight, or before the
-/// persisted deadline. So "auto-check off" costs zero network requests and no
-/// scheduling rule is duplicated here — the thread only decides *when to ask*.
+/// `tick()` 就是全部策略：它每次调用都从 `settings.json` 重读 `updateCheck` /
+/// `updateCheckMinutes`，并在自动检查关着、一次检查已经在飞行中、或还没到
+/// 持久化的截止时间时返回 `None`。于是“自动检查关闭”花费零次网络请求，
+/// 也没有任何调度规则在这里被复制一遍——线程只决定*什么时候问*。
 fn update_scheduler_loop(app: tauri::AppHandle) {
     use tauri::Emitter;
     trace("[update] scheduler started");
@@ -957,8 +930,8 @@ fn update_scheduler_loop(app: tauri::AppHandle) {
         let Some(payload) = update_manager().tick() else {
             continue;
         };
-        // A failed fetch is an event to log, never a panic: `tick()` already
-        // stored `lastError` and the next interval retries.
+        // 一次失败的抓取是写进日志的事件，绝不 panic：`tick()` 已经把
+        // `lastError` 存好了，下一个间隔会重试。
         if payload.get("ok") == Some(&Value::Bool(false)) {
             let message = payload
                 .get("error")
@@ -966,10 +939,9 @@ fn update_scheduler_loop(app: tauri::AppHandle) {
                 .unwrap_or_default();
             eprintln!("[update] automatic check failed: {}", message);
         }
-        // The payload is the same object `updateStatus` returns, which is what
-        // the renderer reads from `update-event` (`app.js:225` assigns it to
-        // `S.update` and reads `hasUpdate`, `skipped`, `latest`, `current`,
-        // `notes`).
+        // 这个载荷就是 `updateStatus` 返回的那个对象，也是渲染层从
+        // `update-event` 里读的东西（`app.js:225` 把它赋给 `S.update`，并读
+        // `hasUpdate`、`skipped`、`latest`、`current` 与 `notes` 这些字段）。
         if let Err(e) = app.emit("update-event", payload) {
             eprintln!("[update] could not deliver update-event: {}", e);
         }
@@ -977,9 +949,8 @@ fn update_scheduler_loop(app: tauri::AppHandle) {
     trace("[update] scheduler stopped");
 }
 
-/// Start the scheduler once, from `setup`. A thread that cannot be spawned is
-/// logged rather than turned into a startup failure: automatic updates are not
-/// worth refusing to open the app over.
+/// 从 `setup` 启动一次调度器。线程起不来就记日志，而不是把它变成一次启动
+/// 失败：自动更新不值得为它拒绝打开应用。
 fn start_update_scheduler(app: &tauri::AppHandle) {
     let handle = app.clone();
     let spawned = std::thread::Builder::new()
@@ -990,8 +961,8 @@ fn start_update_scheduler(app: &tauri::AppHandle) {
     }
 }
 
-/// `ak:update-open-release`. Only an http(s) URL reaches the OS
-/// handler; anything else is `ipc.invalidUrl`.
+/// `ak:update-open-release`。只有 http(s) URL 才会被交给 OS 的处理器；
+/// 其他一律是 `ipc.invalidUrl`。
 #[tauri::command]
 fn open_release_page(app: tauri::AppHandle, url: Option<String>) -> serde_json::Value {
     use tauri_plugin_opener::OpenerExt;
@@ -1007,7 +978,7 @@ fn open_release_page(app: tauri::AppHandle, url: Option<String>) -> serde_json::
     }
 }
 
-/// `ak:open-path` — reveal a path in the file manager.
+/// `ak:open-path` —— 在文件管理器里显示一个路径。
 #[tauri::command]
 fn open_path(app: tauri::AppHandle, path: String) -> serde_json::Value {
     use tauri_plugin_opener::OpenerExt;
@@ -1023,11 +994,10 @@ fn open_path(app: tauri::AppHandle, path: String) -> serde_json::Value {
     }
 }
 
-/// `ak:open-store` — open the store directory in the file manager.
+/// `ak:open-store` —— 在文件管理器里打开存储目录。
 ///
-/// Named `..._dir` because the plain `open_store()` above already owns that
-/// identifier for the `Store` constructor; Tauri would otherwise register two
-/// commands under one name.
+/// 名字里带 `..._dir`，是因为上面那个普通的 `open_store()` 已经为 `Store`
+/// 构造器占住了这个标识符；否则 Tauri 会把两个命令注册在同一个名字下。
 #[tauri::command]
 fn open_store_dir(app: tauri::AppHandle) -> serde_json::Value {
     use tauri_plugin_opener::OpenerExt;
@@ -1038,15 +1008,14 @@ fn open_store_dir(app: tauri::AppHandle) -> serde_json::Value {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // This host cannot initialise the Chromium OS sandbox (render-process-gone
-    // 0x80000003 unless --no-sandbox). WebView2 inherits the same sandbox, and
-    // without this the runtime process never even starts: no
-    // msedgewebview2.exe child, no page_load event, window never shown.
+    // 这台机器初始化不了 Chromium 的 OS 沙箱（不加 --no-sandbox 就是
+    // render-process-gone 0x80000003）。WebView2 继承同一个沙箱，缺了这一段
+    // 运行时进程根本起不来：没有 msedgewebview2.exe 子进程，没有 page_load
+    // 事件，窗口永远不显示。
     //
-    // Env-var form was tried first and works, but it cannot be relied on for a
-    // shipped build, so it is set in-process before the runtime loads.
-    // Safety is unaffected: contextIsolation-equivalent (no node integration),
-    // a restrictive CSP, and no plugin grants to fs/network.
+    // 先试过环境变量的形式，那是可行的，但对一个出货构建没法依赖它，所以在
+    // 运行时加载之前就地设置。安全性不受影响：等同于 contextIsolation（没有
+    // node 集成）、一条严格的 CSP，以及没有任何授予 fs/网络权限的插件。
     if std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_err() {
         std::env::set_var(
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
@@ -1058,20 +1027,17 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        // The window is built here rather than declared in tauri.conf.json:
-        // `on_page_load` is a consuming Builder hook, so it can only be
-        // attached while the window is being constructed. Declaring the window
-        // in config would work too, but then the window would have to be shown
-        // unconditionally, reintroducing the unpainted flash that
-        // `show: false` + `ready-to-show` avoids.
+        // 窗口在这里建，而不是在 tauri.conf.json 里声明：`on_page_load` 是个
+        // 消耗 Builder 的钩子，所以只有正在构造窗口时才能挂上去。在配置里声明
+        // 窗口也能用，但那样窗口就必须无条件显示，重新引入
+        // `show: false` + `ready-to-show` 本来避开的那个未绘制闪烁。
         .setup(|app| {
             use tauri::webview::PageLoadEvent;
             let handle = app.handle().clone();
 
-            // AK_TEST_URL lets the harness swap the page without a rebuild, so
-            // "WebView2 is broken" and "our assets are broken" can be told
-            // apart without guessing. about:blank needs no asset serving at
-            // all, so a Finished event there proves the runtime works.
+            // AK_TEST_URL 让测试装置不用重新构建就能换掉页面，这样“WebView2 坏了”
+            // 和“我们的产物坏了”不必靠猜就能区分开。about:blank 完全不需要
+            // 供给任何资产，所以在那里出现一个 Finished 事件就能证明运行时是好的。
             let url = match std::env::var("AK_TEST_URL") {
                 Ok(u) if u == "about:blank" => {
                     tauri::WebviewUrl::External("about:blank".parse().unwrap())
@@ -1088,25 +1054,23 @@ pub fn run() {
                 .background_color(tauri::window::Color(244, 245, 247, 255))
                 .visible(false)
                 .on_page_load(move |w, payload| {
-                    // Same intent as `ready-to-show`: paint first, then reveal, so
-                    // a dark-theme user never sees a white frame.
+                    // 与 `ready-to-show` 同样的意图：先绘制，再显示，这样
+                    // 一个深色主题的用户永远不会看到一帧白屏。
                     trace(&format!("page_load {:?}", payload.event()));
                     if matches!(payload.event(), PageLoadEvent::Finished) {
                         trace("window shown on Finished");
                         let _ = w.show();
-                        // AK_NAV=<view> (optionally `view:query`) clicks one
-                        // sidebar entry after load.
+                        // AK_NAV=<view>（可选 `view:query`）在加载后点击一个
+                        // 侧栏条目。
                         //
-                        // The renderer has no hash routing, so there is no other way
-                        // to screenshot a page that is not the dashboard — and the
-                        // Health / Activity / Settings pages are exactly where a
-                        // payload-shape regression hides. Env-gated, so a normal
-                        // launch never evaluates it.
+                        // 渲染层没有 hash 路由，所以没有别的办法去截一张不是
+                        // 仪表盘的页面——而健康 / 活动 / 设置这几页恰恰是
+                        // 载荷形状回归会藏身的地方。有环境变量开关，所以正常
+                        // 启动永远不会走到这里。
                         //
-                        // The `:query` suffix exists for Discover, which shows an
-                        // empty state until someone types: without it the page can
-                        // only be photographed blank, which proves nothing about
-                        // whether the registry call works.
+                        // `:query` 后缀是为 Discover 准备的，它在有人输入之前
+                        // 一直显示空状态：没有它，这个页面只能被拍成空白，那
+                        // 对证明注册表调用是否工作毫无意义。
                         if let Ok(spec) = std::env::var("AK_NAV") {
                             let (view, query) = match spec.split_once(':') {
                                 Some((v, q)) => (v.to_string(), Some(q.to_string())),
@@ -1123,16 +1087,16 @@ pub fn run() {
                             });
                             if view_ok && query_ok {
                                 trace(&format!("nav -> {}{}", view, spec.len() - view.len()));
-                                // The click is retried inside the page: `Finished`
-                                // fires before the renderer's async bootstrap has
-                                // wired the sidebar, so a single immediate click can
-                                // land on a handler-less node and do nothing (it did,
-                                // silently, on the first attempt).
+                                // 这次点击在页面内部重试：`Finished` 在渲染层的
+                                // 异步 bootstrap 把侧栏接好之前就触发了，所以
+                                // 单次即时点击可能落在一个没有处理器的节点上
+                                // 而什么都不做（第一次尝试时确实如此，而且无声
+                                // 无息）。
                                 let drive = match &query {
                                     None => String::new(),
-                                    // A second poller, not an inline block: the input
-                                    // only exists once the view has rendered, which
-                                    // happens after the click handler returns.
+                                    // 第二个轮询器，而不是一段内联写死的代码块：输入框
+                                    // 要等视图渲染出来才存在，而那发生在点击处理器
+                                    // 返回之后。
                                     Some(q) => format!(
                                         r#"
   var n2 = 0;
@@ -1167,9 +1131,8 @@ pub fn run() {
 
             let _ = win;
             trace("window built");
-            // The update scheduler is a thread, not a renderer timer: the check
-            // has to run whether or not the user is looking at Settings, and it
-            // must outlive a page reload.
+            // 更新调度器是一个线程，而不是渲染层的定时器：无论用户是不是正
+            // 盯着设置页，检查都必须跑，而且它必须活过页面重载。
             start_update_scheduler(&handle);
             Ok(())
         })
@@ -1211,9 +1174,8 @@ pub fn run() {
             open_store_dir,
             ui_error,
         ])
-        // `build` + `run(callback)` instead of `run(context)` only so the exit
-        // event can raise the scheduler's stop flag: `run(context)` never hands
-        // back the event loop.
+        // 用 `build` + `run(callback)` 而不是 `run(context)`，只为让退出事件
+        // 能置起调度器的停止标志：`run(context)` 永远不会把事件循环交回来。
         .build(tauri::generate_context!())
         .expect("error while building AgentKeeper shell")
         .run(|_handle, event| {
@@ -1233,9 +1195,9 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
-    /// A closing app must not wait out a 30 s sleep: the wait is sliced and the
-    /// stop flag is read between slices. (The thread itself is detached; this is
-    /// the only part of its shutdown that can be pinned down by a test.)
+    /// 要关闭的应用绝不能等满一次 30 秒的睡眠：等待被切成片，停止标志在片与
+    /// 片之间被读取。（线程本身是分离的；这是它关停过程中唯一能被测试钉住的
+    /// 部分。）
     #[test]
     fn scheduler_wait_aborts_within_a_slice_of_a_stop_request() {
         let stop = AtomicBool::new(false);
@@ -1263,8 +1225,8 @@ mod tests {
         );
     }
 
-    /// Without a stop request the delay is honoured in full — the 4 s first pass
-    /// and the 30 s interval both rely on the wait not returning early.
+    /// 没有停止请求时延迟会被完整走完——4 秒的第一轮和 30 秒的间隔都依赖
+    /// 这次等待不提前返回。
     #[test]
     fn scheduler_wait_honours_the_delay_and_a_zero_budget() {
         let stop = AtomicBool::new(false);
