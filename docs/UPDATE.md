@@ -1,11 +1,10 @@
 # 软件更新（GitHub Releases）
 
-AgentKeeper 的更新能力照着 [Agent2API](https://github.com/Agent2API/agent2api) 的桌面端实现落地：
-GitHub Releases 检查 → 通道选择 → 流式下载 → 交给系统安装器。
+AgentKeeper 的更新链路基于 GitHub Releases：检查 → 通道选择 → 流式下载 → 交给系统安装器。
 
-代码：`tauri-shell/core/src/update/{version,http,token,manager}.rs`
-（不依赖 Tauri，可单测、可被 `ak-scan` / `ak-store` 复用）。
-行为以代码 + `cargo test --tests` 为准（在 `tauri-shell/src-tauri/` 下跑），本文解释行为与取舍。
+代码在 `tauri-shell/core/src/update/{version,http,token,manager}.rs`，不依赖 Tauri，可单测，
+也能被 `ak-scan` 等无界面入口复用。行为以代码与测试为准（`cd tauri-shell && cargo test`），
+本文解释行为与取舍。
 
 ---
 

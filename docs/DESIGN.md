@@ -106,7 +106,7 @@ Tauri v2 + React + Rust。repo registry、visual editor、config bundle 导出/�
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**关键约束**：`core::` 不认识 Tauri 类型。因此同一套逻辑有三个入口：
+**关键约束**：`core::` 不认识 Tauri 类型。因此同一套逻辑有三个入口。
 
 | 入口 | 二进制 | 用途 |
 |---|---|---|
@@ -114,8 +114,7 @@ Tauri v2 + React + Rust。repo registry、visual editor、config bundle 导出/�
 | MCP | `agentkeeper-mcp` | Agent 通过 stdio 调用 |
 | 扫描 | `ak-scan` | 无头打印 `ak:scan` 的完整 payload，供脚本与 CI 取数 |
 
-`core::` 不认识 Tauri 类型，所以同一套逻辑有三个入口；`ak-scan` 能单独跑一次无头扫描，
-写入只走 GUI 与 MCP 两条通道。
+`ak-scan` 只做无头扫描（打印一次完整 payload），写入只走 GUI 与 MCP 两条通道。
 
 ### 2.1 错误文案与中文翻译
 

@@ -31,7 +31,7 @@ source scripts/rust-env.sh        # Git Bash / bash
 ```
 
 CMD 不能执行 `.ps1`：`call .\scripts\rust-env.ps1` 退出码为 0，但 `cargo` 仍不在 `PATH` 上
-（实测 `where cargo` 返回 1）。CMD 用户请先开 PowerShell，跑完接线脚本再在同一窗口继续。
+（`where cargo` 会返回 1）。CMD 用户请先开 PowerShell，跑完接线脚本再在同一窗口继续。
 
 之后 `cargo build` / `cargo test` / `cargo tauri info` 均可直接使用。
 
@@ -66,7 +66,7 @@ CARGO_SOURCE_CRATES_IO_REPLACE_WITH="" cargo build
 | `Get-PSDrive` 报「驱动器不存在」 | 某些精简环境缺少驱动器枚举，判断路径改用 `Test-Path` |
 | PowerShell 5.1 报 `ParserError` | 5.1 不支持 `$(try{...}catch{...})` 内联，把逻辑写进 `.ps1` 文件执行 |
 | `Directory.Delete(path, true)` 删不掉文件 | 它只删目录；删文件用 `File.Delete` |
-| VS 引导程序返回 3010 | 表示「成功，建议重启」，不是失败；实测无需重启即可用 |
+| VS 引导程序返回 3010 | 表示「成功，建议重启」，不是失败；无需重启即可继续 |
 | VS 引导程序要求提权 | 它会自提权，从非管理员会话启动也能装成功，不必强行 `runas` |
 | `cargo install tauri-cli` 很慢 | 首次从源码编译（16 核约 5 分钟），后续增量构建快得多 |
 
