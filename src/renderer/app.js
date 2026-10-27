@@ -49,7 +49,9 @@ const S = {
   langHooked: false,
   updateWired: false,
   updateEventHooked: false,
-  notifyWired: false
+  notifyWired: false,
+  /** 上次扫描失败的文案（`null` = 最近一次扫描成功）。侧栏状态条读它。 */
+  scanError: null
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -202,6 +204,36 @@ function clock(iso) {
   const d = new Date(iso);
   return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
+
+/**
+ * 操作记录里的动作名。
+ *
+ * 以前 fallback 是 `r.action` 原样上屏：审计日志里存的是 `install`、`export`、
+ * `scan` 这类英文动词，于是中文界面里每一行都以一个英文词开头（实测
+ * 「rollback」「skill」，后面跟着中文描述）。动词表覆盖 keeper/store 目前会写的
+ * 全部 action，未知值退回 `verb.change` —— 一个中文的「变更」比一个英文标识符
+ * 诚实，因为它不假装自己已经被翻译了。
+ */
+const ACTION_LABEL = {
+  create: 'verb.create',
+  update: 'verb.update',
+  'delete': 'verb.delete',
+  distribute: 'verb.distribute',
+  install: 'verb.install',
+  'install-source': 'verb.install',
+  export: 'verb.export',
+  import: 'verb.import',
+  scan: 'verb.scan',
+  discard: 'verb.discard',
+  // 下面这些是审计日志里真实存在、上面这张表漏掉的（实测 `action` 取值集合：
+  // settings-save / rollback / update / shadow-discard / scan / set-baseline）。
+  // 漏掉的后果不是「少翻译一个词」，而是整行标题退回英文标识符。
+  'settings-save': 'activity.actionSettingsSave',
+  rollback: 'activity.actionRollback',
+  'shadow-discard': 'verb.discard',
+  'set-baseline': 'activity.actionSetBaseline',
+  apply: 'verb.update'
+};
 
 /* ------------------------------------------------------------------ */
 /* 错误上报                                                             */
@@ -368,11 +400,23 @@ async function runRetry(btn, retry) {
 /* 轻提示（toast）/ 模态框（modal）                                     */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 轻提示。
+ *
+ * 三种状态各有自己的底色，但**颜色不单独承担语义**：气泡左侧带一个图标字形
+ * （✓ / ! / ×），所以红绿色觉障碍的读者、以及在弱光下看不出色差的读者仍然能
+ * 分辨「完成 / 提醒 / 失败」。图标对无障碍树隐藏 —— 读屏用户听到的是
+ * `#toasts` 的 `role=status` 那条播报，不需要再听一个符号的名字。
+ */
 function toast(msg, kind = '') {
   // 引擎的错误是英文过来的；中文界面绝不能直接把原文显示出来。
   msg = zhError(msg);
+  const GLYPH = { ok: '✓', err: '✕', warn: '!' };
+  const glyph = GLYPH[kind];
   // 叫 `node` 而不是 `t` —— `t` 是模块作用域里的 i18n 翻译函数。
-  const node = el('div', { class: `toast ${kind}` }, msg);
+  const node = el('div', { class: `toast ${kind}` },
+    glyph ? el('span', { class: 'toast-ico', 'aria-hidden': 'true' }, glyph) : null,
+    el('span', { class: 'toast-msg' }, msg));
   // #toasts 是 role=status aria-live=polite，所以 append 就足以让它被朗读出来；
   // 超时只是事后把那个视觉气泡摘掉。
   $('#toasts').appendChild(node);
@@ -488,7 +532,7 @@ function reportWriteFailure(r, fallbackKey) {
     el('div', { class: 'muted fs-11 mt-8' }, t(symlink ? 'restore.advice.symlink' : 'restore.advice')));
   openModal(t('restore.title'), body, [
     el('button', { class: 'btn', onclick: closeModal }, t('common.close'))
-  ]);
+  ], { width: 'narrow' });
   toast(t(symlink ? 'restore.toast.symlink' : 'restore.toast.partial'), 'err');
 }
 
@@ -500,7 +544,20 @@ const STORE_SNAPSHOT_TOO_LARGE = 'store.snapshotTooLarge';
 const STORE_RESTORE_INCOMPLETE = 'store.restoreIncomplete';
 const STORE_SYMLINK_RESTORE_FAILED = 'store.symlinkRestoreFailed';
 
-function openModal(title, bodyNode, footNodes = []) {
+/**
+ * 打开对话框。
+ *
+ * `opts.width` 选宽度档：
+ *   `'form'`（默认）—— 880px 上限，给真正的表单（新建/编辑技能、MCP、分发）。
+ *   `'narrow'`     —— 620px，给「确认删除 / 更新设置 / 安装确认」这类两三列、
+ *                    甚至只有一段说明的对话框。
+ *
+ * 为什么必须分档：`.modal` 原来写死 620px，对新建技能那种六组字段的表单太窄；
+ * 但把它整体拉到 880px 之后，**更新设置**这类短表单也跟着变宽，一行的标签与
+ * 输入框之间隔着一大片空白，看起来像没排版。宽度是「这张表单有多少内容」的
+ * 函数，不是全局常量，所以由调用方声明。
+ */
+function openModal(title, bodyNode, footNodes = [], opts = {}) {
   modalReturnFocus = document.activeElement;
   $('#modal-title').textContent = title;
   const body = $('#modal-body');
@@ -509,9 +566,13 @@ function openModal(title, bodyNode, footNodes = []) {
   const foot = $('#modal-foot');
   foot.innerHTML = '';
   for (const f of footNodes) foot.appendChild(f);
+  // 每次都显式设置，不依赖上一次的残留 —— 否则「先开表单、再开确认框」时确认框
+  // 会沿用表单的宽度。
+  const m = $('#modal');
+  m.classList.toggle('modal-narrow', opts.width === 'narrow');
   $('#modal-scrim').classList.add('on');
   $('#modal-scrim').setAttribute('aria-hidden', 'false');
-  focusInto($('#modal'));
+  focusInto(m);
 }
 
 /**
@@ -555,7 +616,8 @@ function confirmDialog({ title, message, confirmLabel = t('common.confirm'), dan
     // 那样会盖掉这里的 true。
     const ok = el('button', { class: `btn ${danger ? 'danger' : 'primary'}`, onclick: () => { entry.settle(true); closeModal(); } }, confirmLabel);
     const cancel = el('button', { class: 'btn', onclick: () => { entry.settle(false); closeModal(); } }, t('common.cancel'));
-    openModal(title, body, [cancel, ok]);
+    // 确认框（删除 / 覆盖 / 导入）只放一段说明与目标清单，用窄档。
+    openModal(title, body, [cancel, ok], { width: 'narrow' });
   });
 }
 
@@ -975,7 +1037,7 @@ function showUpdateDialog(status) {
     class: 'btn primary',
     onclick: () => { closeModal(); go('settings'); void startUpdateDownload(status); }
   }, t('update.go'));
-  openModal(t('update.dialogTitle'), body, [skip, later, goBtn]);
+  openModal(t('update.dialogTitle'), body, [skip, later, goBtn], { width: 'narrow' });
 }
 
 /** 开始下载缓存好的那个发布版本的安装包，并轮询它的进度。 */
@@ -1033,7 +1095,7 @@ function promptInstall(task) {
       else toast(t('update.installing'), 'ok');
     }
   }, t('update.installNow'));
-  openModal(t('update.readyTitle'), body, [later, goBtn]);
+  openModal(t('update.readyTitle'), body, [later, goBtn], { width: 'narrow' });
 }
 
 /**
@@ -1070,6 +1132,7 @@ async function rescan(silent = false) {
     // 什么暂存层还需要去取。
     const d = await window.ak.scan();
     S.data = d;
+    S.scanError = null;
     // 丢掉已经不存在的勾选 id（在别处被删了 / 重扫换了 id）—— 否则批量操作条会
     // 把幽灵行算进去。
     if (S.checked.size) {
@@ -1085,6 +1148,7 @@ async function rescan(silent = false) {
     issueEl.textContent = issueCount;
     issueEl.classList.toggle('hidden', issueCount === 0);
     syncNavNames();
+    syncSideFoot();
     render();
     if (!silent) {
       const errs = issueCount;
@@ -1095,6 +1159,8 @@ async function rescan(silent = false) {
     // 扫描失败不能只藏在 toast 后面：表格会留着上一次的数据，而首次扫描会让主
     // 区域一片空白且无从重试。改为画出可重试的面板；它的重试就是重跑扫描。
     reportUiError('error', e);
+    S.scanError = zhError(e);
+    syncSideFoot();
     const root = $('#view-root');
     if (root) {
       root.innerHTML = '';
@@ -1130,6 +1196,8 @@ function wireGlobal() {
     const m = $('#ctxmenu');
     if (m && m.classList.contains('on') && !m.contains(e.target)) hideCtxMenu();
   });
+  // 菜单内的方向键 / Home / End / Tab 离场（ARIA APG 的 menu 键盘契约）。
+  initCtxMenuKeyboard();
 
   let debounce;
   $('#search').addEventListener('input', (e) => {
@@ -1142,7 +1210,11 @@ function wireGlobal() {
       // 查询词藏起来的行。
       S.page = 1;
       S.checked.clear();
-      render();
+      // 搜索框常驻在顶栏，但只有资产页消费 `S.filter`。以前在其它页敲字是**死
+      // 操作**：`S.filter` 被设上了，当前视图却按自己的数据重画，屏幕上什么也
+      // 不发生（而筛选条件已经悄悄改了）。现在敲字就切到资产页 —— 顶栏那个框
+      // 到处都在，就得到处都管用。
+      if (S.view !== 'assets') go('assets'); else render();
     }, 120);
   });
 
@@ -1166,6 +1238,17 @@ function wireGlobal() {
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 's' && S.selected) { e.preventDefault(); saveSelected(); }
   });
+
+  // 滚动时关掉行菜单。
+  //
+  // 菜单是 `position:fixed` 贴在指针/按钮处，列表一滚它就指向了别的行 —— 而它
+  // 仍然可点，于是「删除」可能落到刚滚上来的那一行。菜单只由指针与 Escape 关掉，
+  // 所以这件工作得在这里显式做。用捕获阶段订阅 `scroll`：`scroll` 不冒泡，而
+  // 表格滚的是自己的 `.card-scroll`（不是 window），只有捕获阶段能收到。
+  document.addEventListener('scroll', () => {
+    const m = $('#ctxmenu');
+    if (m && m.classList.contains('on')) hideCtxMenu();
+  }, true);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1208,6 +1291,14 @@ function render() {
   const v = VIEWS[S.view];
   $('#view-title').textContent = t(v.titleKey);
   $('#view-sub').textContent = t(v.subKey);
+  // 顶栏那几个动作里，「新建技能」和「导入项目」只对资产/项目有意义；在设置页
+  // 顶上摆着三颗写按钮，读起来是「这一页能新建技能」。按视图收起来，而不是让
+  // 用户点进对话框才发现走错了路。扫描按钮全站保留 —— 它刷新的是全机状态。
+  const acts = { 'btn-new-skill': ['assets', 'overview'], 'btn-import': ['projects', 'assets', 'overview'] };
+  for (const [id, views] of Object.entries(acts)) {
+    const b = $('#' + id);
+    if (b) b.classList.toggle('hidden', !views.includes(S.view));
+  }
   const root = $('#view-root');
   const keepFocus = focusKeyNow();
   root.innerHTML = '';
@@ -1278,9 +1369,46 @@ function syncNavNames() {
   }
 }
 
+/**
+ * 侧栏底部的常驻状态：上次扫描的时间 + 待处理数。
+ *
+ * 三个状态由圆点 + 文字共同表达（颜色不单独承担信息）：待处理 → 琥珀、扫描
+ * 失败 → 红、干净 → 绿。文案走 `aria-live="polite"`（标记里就带着），所以
+ * 重扫完成时读屏用户会听到一次，而不用自己去找。
+ */
+function syncSideFoot() {
+  const dot = $('#side-dot');
+  const txt = $('#side-status');
+  if (!dot || !txt) return;
+  const d = S.data;
+  const issues = d ? issueAssets(d).length : 0;
+  const scannedAt = d && d.scannedAt;
+  // 失败优先于一切。判据是 `S.scanError` 本身 —— 不能写成 `!d && S.scanError`：
+  // 中途一次重扫失败时 `S.data` 还是上一次的成功结果（表格里照样有行可点），
+  // 那个条件于是永远不成立。实测：强制扫描失败后主区域正确弹出可重试面板，
+  // 而侧栏还在说「扫描于 13 秒前 · 2 项待处理」并亮琥珀 —— 它替一次失败做了
+  // 成功背书，而这正是这个状态条存在的理由。
+  let state = 'ok';
+  if (issues) state = 'warn';
+  if (S.scanError) state = 'err';
+  dot.className = 'side-dot' + (state === 'ok' ? '' : ' ' + state);
+  const when = scannedAt ? t('side.scannedAgo', { ago: ago(scannedAt) }) : t('side.notScanned');
+  txt.textContent = state === 'err'
+    ? t('side.scanFailed')
+    : (issues ? t('side.withIssues', { when, n: issues }) : t('side.clean', { when }));
+  txt.title = txt.textContent;
+  // 窄窗口里状态徽标全被隐藏，这里补一个短读数：待处理数 / 失败标记 / 对勾。
+  const short = $('#side-short');
+  if (short) {
+    short.textContent = state === 'err' ? '!' : (issues ? String(issues) : '✓');
+    short.title = txt.textContent;
+  }
+}
+
 function applyLanguage(lang) {
   document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
   syncNavNames();
+  syncSideFoot();
   // index.html 里的静态标记用 data-i18n / data-i18n-placeholder /
   // data-i18n-title / data-i18n-label（ARIA 名字，它们没有文本节点）来声明参与。
   for (const n of $$('[data-i18n]')) n.textContent = t(n.dataset.i18n);
@@ -1357,7 +1485,13 @@ const KIND_LABEL = {
   mcp: 'assets.kindMcp',
   plugin: 'assets.kindPlugin',
   rule: 'assets.kindRule',
-  memory: 'assets.kindMemory'
+  memory: 'assets.kindMemory',
+  // 审计日志里还会出现这三个 kind（设置写入、扫描、应用事务），它们不是资产类型，
+  // 但操作记录页用同一个 `chip` + `kindName()` 渲染徽标 —— 漏掉就会在中文界面上
+  // 露出 `settings` / `scan` / `apply` 三个英文标识符。
+  settings: 'activity.kindSettings',
+  scan: 'activity.kindScan',
+  apply: 'activity.kindApply'
 };
 
 /** "skill" → 技能 / Skills。未知的 kind（新适配器）退回枚举本身。 */
@@ -1470,7 +1604,7 @@ function viewOverview() {
             el('th', { class: 'num col-num' }, t('drawer.size')))),
         el('tbody', {}, agentRows.length ? agentRows
           : el('tr', {}, el('td', { colspan: '8', class: 'empty' }, t('empty.noMatch')))))));
-  row.appendChild(el('div', { class: 'flex-1-min' }, agentCard));
+  row.appendChild(el('div', { class: 'flex-1-min panel-agents' }, agentCard));
 
   /* 最近活动 */
   const recent = d.assets
@@ -1485,7 +1619,7 @@ function viewOverview() {
       el('td', { class: 'col-scope muted' }, scopeName(a.scope)),
       el('td', { class: 'col-time muted' }, ago(a.mtime))
     ));
-  row.appendChild(el('div', { class: 'flex-1-min' },
+  row.appendChild(el('div', { class: 'flex-1-min panel-recent' },
     el('div', { class: 'card card-fill' },
       el('div', { class: 'card-head' },
         el('h2', {}, t('card.recent')),
@@ -1644,23 +1778,40 @@ function viewAssets() {
   if (S.page > pageCount) S.page = 1;
   const pageItems = list.slice((S.page - 1) * PER_PAGE, S.page * PER_PAGE);
 
-  const wrap = el('div', {});
+  // 锁框：筛选条与分页条常驻，只有表体滚。795 行、50 行一屏时，翻到第 7 页还得
+  // 能改筛选条件；顺带让表头真正粘住 —— `table.tbl th` 的 sticky 一直声明着，但
+  // `.card{overflow-x:auto}` 让它相对一个从不纵向滚动的盒子定位，实测滚 700px 后
+  // 表头跑到 -537px（概览页那两张表反而是 0px：同一个组件两种行为）。
+  const wrap = el('div', { class: 'fill-locked' });
 
-  const bar = el('div', { class: 'card mb-14' },
-    el('div', { class: 'card-body flex flex-wrap gap-8' },
-      selectGroup('kind', S.kindFilter, [['all', t('assets.allKinds')], ['skill', t('assets.kindSkill')], ['mcp', 'MCP'], ['plugin', t('assets.kindPlugin')], ['rule', t('assets.kindRule')], ['memory', t('assets.kindMemory')]]),
-      selectGroup('agent', S.agentFilter, [['all', t('assets.allAgents')], ...agentOptions()]),
-      selectGroup('scope', S.scopeFilter, [['all', t('assets.bothScopes')], ['global', t('assets.scopeGlobal')], ['project', t('assets.scopeProject')]]),
-      selectGroup('origin', S.originFilter, [['curated', t('assets.curated')], ['user', t('assets.userOnly')], ['all', t('assets.everything')], ['cached', t('assets.cachesOnly')]]),
-      selectGroup('sort', S.sortKey || 'default',
-        [['default', t('assets.defaultOrder')], ['tokens', t('assets.largestFirst')], ['name', t('assets.nameAsc')], ['agent', t('assets.byAgent')], ['scope', t('assets.byScope')]]),
-      S.onlyShadowed
-        ? el('button', { class: 'chip warn clickable', title: t('assets.clearFilters'),
-            onclick: () => { S.onlyShadowed = false; persistUiState(); render(); } }, t('assets.shadowedOnly') + '  ✕')
-        : null,
-      el('span', { class: 'muted ml-auto fs-11' }, t('assets.shown', { n: list.length })),
-      el('button', { class: 'btn ghost sm', onclick: doImportBundle, title: t('bundle.importTitle') }, t('bundle.import'))
-    )
+  // 每个维度都在自己的小标题下；右侧是命中计数与「导入包」。
+  const active = activeFilterCount();
+  const fields = [
+    selectGroup('kind', S.kindFilter, [['all', t('assets.allKinds')], ['skill', t('assets.kindSkill')], ['mcp', 'MCP'], ['plugin', t('assets.kindPlugin')], ['rule', t('assets.kindRule')], ['memory', t('assets.kindMemory')]], { title: t('filter.kindShort') }),
+    selectGroup('agent', S.agentFilter, [['all', t('assets.allAgents')], ...agentOptions()], { title: t('filter.agentShort') }),
+    selectGroup('scope', S.scopeFilter, [['all', t('assets.bothScopes')], ['global', t('assets.scopeGlobal')], ['project', t('assets.scopeProject')]], { title: t('filter.scopeShort') }),
+    selectGroup('origin', S.originFilter, [['curated', t('assets.curated')], ['user', t('assets.userOnly')], ['all', t('assets.everything')], ['cached', t('assets.cachesOnly')]], { title: t('filter.originShort') }),
+    selectGroup('sort', S.sortKey || 'default',
+      [['default', t('assets.defaultOrder')], ['tokens', t('assets.largestFirst')], ['name', t('assets.nameAsc')], ['agent', t('assets.byAgent')], ['scope', t('assets.byScope')]], { title: t('filter.sortShort') })
+  ];
+  // 维度之间插分隔线 —— 它们是「与」关系，而五个下拉并排时没有边界可读。
+  const withSeps = [];
+  fields.forEach((f, i) => {
+    if (i) withSeps.push(el('span', { class: 'filter-sep', 'aria-hidden': 'true' }));
+    withSeps.push(f);
+  });
+
+  const bar = el('div', { class: 'card mb-14 flex-none' },
+    el('div', { class: 'card-body' },
+      el('div', { class: 'filter-bar' },
+        ...withSeps,
+        el('div', { class: 'filter-actions' },
+          el('span', { class: 'muted fs-11', 'aria-live': 'polite' }, t('assets.shown', { n: list.length })),
+          el('button', { class: 'btn sm', onclick: doImportBundle, title: t('bundle.importTitle') }, t('bundle.import'))
+        )
+      )
+    ),
+    activeFilterBar(active)
   );
   wrap.appendChild(bar);
 
@@ -1681,24 +1832,38 @@ function viewAssets() {
     });
     return el('tr', { class: S.selected === a.id ? 'sel' : '', onclick: () => openAsset(a.id),
       oncontextmenu: (e) => showCtxMenu(e, a) },
-      el('td', { class: 'nowrap' }, cb),
-      el('td', {}, el('span', { class: `chip ${a.kind}` }, kindName(a.kind))),
-      el('td', {},
+      // `label` 包住勾选框，把命中区从 16px 的方块扩到整格（≥24×24，WCAG 2.2 AA
+      // Target Size）。点击仍走 change 事件，与直接点勾选框完全同一条路径。
+      el('td', { class: 'nowrap col-check' }, el('label', { class: 'tick' }, cb)),
+      el('td', { class: 'col-kind' }, el('span', { class: `chip ${a.kind}` }, kindName(a.kind))),
+      el('td', { class: 'col-name' },
         // `title`：名称列在窄宽度下会做省略号截断，而一个截断掉的技能名从这一行
         // 的其他任何地方都找不回来。
         el('div', { class: 't-name', title: a.name }, a.name),
         el('div', { class: 't-desc', title: a.description || a.meta.relLabel || '' }, a.description || (a.meta.relLabel || ''))
       ),
-      el('td', { class: 'nowrap' },
+      el('td', { class: 'nowrap col-owner' },
         el('div', {}, zhText(a.agentLabel)),
         el('div', { class: 't-mono' }, a.scope === 'project' ? (a.projectName || '') : scopeName(a.scope))
       ),
-      el('td', { class: 'num nowrap' }, bytes(a.size)),
-      el('td', { class: 'num nowrap muted' }, a.meta && a.meta.estTokens ? '~' + a.meta.estTokens.toLocaleString() : '—'),
-      el('td', { class: 'num nowrap' },
+      el('td', { class: 'num nowrap col-num' }, bytes(a.size)),
+      el('td', { class: 'num nowrap muted col-num' }, a.meta && a.meta.estTokens ? '~' + a.meta.estTokens.toLocaleString() : '—'),
+      el('td', { class: 'num nowrap col-state' },
         errs ? el('span', { class: 'chip err', title: t('assets.issue') }, t('assets.issueCount', { n: errs }))
           : (a.effective && a.effective.live === false ? el('span', { class: 'chip warn', title: t('dashboard.hiddenByProject') }, t('assets.shadowedBadge')) : el('span', { class: 'chip ok' }, t('assets.ok')))
-      )
+      ),
+      // 行内「更多」。这些动作此前**只能**通过右键菜单到达 —— 右键不是可发现
+      // 的交互（触摸板、远程桌面、只用键盘的人都拿不到），而「分发 / 删除」
+      // 是这一页最主要的写操作。按钮复用同一个菜单，所以两处的条目不会走偏。
+      el('td', { class: 'col-act' },
+        el('button', {
+          class: 'icon-btn row-more',
+          'aria-haspopup': 'menu',
+          'aria-label': t('row.more', { name: a.name }),
+          title: t('row.more', { name: a.name }),
+          'data-focus-key': `more-${a.id}`,
+          onclick: (e) => { e.stopPropagation(); showCtxMenu(e, a, true); }
+        }, '⋯'))
     );
   });
 
@@ -1714,10 +1879,27 @@ function viewAssets() {
     render();
   });
 
-  const tbl = el('table', { class: 'tbl', tabindex: '0', 'aria-label': t('nav.assets') },
-    el('thead', {}, el('tr', {}, el('th', { class: 'nowrap' }, headCb), el('th', {}, t('th.kind')), el('th', {}, t('th.name')), el('th', {}, t('th.owner')), el('th', { class: 'num' }, t('drawer.size')), el('th', { class: 'num' }, t('th.tokens')), el('th', { class: 'num' }, t('th.state')))),
-    el('tbody', {}, rows.length ? rows : el('tr', {}, el('td', { colspan: '7' }, el('div', { class: 'empty' }, t('empty.noMatch')))))
-  );
+  const tbl = el('table', { class: 'tbl tbl-assets', tabindex: '0', 'aria-label': t('nav.assets') },
+    el('thead', {}, el('tr', {},
+      el('th', { class: 'nowrap col-check' }, el('label', { class: 'tick' }, headCb)),
+      el('th', { class: 'col-kind' }, t('th.kind')),
+      el('th', { class: 'col-name' }, t('th.name')),
+      el('th', { class: 'col-owner' }, t('th.owner')),
+      el('th', { class: 'num col-num' }, t('drawer.size')),
+      el('th', { class: 'num col-num' }, t('th.tokens')),
+      el('th', { class: 'num col-state' }, t('th.state')),
+      el('th', { class: 'col-act' }, ''))),
+    el('tbody', {}, rows.length ? rows : el('tr', {}, el('td', { colspan: '8' },
+      // 空态必须给出下一步。以前只有一句「没有符合当前筛选条件的资产。」—— 而
+      // 空列表的成因几乎总是筛选条件（五个维度会跨导航、跨重启被记住），用户
+      // 看不出该改哪一个。这里复用筛选条那份条件清单，逐个列出来并各自可移除。
+      el('div', { class: 'empty' },
+        t('empty.noMatch'),
+        (() => {
+          const rowsNow = activeFilterCount();
+          return rowsNow.length ? activeFilterBar(rowsNow, { inline: true }) : null;
+        })())))
+  ));
 
   // 键盘导航：↑/↓ 移动一个虚拟光标，Enter 打开。当前行会滚动进视野，所以长列表
   // 不用鼠标也照样能操作。
@@ -1734,13 +1916,47 @@ function viewAssets() {
     }
   });
 
-  wrap.appendChild(el('div', { class: 'card' }, tbl));
+  // `.card-scroll` 是唯一的滚动盒：卡片自己不能滚（表头要粘住），表格横向溢出时
+  // 也在这个盒子里滚。
+  // 分页条是**表格卡片的页脚**，不是第二张卡片：一起放进同一个 `.card` 里，
+  // 于是它们共享一个圆角轮廓、一条分界线，读起来是一块面板。
+  // `.flex-none` 让它在锁框布局里固定于底部：翻页按钮跟着列表滚出视野，等于
+  // 每翻几页都得先滚回页底。
+  const pager = (list.length > PER_PAGE || S.page > 1)
+    ? el('div', { class: 'pager flex-none' },
+        el('span', { class: 'info', 'aria-live': 'polite' }, t('pager.info', {
+          from: (S.page - 1) * PER_PAGE + 1,
+          to: Math.min(S.page * PER_PAGE, list.length),
+          total: list.length
+        })),
+        el('button', {
+          class: 'btn sm',
+          disabled: S.page <= 1 ? 'true' : null,
+          'aria-label': t('pager.prev'),
+          'data-focus-key': 'pager-prev',
+          onclick: () => { S.page--; render(); }
+        }, '←'),
+        el('span', { class: 'page-num' }, `${S.page} / ${pageCount}`),
+        el('button', {
+          class: 'btn sm',
+          disabled: S.page >= pageCount ? 'true' : null,
+          'aria-label': t('pager.next'),
+          'data-focus-key': 'pager-next',
+          onclick: () => { S.page++; render(); }
+        }, '→'))
+    : null;
+
+  // `.card-scroll` 是唯一的滚动盒：卡片自己不能滚（表头要粘住），表格横向溢出时
+  // 也在这个盒子里滚。
+  wrap.appendChild(el('div', { class: 'card card-fill' },
+    el('div', { class: 'card-scroll' }, tbl),
+    pager));
 
   // 批量操作条只在有勾选时出现。至于「对话框打开时禁用操作」则没必要 —— 模态
-  // 本来就叠在它上面。
+  // 本来就叠在它上面。它排在表格卡片下面，与它同宽。
   if (S.checked.size > 0) {
     const selected = (S.data?.assets || []).filter((a) => S.checked.has(a.id));
-    wrap.appendChild(el('div', { class: 'batchbar' },
+    wrap.appendChild(el('div', { class: 'batchbar flex-none' },
       el('span', { class: 'count' }, t('batch.selected', { n: S.checked.size })),
       el('button', { class: 'btn danger sm', onclick: () => doBatchDelete(selected) }, t('batch.delete')),
       el('button', { class: 'btn sm', onclick: () => openBatchDistribute(selected) }, t('batch.distribute')),
@@ -1748,33 +1964,80 @@ function viewAssets() {
       el('button', { class: 'btn ghost sm', onclick: () => { S.checked.clear(); render(); } }, t('batch.clear'))
     ));
   }
-
-  // 分页器 —— 只在真有东西可翻页时才渲染。
-  if (list.length > PER_PAGE || S.page > 1) {
-    wrap.appendChild(el('div', { class: 'card pager' },
-      el('span', { class: 'info' }, t('pager.info', {
-        from: (S.page - 1) * PER_PAGE + 1,
-        to: Math.min(S.page * PER_PAGE, list.length),
-        total: list.length
-      })),
-      el('button', {
-        class: 'btn sm',
-        disabled: S.page <= 1 ? 'true' : null,
-        'aria-label': t('pager.prev'),
-        'data-focus-key': 'pager-prev',
-        onclick: () => { S.page--; render(); }
-      }, '←'),
-      el('span', { class: 'info' }, `${S.page} / ${pageCount}`),
-      el('button', {
-        class: 'btn sm',
-        disabled: S.page >= pageCount ? 'true' : null,
-        'aria-label': t('pager.next'),
-        'data-focus-key': 'pager-next',
-        onclick: () => { S.page++; render(); }
-      }, '→')
-    ));
-  }
   return wrap;
+}
+
+/**
+ * 当前生效的条件清单：每项一个 dim、一条可读标签、一个清除动作。
+ *
+ * 五个维度会跨导航、跨重启保留（`persistUiState`），所以「这张表为什么是空的」
+ * 几乎总是某个用户早就忘了的条件。这份清单同时喂给两个地方：筛选条下方的汇总
+ * 条，以及空态里的「生效条件」。两边共用同一份，才不会一处说「Agent：WorkBuddy」
+ * 另一处漏掉它。
+ */
+function activeFilterCount() {
+  const rows = [];
+  if (S.filter) rows.push({ dim: 'q', label: t('filter.query', { q: S.filter }), clear: () => { S.filter = ''; syncSearchBox(); } });
+  if (S.kindFilter !== 'all') {
+    rows.push({ dim: 'kind', label: `${t('filter.kindShort')}：${kindName(S.kindFilter)}`, clear: () => { S.kindFilter = 'all'; } });
+  }
+  if (S.agentFilter !== 'all') {
+    const hit = agentOptions().find(([id]) => id === S.agentFilter);
+    rows.push({ dim: 'agent', label: `${t('filter.agentShort')}：${hit ? hit[1] : S.agentFilter}`, clear: () => { S.agentFilter = 'all'; } });
+  }
+  if (S.scopeFilter !== 'all') {
+    rows.push({ dim: 'scope', label: `${t('filter.scopeShort')}：${scopeName(S.scopeFilter)}`, clear: () => { S.scopeFilter = 'all'; } });
+  }
+  // 「来源」的默认值是 `curated`（只看用户自己的 + 托管的，排除缓存噪声），
+  // 所以 `curated` **不是**一个「用户加的条件」，不该出现在这份清单里。
+  // 以前这里判的是 `!== 'all'`，于是每次进资产页都挂着一枚「来源：精选 + 自管」，
+  // 点它的 ✕ 却没有任何变化 —— 它本来就已经是默认值了，那是一个死按钮。
+  // 判据改成「与默认值不同」：只有用户真的改过来源，它才成为一条可移除的条件。
+  if (S.originFilter !== 'curated') {
+    const name = {
+      all: t('assets.everything'), user: t('assets.userOnly'), cached: t('assets.cachesOnly')
+    }[S.originFilter] || S.originFilter;
+    rows.push({ dim: 'origin', label: `${t('filter.originShort')}：${name}`, clear: () => { S.originFilter = 'curated'; } });
+  }
+  if (S.sortKey) {
+    const opts = { tokens: t('assets.largestFirst'), name: t('assets.nameAsc'), agent: t('assets.byAgent'), scope: t('assets.byScope') };
+    rows.push({ dim: 'sort', label: `${t('filter.sortShort')}：${opts[S.sortKey] || S.sortKey}`, clear: () => { S.sortKey = null; } });
+  }
+  if (S.onlyShadowed) rows.push({ dim: 'shadowed', label: t('assets.shadowedOnly'), clear: () => { S.onlyShadowed = false; } });
+  return rows;
+}
+
+/** 把条件清单渲染成可逐项移除的汇总条；没有条件时整条不渲染。 */
+function activeFilterBar(rows, { inline = false } = {}) {
+  if (!rows.length) return null;
+  const after = (fn) => {
+    fn();
+    S.page = 1;
+    S.checked.clear();
+    persistUiState();
+    render();
+  };
+  return el('div', { class: inline ? 'filter-active inline' : 'filter-active' },
+    el('span', { class: 'lead' }, t('filter.activeLead')),
+    ...rows.map((r) => el('span', { class: 'chip' },
+      r.label,
+      el('button', {
+        type: 'button',
+        'aria-label': t('filter.removeOne', { x: r.label }),
+        title: t('filter.removeOne', { x: r.label }),
+        onclick: () => after(r.clear)
+      }, '✕'))),
+    el('span', { class: 'spacer' }),
+    el('button', {
+      class: 'btn ghost sm',
+      onclick: () => after(() => {
+        S.filter = ''; S.kindFilter = 'all'; S.agentFilter = 'all';
+        S.scopeFilter = 'all'; S.originFilter = 'curated'; S.sortKey = null;
+        S.onlyShadowed = false;
+        syncSearchBox();
+      })
+    }, t('assets.clearFilters'))
+  );
 }
 
 function agentOptions() {
@@ -1791,12 +2054,22 @@ const FILTER_LABEL = {
   origin: 'filter.origin', sort: 'filter.sort'
 };
 
-function selectGroup(dim, current, options) {
+/**
+ * 一个筛选维度：小标题 + 原生 `<select>`。
+ *
+ * 标题用 `<label for>` 真正绑定到控件上 —— 视觉用户看到「类型 / Agent / 作用域」
+ * 就知道每一维在筛什么，读屏用户也从 label 拿到同一句话（`aria-label` 只用来
+ * 在 label 之外补一句更完整的说明，两者并存不冲突）。
+ *
+ * 控件本身仍是原生 `<select>`：自绘下拉要自己实现键盘、输入法、读屏角色与
+ * 虚拟滚动，而这一页的每个筛选维度都是「从固定清单里选一个」—— 原生控件在这
+ * 件事上没有对手。
+ */
+function selectGroup(dim, current, options, opts = {}) {
+  const id = `filter-${dim}`;
   const s = el('select', {
     class: 'select-inline',
-    // 否则阅读器能听到的只有当前选项的文本；它会说「技能」，但不会说这个控件
-    // 是「按 kind」筛选的。
-    'aria-label': t(FILTER_LABEL[dim] || 'filter.kind'),
+    id,
     'data-focus-key': `filter-${dim}`
   });
   for (const [v, label] of options) {
@@ -1817,7 +2090,12 @@ function selectGroup(dim, current, options) {
     persistUiState();
     render();
   });
-  return s;
+  const label = el('label', { for: id },
+    opts.title || t(FILTER_LABEL[dim] || 'filter.kind'),
+    opts.count ? el('span', { class: 'filter-count' }, ` · ${opts.count}`) : null);
+  const field = el('div', { class: 'filter-field' }, label, s);
+  field._select = s;
+  return field;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1931,13 +2209,11 @@ function matrixCard() {
 
 function viewProjects() {
   const d = S.data;
-  const wrap = el('div', {});
   const head = el('div', { class: 'spread mb-12' },
     el('div', { class: 'muted fs-12' },
       t('projects.markerHint', { dirs: ['.workbuddy', '.claude', '.codex', '.cursor'].join('、') })),
     el('button', { class: 'btn primary', onclick: doImportProject }, '+ ' + t('projects.import'))
   );
-  wrap.appendChild(head);
 
   const rows = d.projects.map((p) =>
     // 点一个项目会把资源列表过滤到它（按项目名做文本搜索）—— 这是从「这个项目
@@ -1971,17 +2247,30 @@ function viewProjects() {
       }, t('common.remove')))
     ));
 
-  wrap.appendChild(el('div', { class: 'card' },
-    el('table', { class: 'tbl' },
-      el('thead', {}, el('tr', {}, el('th', {}, t('th.project')), el('th', {}, t('th.detected')), el('th', { class: 'num' }, t('dashboard.skills')), el('th', { class: 'num' }, t('dashboard.mcp')), el('th', { class: 'num' }, t('dashboard.plugins')), el('th', { class: 'num' }, t('dashboard.rules')), el('th', { class: 'num' }, t('dashboard.memory')), el('th', { class: 'num' }, t('th.added')), el('th', {}, ''))),
-      el('tbody', {}, rows.length ? rows : el('tr', {}, el('td', { colspan: '9' },
-        el('div', { class: 'empty' },
-          t('projects.noneLong'),
-          el('div', { class: 'mt-12' },
-            el('button', { class: 'btn primary', onclick: doImportProject }, '+ ' + t('projects.import')))))))
+  // 项目表：占满视图的剩余高度，而不是只按内容长高。
+  //
+  // 以前这张卡片的高度完全由内容决定：没有导入任何项目时它只有约 190px（空态
+  // 文案 139px + 表头），浮在 830px 的视图里，下面一大片空白 —— 看起来像是页面
+  // 没加载完。导入十几个项目之后它又会一直长高、把整页推成滚动。
+  //
+  // 改成锁框布局（与资产页同一套 `.fill-locked`）：卡片吃掉标题行以下的全部
+  // 高度，表格在自己的 `.card-scroll` 里滚动。空态因此落在**整块面板的中央**，
+  // 而不是挤在顶部一条。`flex-none` 给标题行，剩下的都给卡片。
+  const shell = el('div', { class: 'fill-locked' });
+  shell.appendChild(el('div', { class: 'flex-none' }, head));
+
+  shell.appendChild(el('div', { class: 'card card-fill' },
+    el('div', { class: 'card-scroll' },
+      el('table', { class: 'tbl proj-tbl' },
+        el('thead', {}, el('tr', {}, el('th', {}, t('th.project')), el('th', {}, t('th.detected')), el('th', { class: 'num' }, t('dashboard.skills')), el('th', { class: 'num' }, t('dashboard.mcp')), el('th', { class: 'num' }, t('dashboard.plugins')), el('th', { class: 'num' }, t('dashboard.rules')), el('th', { class: 'num' }, t('dashboard.memory')), el('th', { class: 'num' }, t('th.added')), el('th', {}, ''))),
+        el('tbody', {}, rows.length ? rows : el('tr', {}, el('td', { colspan: '9' },
+          el('div', { class: 'empty empty-fill' },
+            t('projects.noneLong'),
+            el('div', { class: 'mt-12' },
+              el('button', { class: 'btn primary', onclick: doImportProject }, '+ ' + t('projects.import'))))))))
     )
   ));
-  return wrap;
+  return shell;
 }
 
 async function doImportProject() {
@@ -2001,7 +2290,11 @@ async function doImportProject() {
 
 function viewHealth() {
   const d = S.data;
-  const wrap = el('div', {});
+  // 健康页是由若干**独立卡片**堆起来的，而每张卡片自己不带上边距 —— 于是
+  // 安全发现卡、需要处理卡、变更基线卡之间完全没有缝隙，读起来是一整块。
+  // 这里用一个纵向 flex + gap 统一给间距：卡片顺序与数量都是可变的，逐个加
+  // `mt-*` 会在「只有基线卡」和「三张卡」两种情形下给出不同的第一行间距。
+  const wrap = el('div', { class: 'stack-14' });
 
   /* --- 安全发现排在最前面：它们比格式问题更严重 --- */
   const risky = d.assets.filter((a) => (a.security || []).length)
@@ -2047,7 +2340,11 @@ function viewHealth() {
           el('div', { class: 'issue-title' }, `${a.name} `, el('span', { class: `chip ${a.kind}` }, kindName(a.kind)),
             ' ', el('span', { class: 'muted fw-400' }, `· ${zhText(a.agentLabel)} · ${scopeName(a.scope)}`)),
           ...(a.issues || []).map((i) => el('div', { class: 'issue-meta' },
-            el('span', { class: `chip ${i.level === 'error' ? 'err' : 'warn'} mr-6` }, i.field), i.message)),
+            // 引擎的 issue 是英文（`unrecognized key "…" — agent may ignore it`），
+            // 而这里以前直接 `i.message` 上屏 —— 健康页这两行是中文界面里仅剩的
+            // 未翻译文案之一（实测英文泄漏点）。zhText 走的是同一份句子词典，
+            // 字段名同理走 zhField（资产抽屉一直这么做，两处不该不一致）。
+            el('span', { class: `chip ${i.level === 'error' ? 'err' : 'warn'} mr-6` }, zhField(i.field)), zhText(i.message))),
           el('div', { class: 'issue-meta' }, a.file)
         ),
         el('button', { class: 'btn sm', onclick: () => openAsset(a.id) }, t('common.inspect'))
@@ -2055,7 +2352,7 @@ function viewHealth() {
     wrap.appendChild(el('div', { class: 'card' },
       el('div', { class: 'card-head' }, el('h2', {}, t(bad.length === 1 ? 'health.attentionOne' : 'health.attention', { n: bad.length })),
         el('span', { class: 'sub spacer' }, t('health.attentionNote'))),
-      el('div', { class: 'card-body flex col gap-8' }, items)
+      el('div', { class: 'card-body flex col gap-12' }, items)
     ));
   }
 
@@ -2117,12 +2414,13 @@ async function viewActivity() {
     el('div', { class: `tl-item ${r.status === 'ok' ? 'ok' : r.status === 'failed' ? 'failed' : ''}` },
       el('div', { class: 'tl-head' },
         el('span', { class: 'tl-title' }, labelFor(r)),
-        r.kind ? el('span', { class: `chip ${r.kind}` }, r.kind) : null,
+        // 徽标以前直接渲染 `r.kind`：审计日志里的 kind 是 `skill` / `plugin` 这类
+        // 标识符，于是中文界面上每一行都挂着一枚英文徽标 —— 而同一页的资产表
+        // 用的是中文（kindName）。同一个概念两种写法，是 G6 的缺陷。
+        r.kind ? el('span', { class: `chip ${r.kind}` }, kindName(r.kind)) : null,
         el('span', { class: 'tl-time' }, clock(r.ts))
       ),
-      el('div', { class: 'tl-meta' },
-        [zhText(r.agentLabel) || r.agentId, r.projectName, r.assetName, (r.targets || []).join('  '), zhError(r)]
-          .filter(Boolean).join('  ·  '))
+      el('div', { class: 'tl-meta', title: auditMeta(r) }, auditMeta(r))
     )
   );
 
@@ -2136,10 +2434,40 @@ async function viewActivity() {
   return wrap;
 }
 
+/** 审计记录的 agentId → adapters 声明的显示名；查不到就退回标识符本身。 */
+function agentLabelOf(agentId) {
+  if (!agentId) return '';
+  const hit = (S.boot && S.boot.agents || []).find((a) => a.id === agentId);
+  return zhText((hit && hit.label) || agentId);
+}
+
+/**
+ * 一条审计记录的明细行文本。
+ *
+ * `agentId` 是标识符（`workbuddy`），回滚这类记录不带 `agentLabel`，于是回退成
+ * `agentId` 就在中文界面里露出一个英文词；从 bootstrap 载荷里反查显示名 —— 那是
+ * 适配器声明的 `label`，与资产表「归属」列同一个来源。
+ *
+ * 抽成函数是因为它被用两次：一次做可见文本，一次做 `title`。明细行在样式上被
+ * 限制成两行（一条 sandbox 绝对路径动辄上百字符，不限就会压住右上角的时间戳），
+ * 所以完整值必须能通过工具提示读到 —— 两份内容若各写一遍，迟早会不一致。
+ */
+function auditMeta(r) {
+  return [zhText(r.agentLabel) || agentLabelOf(r.agentId), r.projectName, r.assetName,
+    (r.targets || []).join('  '), zhError(r)]
+    .filter(Boolean).join('  ·  ');
+}
+
 function labelFor(r) {
   if (r.action === 'scan') return t('activity.scanLabel', { n: r.count ?? '' });
-  const verb = { create: t('verb.create'), update: t('verb.update'), 'delete': t('verb.delete'), distribute: t('verb.distribute') }[r.action] || r.action || t('verb.change');
-  return `${verb} ${r.assetName || ''}`.trim() + (r.status === 'failed' ? ` ${t('activity.failedSuffix')}` : '');
+  const key = ACTION_LABEL[r.action];
+  // 未知 action 不再把英文标识符直接上屏：`t('verb.change')` 至少是目标语言，
+  // 而一个没翻译的 `rollback` 会被当成产品文案。
+  const verb = key ? t(key) : t('verb.change');
+  // 设置页的写入没有资产名（`assetName` 是改动过的键名清单，一长串英文标识符，
+  // 直接显示会把整行撑满）。它的标题到此为止，明细不进标题。
+  const name = r.action === 'settings-save' ? '' : (r.assetName || '');
+  return `${verb}${name ? ' ' + name : ''}`.trim() + (r.status === 'failed' ? ` ${t('activity.failedSuffix')}` : '');
 }
 
 /* ------------------------------------------------------------------ */
@@ -2235,7 +2563,7 @@ async function discInstallFromInput() {
       toast(parts.join(' · '), (r.findings || []).length ? 'warn' : 'ok');
     }
   }, t('discover.install'));
-  openModal(t('discover.installTitle', { name: raw }), body, [cancel, okBtn]);
+  openModal(t('discover.installTitle', { name: raw }), body, [cancel, okBtn], { width: 'narrow' });
 }
 
 async function discSearch() {
@@ -2348,7 +2676,7 @@ async function discInstall(item) {
       toast(parts.join(' · '), (r.findings || []).length ? 'warn' : 'ok');
     }
   }, t('discover.install'));
-  openModal(t('discover.installTitle', { name: item.name }), body, [cancel, okBtn]);
+  openModal(t('discover.installTitle', { name: item.name }), body, [cancel, okBtn], { width: 'narrow' });
 }
 
 function viewSettings() {
@@ -2363,14 +2691,21 @@ function viewSettings() {
    */
   let setRowSeq = 0;
   const LABELABLE = 'input, select, textarea, button, meter, output, progress';
-  const row = (label, control, hint) => {
+  /**
+   * 一行设置。`extra` 是**追加到控件右侧**的只读读数（本机统计那一行用它显示
+   * 次数）；它不是控件，所以不参与 label 关联，也不进 Tab 序。
+   */
+  const row = (label, control, hint, extra) => {
     const target = control.matches && control.matches(LABELABLE)
       ? control
       : (control.querySelector ? control.querySelector(LABELABLE) : null);
+    const ctl = extra
+      ? el('div', { class: 'set-control' }, control, extra)
+      : control;
     if (!target) {
       return el('div', { class: 'set-row' },
         el('div', { class: 'set-label' }, label, hint ? el('div', { class: 'set-hint' }, hint) : null),
-        el('div', { class: 'set-control' }, control));
+        el('div', { class: 'set-control' }, ctl));
     }
     if (!target.id) target.id = `set-row-${++setRowSeq}`;
     const hintId = hint ? `${target.id}-hint` : null;
@@ -2383,7 +2718,7 @@ function viewSettings() {
       el('div', { class: 'set-label' },
         el('label', { for: target.id }, label),
         hint ? el('div', { class: 'set-hint', id: hintId }, hint) : null),
-      el('div', { class: 'set-control' }, control));
+      el('div', { class: 'set-control' }, ctl));
   };
 
   const select = (value, options, onChange) => {
@@ -2408,6 +2743,30 @@ function viewSettings() {
     b.addEventListener('click', () => onChange(!on));
     return b;
   };
+
+  /**
+   * 「本机统计」那一行的只读读数：扫描 / 写入 / 失败次数。
+   *
+   * 这些数字是 `local_stats` 现算的（读 `audit.jsonl`），从本机算出来、也只留在
+   * 本机。开关关掉时**整行读数不渲染**，而不只是不刷新 —— 否则「关掉统计」之后
+   * 数字还挂在屏幕上。
+   */
+  function localStatsRow() {
+    if (cfg.showLocalStats === false) return null;
+    const out = el('span', { class: 'stats-value-right muted fs-11', 'aria-live': 'polite' },
+      t('common.loading'));
+    window.ak.localStats().then((r) => {
+      if (!r || r.ok === false || !r.counts) {
+        out.textContent = t('settings.localStatsUnavailable');
+        return;
+      }
+      out.textContent = t('settings.localStatsValue', r.counts);
+    }).catch(() => {
+      // 一次失败的读数不该把这一行永远留在「加载中…」。
+      out.textContent = t('settings.localStatsUnavailable');
+    });
+    return out;
+  }
 
   const save = async (patch) => {
     const r = await window.ak.saveSettings(patch);
@@ -2439,6 +2798,20 @@ function viewSettings() {
           ['light', t('settings.themeLight')],
           ['dark', t('settings.themeDark')]
         ], (v) => { localStorage.setItem('ak.theme', v); applyTheme(v); save({ theme: v }); })),
+      // 「行为」两行曾被整块删掉（commit a24a764「设置页缩短到一屏」），但
+      // `local_stats` 命令、bridge 与 `showLocalStats` 键都留着 —— 结果是：
+      // 一个「关掉本机统计」的开关跟着 UI 一起消失，而计数接口仍然可调；同时
+      // `showLocalStats` 成了一个**没有任何人读**的键（ui-audit 的
+      // 「telemetry setting stored but nothing sends counts」就是这条死链）。
+      // 恢复这两行：开关有 UI、读写闭环，`ui-audit` 那条告警也随之清空。
+      row(t('settings.notifications'),
+        toggle(S.settings.notifications !== false, (v) => save({ notifications: v }), t('settings.notifications')),
+        t('settings.notificationsHint')),
+      row(t('settings.localStats'),
+        toggle(S.settings.showLocalStats !== false, (v) => { save({ showLocalStats: v }); },
+          t('settings.localStats')),
+        t('settings.localStatsHint'),
+        localStatsRow()),
       el('div', { class: 'muted fs-11 mt-6' }, t('settings.restartNote'))
     ));
 
@@ -2569,12 +2942,22 @@ function viewSettings() {
     // 时间戳：「检查于」指的是真正那次检查的时刻（主线程的时钟），绝不是「因为
     // 页面重渲染了所以说是几分钟前」。
     const stamps = [];
-    if (u.checkedAt) stamps.push(t('settings.updateCheckedAt', { time: new Date(u.checkedAt).toLocaleString() }));
+    // `toLocaleString()` 不带 locale 时按运行环境来 —— 同一份构建在不同机器上
+    // 会给出 `10/27/2026, 11:41:07 PM` 或 `2026/10/27 23:41:07`。这一页旁边就写着
+    // 「检查于 …」，格式却是环境的。统一成 zh-CN（与 app.js `clock()` 一致），
+    // 它在 en 界面下也是 ISO 风格的数字顺序，不会被读成月/日。
+    const stamp = (iso) => new Date(iso).toLocaleString('zh-CN', {
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+    });
+    if (u.checkedAt) stamps.push(t('settings.updateCheckedAt', { time: stamp(u.checkedAt) }));
     if (u.settings && u.settings.auto && u.nextCheckAt) {
-      stamps.push(t('settings.updateNextAt', { time: new Date(u.nextCheckAt).toLocaleString() }));
+      stamps.push(t('settings.updateNextAt', { time: stamp(u.nextCheckAt) }));
     }
     if (stamps.length) body.appendChild(el('div', { class: 'muted fs-11 mt-6' }, stamps.join(' · ')));
-    if (u.lastError) body.appendChild(el('div', { class: 'alert warn mt-8' }, t('settings.updateError', { error: u.lastError })));
+    // 引擎的错误是英文，而这一条是**设置页最常被看到的一行红字**（离线/证书链
+    // 不受信任的机器上每次检查都会出现）。以前它整句原样上屏，中文界面里最显眼的
+    // 提示是英文 —— 走 zhError 之后剩下的英文只有引号里的 URL 与 TLS 细节。
+    if (u.lastError) body.appendChild(el('div', { class: 'alert warn mt-8' }, t('settings.updateError', { error: zhError(u.lastError) })));
 
     // 下载状态：进行中是进度条，就绪之后变成安装按钮。
     const task = u.task;
@@ -2806,11 +3189,75 @@ function viewSettings() {
       el('div', { class: 'set-control' }, tokenRow)));
 
     openModal(t('settings.updateSettingsTitle'), body,
-      [el('button', { class: 'btn primary', onclick: closeModal }, t('common.done'))]);
+      [el('button', { class: 'btn primary', onclick: closeModal }, t('common.done'))],
+      { width: 'narrow' });
   }
 
   /**
-   * 更新日志面板：每一个已发布的 release，最新的在前。
+   * 从完整的 release 列表里挑出要显示的那几条：**最新版、当前版、上一版**，最多三条。
+   *
+   * 规则（顺序即优先级，同一版本只留第一次出现的）：
+   *   1. `releases[0]` —— 最新的那个版本（接口按时间倒序返回）；
+   *   2. `current` —— 用户正在运行的那一版；
+   *   3. `current` 在列表里的**下一条** —— 上一版，升级上来的人拿它对照。
+   *
+   * 为什么不是「取前三条」：那三条几乎总是「最新 + 两个更老的」，用户看不到自己
+   * 正在用的那一版改了什么，而那恰恰是最相关的一条。
+   *
+   * 三种边界都成立：
+   * - `current` 不在列表里（本地跑的是未发布的开发构建）→ 跳过第 2、3 步，结果
+   *   仍是「最新版 + 列表接下来的两条」，不会因为找不到当前版而少显示。
+   * - 列表只有 1–2 条 → 返回它本身，不凑数。
+   * - `current` 就是最新版 → 第 1、2 步是同一版本，去重后只剩「当前版 + 上一版」，
+   *   这是正确结果：没有更新的版本可看。
+   */
+  function pickChangelogVersions(releases, current) {
+    if (!Array.isArray(releases) || !releases.length) return [];
+    const out = [];
+    const push = (rel) => {
+      if (!rel) return;
+      if (out.some((x) => String(x.version) === String(rel.version))) return;
+      out.push(rel);
+    };
+
+    push(releases[0]);
+
+    const idx = current
+      ? releases.findIndex((r) => String(r.version) === String(current))
+      : -1;
+    if (idx >= 0) {
+      push(releases[idx]);
+      if (idx + 1 < releases.length) push(releases[idx + 1]);
+    }
+
+    for (const rel of releases) {
+      if (out.length >= 3) break;
+      push(rel);
+    }
+    // 按版本号倒序输出。
+    //
+    // 选取顺序是「最新 → 当前 → 上一版」，但**显示**顺序必须是版本从新到旧：
+    // 用户当前版落后两个版本时（例如在 0.2.1 上，最新是 0.2.3），选取会得到
+    // [0.2.3, 0.2.1, 0.2.2]，直接渲染就是「最新、当前、比当前新的那一版」——
+    // 中间那一行看起来像是排错了。倒序之后是 [0.2.3, 0.2.2, 0.2.1]，与「更新
+    // 日志」这个标题一致，用户也能顺着看出自己落后几版。
+    //
+    // 比较用数字段而不是字符串：`'0.2.10' > '0.2.9'` 在字符串比较里是 false，
+    // 而版本号里这是常事。
+    const verKey = (v) => String(v).split(/[.\-+]/).map((x) => parseInt(x, 10) || 0);
+    out.sort((a, b) => {
+      const A = verKey(a.version), B = verKey(b.version);
+      for (let i = 0; i < Math.max(A.length, B.length); i++) {
+        const d = (B[i] || 0) - (A[i] || 0);
+        if (d) return d;
+      }
+      return 0;
+    });
+    return out.slice(0, 3);
+  }
+
+  /**
+   * 更新日志面板：每个已发布的 release，最新的在前。
    *
    * 它自己单独抓取，只在首次渲染时抓，并在本次会话内缓存 —— release 历史和
    * 更新*检查*（更新器会做节流）是两件不同的事实，所以它绝不能走
@@ -2839,8 +3286,21 @@ function viewSettings() {
           return;
         }
         const current = (S.update && S.update.current) || (S.boot && S.boot.version) || '';
+        // 只显示「上一版 / 当前版 / 最新版」这三个位置，最多三条。
+        //
+        // 以前是把接口返回的 20 条全部铺出来：一屏塞不满、要滚很久，而且绝大
+        // 多数版本与这位用户无关 —— 他真正会关心的是「我正在用的这一版改了什么」
+        // 和「下一版会不会修掉我在意的问题」。中间那些已经是历史。
+        //
+        // 选取顺序（`pickChangelogVersions` 里实现并有单测可查）：
+        //   最新版（列表第一条，通常也是最高版本）
+        //   当前版（正在运行的那一版）
+        //   上一版（当前版之前的那一条 —— 升级上来的人对照用）
+        // 去重后取前三；当前版不在列表里（例如本地跑的是未发布的开发版本）时，
+        // 「当前版」这一格自然缺席，不会因此少显示一条别的版本。
+        const picked = pickChangelogVersions(r, current);
         list.innerHTML = '';
-        for (const rel of r) {
+        for (const rel of picked) {
           // 每行不放「打开 release 页面」按钮：二十个那样的按钮，是把同一个动作
           // 重复二十遍。版本号文字本身就是那个链接。
           //
@@ -3123,7 +3583,7 @@ function doDiff(a, current) {
   body.appendChild(preview);
   const refresh = el('button', { class: 'btn', onclick: () => run($('#asset-editor')?.value ?? current) }, t('diff.recompute'));
   body.appendChild(el('div', { class: 'mt-10' }, refresh));
-  openModal(t('diff.title', { name: a.name }), body, [el('button', { class: 'btn primary', onclick: () => { closeModal(); saveSelected(); } }, t('diff.applySave'))]);
+  openModal(t('diff.title', { name: a.name }), body, [el('button', { class: 'btn primary', onclick: () => { closeModal(); saveSelected(); } }, t('diff.applySave'))], { width: 'narrow' });
   run(current);
 }
 
@@ -3585,20 +4045,79 @@ async function doImportBundle() {
 
 /* ---------------- 右键菜单 ---------------- */
 
+/** 菜单是从哪颗按钮打开的 —— 关掉时焦点要回到那里（菜单本身不在 Tab 序里）。 */
+let ctxReturnFocus = null;
+
+/** 关掉菜单并把焦点交还给打开它的那个控件。 */
 function hideCtxMenu() {
   const m = $('#ctxmenu');
-  if (m) m.classList.remove('on');
+  if (!m || !m.classList.contains('on')) return;
+  m.classList.remove('on');
+  const back = ctxReturnFocus;
+  ctxReturnFocus = null;
+  if (back && document.body.contains(back)) back.focus({ preventScroll: true });
 }
 
-/** 资产行的右键菜单。不适用的条目直接不出现。 */
-function showCtxMenu(e, a) {
+/**
+ * 菜单内的方向键导航。
+ *
+ * `role="menu"` + `role="menuitem"` 不只是两个属性：ARIA APG 要求菜单里
+ * ↑ / ↓ 在条目之间移动、Home / End 跳到首尾、Tab 离开时必须关闭菜单。上一版
+ * 只加了角色和「焦点进第一项」，方向键什么都不做 —— 那比不加角色更糟：读屏
+ * 会宣布这是一个菜单，而按键不按菜单的方式工作。
+ *
+ * 事件挂在容器上（条目每次重建，容器是稳定的），所以不需要在每次
+ * `showCtxMenu` 里重新绑定。
+ */
+function initCtxMenuKeyboard() {
+  const m = $('#ctxmenu');
+  if (!m || m.dataset.kbWired === '1') return;
+  m.dataset.kbWired = '1';
+  m.addEventListener('keydown', (e) => {
+    const items = [...m.querySelectorAll('button:not([disabled])')];
+    if (!items.length) return;
+    const i = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const next = e.key === 'ArrowDown'
+        ? (i < 0 ? 0 : (i + 1) % items.length)
+        : (i <= 0 ? items.length - 1 : i - 1);
+      items[next].focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      items[0].focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      items[items.length - 1].focus();
+    } else if (e.key === 'Tab') {
+      // 焦点离开菜单 = 菜单该关了；否则一个看不见的浮层还留在屏幕上。
+      hideCtxMenu();
+    }
+  });
+}
+
+/**
+ * 资产行的动作菜单。不适用的条目直接不出现。
+ *
+ * 两个入口：右键（`e` 是鼠标事件，菜单落在指针处）和行末的「⋯」按钮
+ * （`fromButton`，菜单对齐到那颗按钮的左下角）。用同一个函数是因为条目必须
+ * 一模一样 —— 两个入口各写一份清单，迟早会漏掉其中一条。
+ */
+function showCtxMenu(e, a, fromButton = false) {
   e.preventDefault();
   const m = $('#ctxmenu');
   if (!m) return;
+  // 再点一次同一个「⋯」= 关闭。以前再点只是把菜单重建一遍、停在原处，读起来
+  // 像「点了没反应」——而它明明是一个开关式的展开面板。
+  if (fromButton && m.classList.contains('on') && ctxReturnFocus === e.currentTarget) {
+    hideCtxMenu();
+    return;
+  }
   m.innerHTML = '';
+  ctxReturnFocus = fromButton ? e.currentTarget : document.activeElement;
 
   const item = (label, fn, cls = '') => {
-    const b = el('button', { class: cls }, label);
+    const b = el('button', { class: cls, role: 'menuitem', tabindex: '-1' }, label);
     b.addEventListener('click', () => { hideCtxMenu(); fn(); });
     m.appendChild(b);
   };
@@ -3618,15 +4137,33 @@ function showCtxMenu(e, a) {
     m.appendChild(el('hr'));
     item(t('ctx.delete'), () => doDelete(a), 'danger');
   }
+  m.setAttribute('role', 'menu');
+  m.setAttribute('aria-label', t('row.more', { name: a.name }));
 
   // 先量再显示（定位时菜单是 display:none），然后再显示 ——
   // 先显示再量会在 0,0 位置闪一帧。
   m.classList.add('on');
   const r = m.getBoundingClientRect();
   m.classList.remove('on');
-  m.style.left = Math.min(e.clientX, window.innerWidth - r.width - 8) + 'px';
-  m.style.top = Math.min(e.clientY, window.innerHeight - r.height - 8) + 'px';
+  let left, top;
+  if (fromButton) {
+    const b = e.currentTarget.getBoundingClientRect();
+    left = Math.min(b.left, window.innerWidth - r.width - 8);
+    top = Math.min(b.bottom + 4, window.innerHeight - r.height - 8);
+  } else {
+    left = Math.min(e.clientX, window.innerWidth - r.width - 8);
+    top = Math.min(e.clientY, window.innerHeight - r.height - 8);
+  }
+  m.style.left = Math.max(8, left) + 'px';
+  m.style.top = Math.max(8, top) + 'px';
   m.classList.add('on');
+  // 两个入口都把焦点送进菜单第一项。
+  //
+  // 从「⋯」打开时这是必需的（否则 Tab 会从按钮继续往后走，一个浮层留在屏幕上
+  // 却够不到）。从右键打开时同样必需：`role="menu"` 一旦出现在无障碍树里，键盘
+  // 用户就必须能立刻用方向键 —— 而方向键事件挂在容器上，焦点还在页面上时收不到。
+  const first = m.querySelector('button');
+  if (first) first.focus({ preventScroll: true });
 }
 
 /**
