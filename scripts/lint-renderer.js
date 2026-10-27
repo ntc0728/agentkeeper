@@ -134,15 +134,39 @@ function checkI18nParity() {
   const i18nPath = path.join(SRC, 'renderer', 'i18n.js');
   if (!fs.existsSync(i18nPath)) return;
   const src = fs.readFileSync(i18nPath, 'utf8');
-  const grab = (lang) => {
+  /**
+   * 一个语言块里的键名，**按出现顺序**（不用 Set）。
+   *
+   * 原来这里直接返回 `new Set(...)`，于是重复定义的键被去重、对齐检查看不出
+   * 任何异常 —— 而对象字面量里同名键是「后者静默覆盖前者」。例如
+   * `assets.clearFilters` 先被写成「清除筛选」、再被「点击清除」覆盖（筛选条上的
+   * 按钮于是显示后者）；`editor.body` 的 "Instructions" 被 "SKILL.md body"
+   * 覆盖。两种语言都定义了、parity 全绿，界面上的文案却不是作者想要的那句。
+   * 这类缺陷只能在**保留顺序**的前提下才看得见，所以在这里单独查。
+   */
+  const grabList = (lang) => {
     const i = src.indexOf(`  ${lang}: {`);
-    if (i < 0) return new Set();
+    if (i < 0) return [];
     const j = src.indexOf('\n  }', i);
-    const body = src.slice(i, j);
-    return new Set([...body.matchAll(/^\s*'([^']+)':/gm)].map((m) => m[1]));
+    return [...src.slice(i, j).matchAll(/^\s*'([^']+)':/gm)].map((m) => m[1]);
   };
-  const en = grab('en');
-  const zh = grab('zh');
+  const enList = grabList('en');
+  const zhList = grabList('zh');
+  for (const [lang, list] of [['en', enList], ['zh', zhList]]) {
+    const seen = new Set();
+    const dup = [];
+    for (const k of list) {
+      if (seen.has(k)) dup.push(k);
+      seen.add(k);
+    }
+    if (dup.length) {
+      problems.push(
+        `i18n.js: ${lang} defines ${dup.length} key(s) more than once — the later definition silently wins: ${[...new Set(dup)].slice(0, 6).join(', ')}`
+      );
+    }
+  }
+  const en = new Set(enList);
+  const zh = new Set(zhList);
   if (!en.size) { problems.push('i18n.js: could not parse the en dictionary'); return; }
   const missing = [...en].filter((k) => !zh.has(k));
   const extra = [...zh].filter((k) => !en.has(k));

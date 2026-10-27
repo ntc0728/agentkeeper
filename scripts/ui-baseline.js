@@ -69,7 +69,12 @@ const VOLATILE_SELECTORS = [
   '.nav-badge',        // 资产 · 904、健康检查 · 2
   '.num',              // 表格里的计数列
   '.upd-log-date',     // 发布说明的发布日期
-  '.kv dd'             // 存储策略里的绝对路径
+  '.kv dd',            // 存储策略里的绝对路径
+  // 侧栏底部状态条：「扫描于 3 分钟前 · 2 项待处理」。时间与计数都是活数据 ——
+  // 换台机器、或者隔几分钟再拍一次，文字必然不同。但它的**布局**（条高、圆点
+  // 位置、窄轨道下是否只剩短读数）仍然该被基线守住，所以只藏文字、不藏容器。
+  '.side-foot-text',
+  '.side-foot-short'
 ];
 /**
  * 兜底：按文本盖。选择器会漏 —— 同一个数字在这页是 `.num`，在另一页只是表格里一个
@@ -88,9 +93,16 @@ const VOLATILE_PATTERNS = [
  * 首页那两张表（按 Agent 统计、最近改动）每一行都跟着扫描结果变，遮零散数字挡不住
  * —— 换一批资产，行数、名称、时间全变。所以整个表体都藏，只留下卡片边框与标题，
  * 那部分才是布局回归要看的地方。
+ *
+ * 资产页同理，而且更彻底：903 行里的**名称列**是这台机器上装了什么技能/插件，
+ * 编号、agent 名、体积全都跟着机器走。实测遮完数字之后，资产页仍有 61 个名称类
+ * 文本叶子可见 —— 那才是这条基线换台机器就对不上的真正原因（原来的注释把它归因
+ * 于「资产数量与路径」，只对了一半）。表体整块遮掉之后，基线守的是**骨架**：
+ * 列宽、行高、表头、筛选条、分页条的位置。
  */
 const VOLATILE_BY_VIEW = {
   overview: ['table.tbl'],
+  assets: ['table.tbl tbody'],
 };
 
 async function hideVolatile(evaluate, view) {
@@ -251,6 +263,35 @@ async function connect() {
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 等到视图**渲染完成**，而不是等 1400 ms。
+ *
+ * 固定 sleep 是这里唯一的假红来源：慢机器上 1400 ms 可能还在画第一行，快机器上
+ * 早就稳定了 —— 而两次截图落在渲染的不同阶段，比对出来的「漂移」是时间差，不是
+ * 布局变化（同一份数据连跑 capture + compare 就会报出可观的漂移）。
+ *
+ * 判据是「骨架屏没了 + 视图里有真实的卡/表 + 扫描条已收」，与
+ * `real-ui-probe.mjs` 的 `waitReady()` 同一套信号。连续两帧同一结论才算稳定。
+ */
+async function waitRendered(evaluate, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const settled = await evaluate(`(async () => {
+      const root = document.getElementById('view-root');
+      if (!root || !root.children.length) return false;
+      if (root.querySelector('.skeleton')) return false;
+      if (document.querySelector('#scanbar:not(.hidden)')) return false;
+      if (!root.querySelector('.card')) return false;
+      // 两帧同一结论：单帧可能在布局中途。
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      return true;
+    })()`).catch(() => false);
+    if (settled) return true;
+    await wait(80);
+  }
+  return false;
+}
+
 async function captureViews(dir) {
   fs.mkdirSync(dir, { recursive: true });
   const { send, evaluate, close } = await connect();
@@ -260,7 +301,7 @@ async function captureViews(dir) {
   const written = [];
   for (const [name, view] of VIEWS) {
     await evaluate(`document.querySelector('[data-view="${view}"]').click()`);
-    await wait(1400);
+    await waitRendered(evaluate);
     // 每次渲染后重新隐藏：换个页面 DOM 就是新的，之前设的 visibility 早就没了。
     await hideVolatile(evaluate, view);
     const shot = await send('Page.captureScreenshot', { format: 'png' });

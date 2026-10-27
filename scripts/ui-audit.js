@@ -70,6 +70,11 @@ for (const b of buttonLines) {
 
 // 同级的行可点、它自己却没有 onclick 的数据行。合理例外：动作挂在单元格里的行
 // （带 CTA 按钮的空态、"展开更多"），以及明确标了 .static 的表格。
+//
+// 判据以前只读 `el('tr', {` **这一行**，而 app.js 里 onclick 通常写在下一行
+// （对象字面量换行展开）。于是每一个多行写法的可点行都会被报成缺陷 —— 例如
+// `el('tr', {` 下一行紧跟 `onclick: () => drillAgent(id)` 或 `onclick: openFirst`
+// 的写法。把窗口拉宽到整个对象字面量的开头几行，按代码实际结构判断。
 if (/table\.tbl tbody tr \{ cursor: pointer/.test(css)) {
   appLines.forEach((l, i) => {
     if (!/el\('tr',\s*\{/.test(l)) return;
@@ -78,9 +83,15 @@ if (/table\.tbl tbody tr \{ cursor: pointer/.test(css)) {
     if (/el\('th'/.test(ctx3) || /el\('thead'/.test(l)) return;   // header rows
     if (/class: 'empty'/.test(l)) return;                       // empty states
     if (/colspan/.test(l)) return;                              // expander / footer rows
-    if (/onclick/.test(l)) return;                              // wired
-    // .static 表格里的行是有意不可交互的。
-    const ctx = appLines.slice(Math.max(0, i - 6), i + 1).join('\n');
+    // 属性写在紧跟的几行里：取到对象字面量的末尾（`}` 后接 `,` 或 `)`）为止。
+    let block = '';
+    for (let k = i; k < Math.min(appLines.length, i + 12); k++) {
+      block += appLines[k] + '\n';
+      if (/^\s*\},?\s*$/.test(appLines[k]) || /^\s*\},/.test(appLines[k])) break;
+    }
+    if (/onclick/.test(block)) return;                          // wired (multi-line)
+    // 只读表格里的行是有意不可交互的。
+    const ctx = appLines.slice(Math.max(0, i - 8), i + 1).join('\n');
     if (/tbl static/.test(ctx)) return;
     problems.interaction.push(`app.js:${i + 1}  data row without onclick while other rows are clickable — verify intent`);
   });
@@ -117,20 +128,54 @@ const checks = [
   ['telemetry wired', /localStats/, 'telemetry setting stored but nothing sends counts'],
   ['empty-state CTA', /projects\.noneLong[\s\S]{0,200}doImportProject|empty[\s\S]{0,120}class: 'btn primary'/, 'empty states are plain text without a call to action'],
   ['truncation tooltips', /t-desc', title:/, 'long truncated text has no title attribute'],
-  // 已知的、有意的缺口 —— 留在这里可见，好让决定有据可查：
-  ['drag to move', /dragstart|draggable/, 'no drag to move between scopes (distribute dialog covers the capability; drag is a UX duplicate)'],
-  ['virtual scrolling', /virtual|IntersectionObserver/, 'no windowing — pagination covers it; revisit only past ~5k rows per filter'],
 ];
 for (const [name, re, msg] of checks) {
   if (!re.test(app)) problems.ux.push(msg);
 }
 
+/* ---------- 5. 有意的取舍（不是缺陷，单独列出） ---------- */
+
+/**
+ * 这两条以前混在 findings 里，于是每次审计都报「有问题」，而它们其实是**已经
+ * 做过决定、并且能给出判据**的取舍。混在一起的代价是真实的告警被稀释：一份永远
+ * 亮着几条的记录，没人会去看下一条。
+ *
+ * 每条都写成可复核的形式：为什么不做、什么时候它才变成缺陷。
+ */
+const decisions = [
+  {
+    name: 'drag to move between scopes',
+    probe: /dragstart|draggable/,
+    reason: '顶部「分发到…」对话框已覆盖同一能力（选中目标 → 复制过去），拖拽只是第二个入口',
+    becomes: '当分发对话框无法表达目标（例如需要跨多个项目作用域排序）时重新评估'
+  },
+  {
+    name: 'virtual scrolling',
+    probe: /virtual|IntersectionObserver/,
+    reason: '分页把每页固定在 50 行；903 个资产 = 19 页，真机实测渲染 10.6 ms、翻页 14.3 ms（1440×900）',
+    becomes: '当单次筛选结果超过约 5000 行（100 页）导致翻页本身成为负担时'
+  }
+];
+// `probe` 命中 = 该能力已实现；没命中 = 它确实不在这次交付里，即「取舍成立」。
+const accepted = decisions.filter((d) => !d.probe.test(app));
+
 /* ---------- 报告 ---------- */
 
 let n = 0;
 for (const [cat, list] of Object.entries(problems)) {
-  console.log(`\n== ${cat.toUpperCase()} (${list.length}) ==`);
+  console.log(`
+== ${cat.toUpperCase()} (${list.length}) ==`);
   for (const p of list.slice(0, 60)) { console.log('  ' + p); n++; }
   if (list.length > 60) console.log(`  … ${list.length - 60} more`);
 }
-console.log(`\ntotal findings: ${n}`);
+if (accepted.length) {
+  console.log(`
+== ACCEPTED (${accepted.length}) — 有意的取舍，不计入 findings ==`);
+  for (const d of accepted) {
+    console.log(`  ${d.name}`);
+    console.log(`    why  : ${d.reason}`);
+    console.log(`    until: ${d.becomes}`);
+  }
+}
+console.log(`
+total findings: ${n}`);

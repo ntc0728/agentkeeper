@@ -48,6 +48,33 @@ const RUN_ALL = has('--all');
 const LIST_ONLY = has('--list');
 const CHANGED_REF = opt('--changed');
 
+/**
+ * `cargo` 的可执行路径。
+ *
+ * 这台机器上 rustup 装完后 `.cargo\bin` 不在用户 PATH（`scripts/rust-env.sh` 的
+ * 第一段注释就写着这个原因）。之前的表现：不先 `source scripts/rust-env.sh` 就
+ * 跑 `npm test`，每一个 Rust 目标都会以 `'cargo' 不是内部或外部命令` 失败——
+ * 而渲染层的两道静态关是绿的，于是整条命令看起来像「测试有问题」，而不是
+ * 「环境没接上」。脚本应当自己找到它，而不是要求调用者记得先 source。
+ */
+function resolveCargo() {
+  const exe = process.platform === 'win32' ? 'cargo.exe' : 'cargo';
+  const fromPath = spawnSync(exe, ['--version'], { encoding: 'utf8' });
+  if (fromPath.status === 0) return exe;
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  const candidates = [
+    process.env.CARGO_HOME && path.join(process.env.CARGO_HOME, 'bin', exe),
+    home && path.join(home, '.cargo', 'bin', exe),
+  ].filter(Boolean);
+  for (const c of candidates) {
+    if (!fs.existsSync(c)) continue;
+    const probe = spawnSync(c, ['--version'], { encoding: 'utf8' });
+    if (probe.status === 0) return c;
+  }
+  return null;
+}
+const CARGO = resolveCargo();
+
 /* --------------------------------------------------------------- 映射表 */
 
 /**
@@ -258,25 +285,41 @@ function main() {
   let failed = 0;
   for (const t of plan.tests) {
     console.log('=== cargo test -p ' + t.pkg + ' ' + t.args.join(' ') + ' ===');
-    const r = spawnSync('cargo', ['test', '-p', t.pkg, ...t.args, '--offline'], {
+    if (!CARGO) {
+      failed++;
+      console.error('FAILED: ' + key(t));
+      console.error('  cargo not found — install Rust or set CARGO_HOME/PATH.');
+      console.error('  On this repo: source scripts/rust-env.sh (Git Bash) or scripts/rust-env.ps1.');
+      continue;
+    }
+    // `shell: true` 仅用于 npm/`.cmd` shim；cargo 已解析成绝对路径，两种情形都交给
+    // 同一个调用，避免「有的目标能跑、有的不能」。参数全部来自本文件的字面量与映射表。
+    const r = spawnSync(CARGO, ['test', '-p', t.pkg, ...t.args, '--offline'], {
       cwd: SHELL,
       stdio: 'inherit',
     });
     if (r.status !== 0) {
       failed++;
       console.error('FAILED: ' + key(t));
+      if (r.error) console.error('  spawn error: ' + r.error.code + ' — ' + r.error.message);
     }
   }
 
   if (plan.gates) {
     // 渲染进程变了，所以在它被重新生成之前 `dist/` 是过期的——
     // 而 `dist` 那道关口正好会因此失败。先同步，再过关。
+    //
+    // `shell: true` 是 Windows 上的必要条件：Node 从 18 起拒绝在没有 shell 的
+    // 情况下 spawn `.cmd`（EACCES/ENOENT），而 npm 在 Windows 上就是 `npm.cmd`。
+    // 缺这一条的表现是「每次改渲染层，`npm test` 都报 2 个 target 失败」——
+    // 而两道关单独跑都是绿的，于是失败被当成噪声忽略。参数全部是本文件写死的
+    // 字面量，没有用户输入经过这条命令。
     console.log('=== npm run tauri:sync (the renderer changed) ===');
-    const s = spawnSync('npm', ['run', 'tauri:sync'], { cwd: ROOT, stdio: 'inherit' });
+    const s = spawnSync('npm', ['run', 'tauri:sync'], { cwd: ROOT, stdio: 'inherit', shell: true });
     if (s.status !== 0) failed++;
 
     console.log('=== npm run check ===');
-    const r = spawnSync('npm', ['run', 'check'], { cwd: ROOT, stdio: 'inherit' });
+    const r = spawnSync('npm', ['run', 'check'], { cwd: ROOT, stdio: 'inherit', shell: true });
     if (r.status !== 0) failed++;
   }
 
