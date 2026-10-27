@@ -251,7 +251,7 @@ impl Keeper {
 
     /// 创建或更新一个 skill —— 每个目标一次写入，总共一个事务。
     ///
-    /// `input`：`{ data, body, targets: [{agentId, scope, projectId}], skillId }`
+    /// `input` 的字段：`{ data, body, targets: [{agentId, scope, projectId}], skillId }`。
     pub fn save_skill(&self, input: &Value) -> Value {
         let data = input.get("data").cloned().unwrap_or_else(|| json!({}));
         let body = match input.get("body") {
@@ -1018,8 +1018,8 @@ impl Keeper {
     ///
     /// ```text
     /// agentkeeper-bundle/
-    ///   manifest.json   { schema, exportedAt, app, assets[] }
-    ///   files/<n>/...   exact file/dir copies
+    ///   manifest.json   清单 { schema, exportedAt, app, assets[] }
+    ///   files/<n>/...   文件与目录的精确副本
     /// ```
     ///
     /// 只有用户可写的资产会被导出；厂商缓存不是用户可以转手的东西。

@@ -57,7 +57,7 @@ const SKIP_DIRS: [&str; 8] = [
 /// 从一个 GitHub URL 或一个裸的 `owner/repo` 字符串中取出 `owner/repo`。
 ///
 /// 两条正则的形状是固定的：
-/// 1. `^https?://(?:www\.)?github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/?$`
+/// 1. GitHub URL 那条：`^https?://(?:www\.)?github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/?$`
 ///    （大小写不敏感）—— 返回由捕获组重建的 `owner/repo`，所以一个被小写化的
 ///    主机名会被规范化掉。
 /// 2. `^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$` —— 返回输入**逐字不变**
@@ -273,7 +273,7 @@ pub fn shape_registry_response(body: &Value) -> Value {
 }
 
 /// 某个字段的 `x || ''`：falsy（null/""/0/false）变成空字符串，其余都走
-/// `String()`。
+/// `String()` 做字符串化。
 fn first_truthy(v: &Value) -> String {
     if super::model::js_truthy(v) {
         super::model::js_string(v)
@@ -286,7 +286,7 @@ fn first_truthy(v: &Value) -> String {
 /// 完全按规格。
 ///
 /// 6 秒的截止时间与参考实现的 `AbortController` 一致；错误字符串与它的三个分支
-/// （`registry http <code>` / `registry timeout` /
+/// 逐字一致（`registry http <code>` / `registry timeout` /
 /// `registry unreachable: <msg>`）一致，因为发现页面会原样渲染它们。
 pub fn search_registry(opts: &Value) -> Value {
     match super::http::get_json(&search_url(opts), SEARCH_TIMEOUT_MS) {
@@ -365,8 +365,8 @@ pub struct Candidates {
 /// 决定从一个克隆下来的仓库里安装什么。
 ///
 /// `validate` 收到的正是 `validateByKind('skill', {...})` 那个负载；`scan` 收到
-/// `fieldsFor()` 的结果并返回发现。两者都是注入的，好让本模块保持独立于
-/// `validate.rs` / `security.rs`。
+/// `fieldsFor()` 的结果并返回发现。两者都是注入的，好让本模块保持独立，
+/// 不依赖 `validate.rs` 和 `security.rs`。
 ///
 /// 绝不能漂移的行为：
 /// * 阻断性的校验问题会跳过这个 skill（`reason` = 第一条阻断消息），而不是中止
@@ -374,7 +374,7 @@ pub struct Candidates {
 /// * 安全发现会被记录，但绝不阻断；
 /// * 已存在的目标会以 `already exists` 跳过；
 /// * `from` 字符串是带正斜杠的 `owner/repo#relative/path`，仓库根则是
-///   `owner/repo#.`。
+///   `owner/repo#.`（也就是 `#` 后面直接跟一个点）。
 pub fn collect_candidates<V, S>(
     clone_root: &str,
     target_dir: &str,
@@ -515,7 +515,7 @@ fn random_suffix() -> String {
     out
 }
 
-/// `path.join(os.tmpdir(), 'agentkeeper-install-<ms>-<rand>')`
+/// 对应 `path.join(os.tmpdir(), 'agentkeeper-install-<ms>-<rand>')` 的拼法。
 fn temp_clone_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "agentkeeper-install-{}-{}",
@@ -542,7 +542,7 @@ fn clone_detail(stderr: &str, error: &str) -> String {
     }
 }
 
-/// `spawnFile('git', ['clone','--depth','1',url,tmp], { timeoutMs })`。
+/// 对应参考实现的 `spawnFile('git', ['clone','--depth','1',url,tmp], { timeoutMs })` 调用。
 ///
 /// `Command::output()` 无法设上界，而一次挂起的克隆（一个代理提示、一个死掉
 /// 的主机）会永远钉住 IPC 线程，所以子进程被 spawn 出来、每 50 ms 轮询一次，
@@ -636,7 +636,8 @@ pub fn install_from_repo(keeper: &super::keeper::Keeper, repo: &str, agent_id: &
             "error": format!("git clone failed: {}", detail),
         }),
     };
-    // `finally { if (cloned || fs.existsSync(tmp)) rimraf(tmp) }`
+    // 对应 `finally { if (cloned || fs.existsSync(tmp)) rimraf(tmp) }`：
+    // 无论克隆成功与否都要清掉临时目录。
     rmrf(&tmp);
     out
 }

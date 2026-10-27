@@ -216,7 +216,7 @@ fn js_number(v: Option<&Value>) -> f64 {
     }
 }
 
-/// `Math.min(Math.max(1, Number(args[key]) || default), max)` —— `list_assets`
+/// 对应 `Math.min(Math.max(1, Number(args[key]) || default), max)`：`list_assets`
 /// 和 `search_registry` 共用的钳位。
 fn clamp_count(args: &Value, key: &str, fallback: f64, max: f64) -> usize {
     let raw = js_number(args.get(key));
@@ -1364,7 +1364,7 @@ mod tests {
 
     /// 一个解析出 `{ ok: false }` 的工具仍然必须被标记为一次失败执行：否则遵循
     /// 规格的客户端会把"未找到资产"渲染成一次正常应答。这是刻意的 —— 见
-    /// [`is_tool_error`]。
+    /// [`is_tool_error`] 的说明。
     ///
     /// 一个*成功*的结果绝不能带上这个标志：快乐路径上的 `isError: true` 比缺了
     /// 它更糟，因为客户端会把那段文字当作错误呈现出来。

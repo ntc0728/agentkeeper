@@ -132,7 +132,7 @@ fn object_keys(v: &Value) -> Vec<String> {
     }
 }
 
-/// `data.version && !/^\d+(\.\d+)*/.test(String(data.version))`
+/// 对应参考实现的判据 `data.version && !/^\d+(\.\d+)*/.test(String(data.version))`。
 fn check_version(data: &Value, issues: &mut Vec<Value>) {
     if let Some(v) = data.get("version").filter(|v| js_truthy(*v)) {
         if !version_re().is_match(&js_str(v)) {
@@ -300,7 +300,7 @@ pub fn validate_mcp_server(id: &str, cfg: &Value) -> Vec<Value> {
     }
 
     if has_stdio && command == Some("npx") && !has_http {
-        // `Array.isArray(cfg.args) ? cfg.args.join(' ') : ''`
+        // 这里复刻 `Array.isArray(cfg.args) ? cfg.args.join(' ') : ''` 这个取值。
         let joined = match cfg.get("args") {
             Some(Value::Array(items)) => items
                 .iter()
@@ -809,14 +809,14 @@ mod tests {
             vec![json!({"level":"error","field":"kind","message":"unknown kind nope"})]
         );
 
-        // plugin: `payload.data || payload`
+        // plugin 的取数是 `payload.data || payload`，所以这里没有任何问题。
         assert!(validate_by_kind("plugin", &json!({"name":"p"})).is_empty());
 
         // mcp: 缺失的 config 就是 `undefined` -> 直接报 config 错误。
         let issues = validate_by_kind("mcp", &json!({"name":"srv"}));
         assert_eq!(issues[0]["message"], "server config must be an object");
 
-        // `String(body || '')`
+        // 与 `String(body || '')` 等价：0 和空串都按空内容处理。
         let issues = validate_by_kind("memory", &json!({"body":""}));
         assert_eq!(issues.len(), 1);
         let issues = validate_by_kind("memory", &json!({"body":0}));

@@ -549,7 +549,7 @@ mod tests {
         }
     }
 
-    /* ---- download_to_file ------------------------------------------- */
+    /* ---- download_to_file（下载到文件） ----------------------------- */
 
     use std::net::TcpListener;
 
@@ -594,7 +594,8 @@ mod tests {
                         // 而关闭一个带未读入站字节的 Windows 套接字会发出 RST，
                         // 从而丢掉客户端尚未读到的回复。
                         // 那就是在并行 `cargo test` 下间歇出现的
-                        // `os error 10053` / "Error encountered in the status line"。
+                        // `os error 10053`，以及客户端抛出的那句
+                        // "Error encountered in the status line"。
                         //
                         // 超时或对端关闭会打破循环，而回复仍会写出：这是一个桩
                         // 服务器，一个被截断的 GET 头不改变它所应答的内容。
@@ -718,7 +719,7 @@ mod tests {
 
         let error = download_to_file(&url, &dest, "direct", 5, 5000, &mut |_, _| true).unwrap_err();
         match error {
-            // `Math.round(bytes / 1048576)`。
+            // 对应 `Math.round(bytes / 1048576)`，所以 10 字节报的是 0 MB。
             FetchError::Transport(message) => {
                 assert!(message.contains("size looks wrong"), "{}", message);
                 assert!(message.contains("0 MB"), "{}", message);

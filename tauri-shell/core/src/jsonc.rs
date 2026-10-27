@@ -1,11 +1,11 @@
-//! `stripJsonComments` — JSONC tolerance for real-world MCP configs.
+//! `stripJsonComments`——对现实世界里那些 MCP 配置的 JSONC 宽容处理。
 //!
-//! The reference version does this with a regex dance (`\"` shielding, then a
-//! string-or-comment alternation). A small scanner does the same job without
-//! the shielding trick, and correctly leaves `//` inside strings alone.
+//! 参考实现用一串正则花活来做这件事（先屏蔽 `\"`，再用"字符串或注释"的择一
+//! 分支）。一个小型扫描器做同样的事却不需要屏蔽套路，而且能正确地不碰字符串
+//! 内部的 `//`。
 //!
-//! Everything works on raw bytes and only ever *deletes* ASCII characters, so
-//! UTF-8 content (Chinese descriptions in a config) survives untouched.
+//! 全程按原始字节操作，并且只*删除* ASCII 字符，所以 UTF-8 内容（配置里的中文
+//! 描述）会原样保留。
 
 pub fn strip_json_comments(src: &str) -> String {
     let bytes = src.as_bytes();

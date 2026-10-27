@@ -83,8 +83,8 @@ fn read_body_capped(reader: &mut dyn Read) -> Result<Vec<u8>, UpdateError> {
     Ok(body)
 }
 
-/// `getJson`，采用 manager 需要的形状：
-/// `(status, headers, json)`。
+/// 即参考实现的 `getJson`，但采用 manager 需要的形状：
+/// 返回三元组 `(status, headers, json)`。
 ///
 /// * 任何 HTTP 状态都返回 `Ok`，因为 404（"还没有发布"）和 403/429
 ///   （"被限流"）是答案而非传输失败 —— manager 读取状态码与限流响应头来决策。

@@ -3,10 +3,11 @@
 //! 令牌会提高 API 配额（60 → 5000 次/小时），因此属于凭据：`settings.json`
 //! 里的明文副本会跟着每一次导出、每一次换机一起走。存储的值在
 //! Windows 上由 DPAPI 包装、在 macOS 上由 Keychain 包装、在 Linux 上由
-//! libsecret 包装，因此换到另一台机器上毫无用处。信封格式为：
+//! libsecret 包装，因此换到另一台机器上毫无用处。信封格式就是 `enc1:` 前缀
+//! 后面接一段 base64 编码的 DPAPI 密文（原文见下方代码块，逐字保留）：
 //!
 //! ```text
-//! enc1: + base64( CryptProtectData(token_utf8) )
+//! enc1: + base64( CryptProtectData(token_utf8) )   ← 前缀 + 对 UTF-8 令牌做 DPAPI 加密后的 base64
 //! ```
 //!
 //! 在 Windows 上这是无熵、用户作用域的 DPAPI，所以在这台机器上写入的令牌
@@ -16,7 +17,7 @@
 //! UI 依赖的两条规则：
 //!
 //! 1. 令牌**绝不回显** —— [`TokenStore::status`] 只报告
-//!    `{filled, origin, error}`；
+//!    `{filled, origin, error}` 这三个字段（是否已填、来源、错误）；
 //! 2. 无法解密的值**不会**被报告为"未配置"：说"空"会让用户被悄悄降级到
 //!    匿名配额，并掩盖真正的问题。原因是会返回的，这样 UI 可以提示重新保存。
 //!
@@ -68,7 +69,7 @@ pub fn validate_token(raw: Option<&str>) -> Result<String, UpdateError> {
     Ok(token.to_string())
 }
 
-/// `envToken`：`GITHUB_TOKEN`、
+/// 对应参考实现的 `envToken`：`GITHUB_TOKEN` 与
 /// `AGENTKEEPER_GITHUB_TOKEN` 中第一个非空的值。
 pub fn env_token() -> Option<String> {
     for name in ["GITHUB_TOKEN", "AGENTKEEPER_GITHUB_TOKEN"] {
@@ -96,7 +97,7 @@ enum Decoded {
     Failed(String),
 }
 
-/// `createTokenStore({ store, safeStorage })`。
+/// 对应参考实现的 `createTokenStore({ store, safeStorage })` 工厂。
 #[derive(Debug, Clone)]
 pub struct TokenStore {
     root: String,

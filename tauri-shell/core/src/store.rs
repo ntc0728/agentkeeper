@@ -561,8 +561,8 @@ impl RestoreFailure {
         RestoreFailure::new(path, RESTORE_PATH_FAILED, e.to_string())
     }
 
-    /// 稳定标识 —— 绝不是那个句子。见 [`STORE_SNAPSHOT_TOO_LARGE`] 和
-    /// [`RESTORE_SYMLINK_FAILED`]。
+    /// 稳定标识 —— 绝不是那个句子。具体见 [`STORE_SNAPSHOT_TOO_LARGE`] 与
+    /// [`RESTORE_SYMLINK_FAILED`] 两处。
     pub fn code(&self) -> &'static str {
         self.code
     }
@@ -762,8 +762,8 @@ impl OpKind {
     }
 }
 
-/// 一次变更。通过这些构造函数来构造，这样漏掉某个字段就是编译错误，而不是运行时的
-/// `op[i] is missing a "from"`。
+/// 一次变更。通过这些构造函数来构造，这样漏掉某个字段就是编译错误，而不是
+/// 运行时报出的 `op[i] is missing a "from"`。
 pub struct Op {
     pub kind: OpKind,
     /// 被写入的路径。绝对路径，与扫描器报告的一致。
@@ -983,8 +983,9 @@ impl Store {
 
     /// `transaction(ops, meta)` —— 一个文件得以改变的唯一途径。
     ///
-    /// `meta` 的键：`txId`、`kind`、`action`、`agentId`、
-    /// `agentLabel`、`projectId`、`projectName`、`assetId`、`assetName`。
+    /// `meta` 的键共九个：`txId`、`kind`、`action`、`agentId`、
+    /// `agentLabel`、`projectId`、`projectName`、`assetId`，以及
+    /// `assetName`。
     ///
     /// 撤销保证有两半，而第一半是承重的那半：每个被触及的路径都在**第一个**操作
     /// 运行**之前**被捕获，所以捕获阶段的拒绝意味着什么都没有写入。第二半是

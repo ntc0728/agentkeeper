@@ -13,13 +13,13 @@
 //! | [`UpdateManager::set_token`] | 状态 + `saved` + `changed` |
 //! | [`UpdateManager::start_download`] | 任务快照 |
 //! | [`UpdateManager::progress`] | 任务或 `null` |
-//! | [`UpdateManager::cancel`] | `{ canceled: bool }` |
-//! | [`UpdateManager::install`] | `{ ok, restarted, path, mode }` |
+//! | [`UpdateManager::cancel`] | `{ canceled: bool }`（取消是否真的生效） |
+//! | [`UpdateManager::install`] | `{ ok, restarted, path, mode }`（安装结果与重启方式） |
 //! | [`UpdateManager::skip`] / [`UpdateManager::unskip`] | 状态 |
 //!
 //! IPC 层把下载/安装失败包装为 `{ ok: false, error }`；这里的方法
-//! 返回 `Result`，`lib.rs` 的命令也以同样方式转换
-//! [`UpdateError`]。
+//! 返回 `Result`，`lib.rs` 的命令也以同样方式把 [`UpdateError`]
+//! 转换过去。
 //!
 //! ## 保真度
 //!
@@ -64,21 +64,22 @@
 //!
 //! ## 假定的接口（归其他模块所有，此处未实现）
 //!
-//! `core/update/http.rs` —— 在此实现：
-//! `fetch_release(url, token, timeout_ms) -> Result<ReleaseFetch, UpdateError>`，
+//! `core/update/http.rs` —— 在此实现：拉取发布信息的
+//! 签名 `fetch_release(url, token, timeout_ms) -> Result<ReleaseFetch, UpdateError>`，
 //! 其中 `ReleaseFetch { status, headers, json }`。对*任何* HTTP 状态都返回
 //! `Ok`（含 404/403）；只有传输或 body 解析失败才返回 `Err`。它
 //! **不接受任何代理设置**（见 `core::http` 中的限制）：因此
 //! `updateProxy` 会影响下载，但不影响发布检查。
 //!
-//! `core/http.rs` —— 在此实现：
-//! `download_to_file(url, dest, proxy, max_bytes, timeout_ms, on_progress)`
+//! `core/http.rs` —— 在此实现：下载用的
+//! 签名 `download_to_file(url, dest, proxy, max_bytes, timeout_ms, on_progress)`，
 //! 其中 `on_progress: &mut dyn FnMut(u64, Option<u64>) -> bool`；返回 `false` 会中止
 //! 并把半成品文件留在原地（参考实现的取消路径）。
 //!
-//! `core/update/token.rs` —— 在此实现：`TokenStore::new(root)`、
-//! `status() -> Value`、`encryption_available() -> bool`、`effective() ->
-//! Option<String>`、`set(Option<&str>) -> Result<TokenSetResult, UpdateError>`。
+//! `core/update/token.rs` —— 在此实现：令牌存储的 `TokenStore::new(root)`、
+//! 查询状态的 `status() -> Value`、判断加密是否可用的
+//! `encryption_available() -> bool`、取当前生效令牌的 `effective() ->
+//! Option<String>`，以及写入令牌的 `set(Option<&str>) -> Result<TokenSetResult, UpdateError>`。
 
 use serde_json::{json, Map, Value};
 use std::cmp::Ordering;
@@ -157,7 +158,7 @@ fn js_to_string(value: &Value) -> String {
     }
 }
 
-/// `String(v || '')`。
+/// `String(v || '')`：假值一律变空串，其余按 JS 字符串化。
 fn js_string_or_empty(value: Option<&Value>) -> String {
     match value {
         Some(v) if js_truthy(v) => js_to_string(v),
@@ -230,7 +231,7 @@ pub fn clamp_minutes(value: &Value) -> i64 {
 }
 
 /* ------------------------------------------------------------------ */
-/* `ak:update-*` 载荷守卫                     */
+/* `ak:update-*` 载荷守卫                                              */
 /* ------------------------------------------------------------------ */
 //
 // 参考实现是在 *handler* 里校验原始 IPC 载荷，在
@@ -242,10 +243,10 @@ pub fn clamp_minutes(value: &Value) -> i64 {
 
 // Rust 引擎讲英文；`toast()` 会对它收到的每个 `{ok:false,error}` 运行
 // `zhError()` → `zhText()`，所以中文来自
-// `src/renderer/engine-zh.js`（EXACT），绝不是来自这里。这也是这些
-// `ipc.repoFormat` / `ipc.apiBaseFormat` / `ipc.proxyFormat` /
-// `ipc.intervalRange` / `update.tokenFieldRequired` / `update.tokenType`
-// 条目保留英文的原因：英文界面绝不能打印中文。
+// `src/renderer/engine-zh.js`（EXACT），绝不是来自这里。这也是
+// `ipc.repoFormat`、`ipc.apiBaseFormat`、`ipc.proxyFormat` 这三个键，
+// 加上 `ipc.intervalRange`、`update.tokenFieldRequired`、`update.tokenType`
+// 之所以保留英文的原因。
 //
 // `ERR_REPO_FORMAT` 刻意与 `discover.repoFormat` 使用的
 // 是*同一句话*：一条规则，一个字符串，一个字典条目。
@@ -332,7 +333,7 @@ pub fn validate_settings_patch(patch: &Value) -> Option<&'static str> {
 /// 情况一路区分下去，于是：
 ///
 /// * 没有 `token` 键（或 body 不是对象，`asObject` 会把它折叠成 `{}`）
-///   → `ERR_TOKEN_FIELD_REQUIRED`；
+///   → 报 `ERR_TOKEN_FIELD_REQUIRED`；
 /// * `null` → `Ok(None)`：清除；
 /// * 字符串 → `Ok(Some(..))`：替换；
 /// * 数字 / 布尔 / 数组 / 对象 → `ERR_TOKEN_TYPE`。
@@ -652,7 +653,7 @@ pub struct Options {
     pub dir: Option<PathBuf>,
     /// `options.maxBytes`；0 表示参考实现的默认值（`|| MAX_INSTALLER_BYTES`）。
     pub max_bytes: u64,
-    /// `options.launcher`。`None` =
+    /// `options.launcher` 的取值。`None` 表示用
     /// [`default_launcher`]，它会真正执行安装器 —— 测试会设置它，
     /// 这样 `install()` 就能被断言而无需派生进程。
     pub launcher: Option<LauncherFn>,
@@ -984,7 +985,7 @@ impl UpdateManager {
 
     /* ---------------- 检查 ---------------- */
 
-    /// `check({ manual })`。
+    /// 对应参考实现的 `check({ manual })` 调用形态。
     ///
     /// 手动检查与计划检查走同一条路径；手动检查会忽略
     /// `nextCheckAt`，但仍然尊重针对 `lastAttemptAt` 的 60 秒间隔。
@@ -1617,7 +1618,7 @@ fn run_download(
                 }
             }
 
-            // `updateProgress(received, declared)`。
+            // 对应参考实现的 `updateProgress(received, declared)`。
             let total = total.unwrap_or(0);
             task.insert("received".into(), json!(received));
             let current_total = task.get("total").and_then(Value::as_u64).unwrap_or(0);
@@ -1809,7 +1810,7 @@ fn default_launcher(file: &Path, platform: &str, silent: bool) -> Result<String,
 /* 路径与 URI 辅助函数                                                   */
 /* ------------------------------------------------------------------ */
 
-/// `path.win32.isAbsolute` / `path.posix.isAbsolute`。
+/// Node 的 `path.win32.isAbsolute` / `path.posix.isAbsolute` 判定。
 fn is_absolute_js(text: &str) -> bool {
     let bytes = text.as_bytes();
     if cfg!(windows) {
@@ -1873,7 +1874,7 @@ fn comparable_components(path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// `!relative.startsWith('..') && !path.isAbsolute(relative)`。
+/// 对应 `!relative.startsWith('..') && !path.isAbsolute(relative)`。
 ///
 /// 同一目录的两种写法比较结果相等（逐段比较，Windows 上
 /// 折叠大小写）。对以 `..` 开头的*文件名*的拒绝是解析口径：
@@ -1924,7 +1925,7 @@ fn decode_uri_component(text: &str) -> Result<String, ()> {
 /// 每进程一个管理器，对应参考实现的 `buildContext()`。
 ///
 /// 第一个 root 胜出（生产环境只有一个）；测试则直接构造
-/// [`UpdateManager`]。
+/// 一个独立的 [`UpdateManager`]。
 pub fn ensure_manager(root: &str) -> &'static UpdateManager {
     static CELL: OnceLock<UpdateManager> = OnceLock::new();
     CELL.get_or_init(|| UpdateManager::new(root))
@@ -2546,8 +2547,9 @@ mod tests {
     /// `String` 参数连反序列化都无法接受它。
     ///
     /// 完整契约（包括缺失字段的分支）在
-    /// `tests/update_pipeline.rs::token_arg_turns_null_into_clear_and_rejects_other_types`
-    /// 中断言；这一个只是紧挨着代码的快速单元级绊线。
+    /// `tests/update_pipeline.rs` 的
+    /// `token_arg_turns_null_into_clear_and_rejects_other_types` 一例中
+    /// 断言；这一个只是紧挨着代码的快速单元级绊线。
     #[test]
     fn the_token_argument_guard_turns_null_into_clear() {
         // `null` 表示清除 —— 这正是 BUG-1 的全部要点。

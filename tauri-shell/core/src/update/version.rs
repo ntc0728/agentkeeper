@@ -150,7 +150,7 @@ impl std::error::Error for UpdateError {}
 /* 版本解析与比较                                                        */
 /* ------------------------------------------------------------------ */
 
-/// `{ core: [major, minor, patch], pre: string | null }`。
+/// 解析结果的形态是 `{ core: [major, minor, patch], pre: string | null }`。
 ///
 /// 核心数字是 `f64`，因为它们以 `Number` 存储 —— 见
 /// 模块文档中关于 >2^53 行为的说明。
@@ -239,7 +239,7 @@ fn js_str_cmp(a: &str, b: &str) -> Ordering {
     }
 }
 
-/// `/^[0-9]+$/ ? Number(text) : null`
+/// 对应参考实现的 `/^[0-9]+$/ ? Number(text) : null`。
 fn numeric_identifier(text: &str) -> Option<f64> {
     if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -307,7 +307,7 @@ pub fn compare_versions(a: &str, b: &str) -> Option<Ordering> {
 
     match (&left.pre, &right.pre) {
         (None, None) => Some(Ordering::Equal),
-        // 1.0.0 > 1.0.0-beta.1
+        // 不带预发布标记的版本大于带标记的：1.0.0 > 1.0.0-beta.1
         (None, Some(_)) => Some(Ordering::Greater),
         (Some(_), None) => Some(Ordering::Less),
         (Some(left), Some(right)) => Some(compare_prerelease(left, right)),
