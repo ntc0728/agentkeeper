@@ -41,9 +41,19 @@ serde_yaml_ng = "0.10"
 rayon = "1"
 # 安全规则的匹配式不用反向引用、也不用环视，所以 `regex` 足以覆盖全部。
 regex = "1"
-# 整棵树里唯一的网络客户端：一个小的阻塞式实现（rustls + webpki 根证书，不带异步
+# 整棵树里唯一的网络客户端：一个小的阻塞式实现（rustls + 系统根证书，不带异步
 # 运行时）就够覆盖发现与更新两条 HTTP 链路，不必为了读一份 JSON 把 tokio 拖进来。
-ureq = { version = "2", features = ["json"] }
+#
+# `native-certs` 是**必需**的，不是为了好看：ureq 默认只信任它内置的那份 webpki
+# 根证书清单，而任何装了企业代理 / 杀软 TLS 拦截的机器都多一条自己的根证书，
+# 内置清单里没有它，于是每次 HTTPS 都失败在
+#   TLS failed (invalid peer certificate: UnknownIssuer)
+# —— 浏览器发同一个请求却是通的，因为它读系统证书库。用户看到的就是「检查更新
+# 失败：cannot reach the server: TLS failed …」，一条无法据以行动的报错。
+# 打开这个 feature 之后信任锚换成操作系统的证书库（Windows 证书存储区 /
+# /etc/ssl/certs / Keychain），与浏览器同一套信任链。这不是给某个域名开洞，
+# 也没有关掉证书校验。
+ureq = { version = "2", features = ["json", "native-certs"] }
 # 更新令牌的 `enc1:` 信封（DPAPI 密文的 base64），以及生成它所需的 Win32 调用。
 # 令牌用 DPAPI 以用户作用域、无附加熵封装，所以同一用户的密文可以互换使用。
 base64 = "0.22"

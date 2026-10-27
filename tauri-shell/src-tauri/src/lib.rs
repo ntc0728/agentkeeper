@@ -519,6 +519,12 @@ async fn audit(opts: serde_json::Value) -> serde_json::Value {
 /// 每次调用都从 `audit.jsonl` 现数，不做存储：日志本身就是唯一事实来源，
 /// 再放一个计数器就可能与它不一致。什么都不会离开这台机器——它只喂设置页
 /// 那一行。整本日志的解析正是它跑在阻塞池上的原因。
+///
+/// `writes` 数的是**真正落盘的写操作**。它以前只认 `action == "apply"`，而
+/// `apply` 是沙盒层退役时一起消失的动作名 —— 于是这个计数在一台正常使用的机器上
+/// 恒为 0（实测审计日志里现存的 action 是 create / update / delete / distribute /
+/// install / export / settings-save / scan …）。按要求数「写」而不是数一个历史
+/// 名词：把 `store` 真正写过的动作列出来。
 #[tauri::command]
 async fn local_stats() -> serde_json::Value {
     tauri::async_runtime::spawn_blocking(|| {
@@ -531,7 +537,7 @@ async fn local_stats() -> serde_json::Value {
             };
             match rec.get("action").and_then(|v| v.as_str()) {
                 Some("scan") => scans += 1,
-                Some("apply") => writes += 1,
+                Some("create" | "update" | "delete" | "distribute" | "install" | "apply") => writes += 1,
                 _ => {}
             }
             if rec.get("status").and_then(|v| v.as_str()) == Some("failed") {
