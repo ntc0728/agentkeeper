@@ -8,6 +8,9 @@
   --surface-3: #eef1f5;
   --border: #e4e7ec;
   --border-strong: #d3d8e0;
+  /* 滚动条滑块：相对所在表面 ≥3:1（WCAG 1.4.11）。见文件下方「滚动条」一节。 */
+  --scroll-thumb: #8892a3;
+  --scroll-thumb-hover: #798393;
   --text: #131720;
   --text-2: #5b6472;
   /* 10–12px 辅助文字要满足 AA（4.5:1）：在 --surface (#ffffff) 上是 5.01:1，
@@ -134,12 +137,18 @@
   --diff-mod-bg: #fdf5e4;
   --diff-mod-text: #7a5310;
 
-  /* 轻提示（两种主题下都是深色气泡，但仍然按主题给出取值以保持一致） */
+  /* 轻提示（两种主题下都是深色气泡，但仍然按主题给出取值以保持一致）
+   *
+   * 底色 = 语义色按**同一比例**压暗（混入 35% 近黑）。以前三个取值各自手调，
+   * 白字对比度是 6.58 / 5.91 / 7.67 —— 警告那条明显比另外两条浅，读起来像
+   * 降级提示；而「成功」与「失败」处在两个不同的明度档，也让这条提示的紧急
+   * 程度无法从外观上比较。压暗到同一比例后是 6.55 / 6.67 / 8.62，全在 AA 之上
+   * 且彼此接近。（直接拿 --ok / --warn 铺底不行：白字只有 3.5:1。） */
   --toast-bg: #161a22;
   --toast-text: #ffffff;
-  --toast-ok: #0e6b3d;
-  --toast-err: #9c272b;
-  --toast-warn: #8a5a12;
+  --toast-ok: #0e6b40;
+  --toast-err: #8c272b;
+  --toast-warn: #825118;
 }
 
 /* 深色主题：只改变量取值 —— 每个组件本来就读 token，
@@ -151,6 +160,8 @@
   --surface-3: #2a313b;
   --border: #2a3039;
   --border-strong: #3a424e;
+  --scroll-thumb: #687384;
+  --scroll-thumb-hover: #7c8798;
   --text: #e6eaf0;
   --text-2: #a3adbb;
   /* 在 --surface 上是 6.42:1，在 --surface-2 上是 5.92:1，在 --bg 上是 6.99:1。
@@ -228,12 +239,12 @@
   --diff-mod-bg: #332a14;
   --diff-mod-text: #f0c674;
 
-  /* 轻提示保持深色气泡 */
+  /* 轻提示保持深色气泡 —— 两套主题共用同一组取值（见上方说明）。 */
   --toast-bg: #161a22;
   --toast-text: #ffffff;
-  --toast-ok: #0e6b3d;
-  --toast-err: #9c272b;
-  --toast-warn: #8a5a12;
+  --toast-ok: #0e6b40;
+  --toast-err: #8c272b;
+  --toast-warn: #825118;
 
   /* 侧边栏在深色主题下仍然是深色 */
   --side-bg: #12151c;
@@ -278,6 +289,38 @@ html, body {
 }
 
 button, input, select, textarea { font: inherit; color: inherit; }
+
+/* ---------------- 滚动条 ----------------
+ *
+ * 以前全站用 WebView2 的默认滚动条：浅色主题下是一条**亮灰**的宽条（约 17px），
+ * 在深色卡片上尤其刺眼，而且和本项目 11–12px 的圆角体系完全不搭 —— 它看起来
+ * 像属于浏览器、不属于这个应用。
+ *
+ * 滑块色是**专用 token**（`--scroll-thumb`），不是复用 `--border-strong`：后者
+ * 为了「描边要轻」压得很淡，拿来做滑块实测只有 1.43:1（浅色）与 1.68:1（深色）
+ * —— 低于 WCAG 1.4.11 对非文字 UI 组件的 3:1，深色卡片上几乎看不见滑块在哪。
+ * 两个取值都按「相对所在表面 ≥3:1」选定（浅色 3.14 / 3.03，深色 3.56 / 3.29），
+ * 具体色值就在上面那两套变量里。
+ * 透明边框 + `background-clip` 让滑块比轨道窄，形成圆角胶囊的内缩。
+ *
+ * 只对**应用内的滚动容器**生效：项目页、资产表、抽屉、活动日志共用一套颜色，
+ * 从一页切到另一页时滚动条不会换样子。
+ */
+* { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; }
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--r-pill);
+  min-height: 40px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); background-clip: content-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+/* 表格自己的滚动盒：滑块再收一档，免得它比表头文字还抢眼。 */
+.card-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+.card-scroll::-webkit-scrollbar-thumb { border-width: 2px; }
 
 /* 用 248px 而不是 232px：中文标签（“操作记录”、“健康检查”）需要多出来的这点
    空间，否则会被省略号截断。这条轨道是默认值，不是铁律 —— 侧边栏折叠开关和
@@ -343,6 +386,43 @@ button, input, select, textarea { font: inherit; color: inherit; }
    规则（只有各组件自己的），所以这个徽标需要自带一条，否则它会一直显示，
    在“设置”旁边留一个孤零零的“!”。 */
 .nav-badge.hidden { display: none; }
+
+/* 侧栏常驻状态条。
+ *
+ * 「这些数字是什么时候的」是这个应用第二重要的问题（写入直接落盘，资产随时会被
+ * 别的工具改掉）。以前扫描时间只在一闪而过的 toast 里出现过一次，之后再也查不到，
+ * 只能靠相对时间列的粗细去猜。
+ *
+ * 两段式：圆点用颜色表达状态，文字永远在 —— 颜色不能单独承担信息。折叠成图标
+ * 轨道时文字改为「视觉隐藏」而不是 `display:none`：它是 `aria-live` 的内容，
+ * 从无障碍树里删掉就等于关掉了这条播报。 */
+.side-foot {
+  display: flex; align-items: center; gap: 7px;
+  padding: 9px 14px 11px; border-top: 1px solid var(--side-border);
+  font-size: var(--fs-micro); color: var(--side-muted);
+  flex: none; min-width: 0; position: relative;
+}
+.side-dot {
+  width: 6px; height: 6px; border-radius: var(--r-pill); flex: none;
+  background: var(--green); box-shadow: 0 0 0 3px var(--green-soft);
+}
+.side-dot.warn { background: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft); }
+.side-dot.err { background: var(--red); box-shadow: 0 0 0 3px var(--red-soft); }
+.side-foot-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 窄轨道下的替代读数。
+ *
+ * 折叠成 60px / 420px 时那句「扫描于 3 分钟前 · 2 项待处理」放不下，而它在窄屏
+ * 恰恰是唯一的告警读数 —— 同一宽度下导航徽标也是 `display:none`（`navBadgesHidden`
+ * 实测三枚全 none），于是「有 2 项待处理」在窄窗口里**彻底不可见**。这里留一个
+ * 短读数（数字或 !/✓），配合圆点把状态说全：颜色不再是唯一载体。
+ */
+.side-foot-short { display: none; font-variant-numeric: tabular-nums; font-weight: 600; }
+.app.collapsed .side-foot { justify-content: center; padding-inline: 0; }
+.app.collapsed .side-foot-text {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap;
+}
+.app.collapsed .side-foot-short { display: inline; }
 
 
 /* ---------------- 顶栏 ---------------- */
@@ -434,6 +514,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .btn.ghost:hover { background: var(--ghost-hover-bg); }
 .btn.sm { padding: 4px 9px; font-size: var(--fs-small); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
+/* 顶栏按钮按视图收起时用的就是它。本样式表故意没有全局 `.hidden`（只有各组件
+   自己的），所以这条限定在按钮上：`display:none` 让它们彻底离开布局与 Tab 序，
+   而不是「透明但还能聚焦」。 */
+.btn.hidden { display: none; }
 
 .icon-btn {
   background: none; border: 0; cursor: pointer; color: var(--text-3);
@@ -454,7 +538,13 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .card-head h2 { margin: 0; font-size: var(--fs-body); font-weight: 620; }
 .card-head .sub { font-size: var(--fs-micro); color: var(--text-3); }
+/* 说明文字推到右边时，**不要贴着卡片右缘**。
+ *
+ * 「操作记录」那张卡的说明（「185 条记录 · 仅追加 …」）与它右边的时间读数之间
+ * 只隔着 `.card-head` 的 10px gap，而它本身又顶到了最右侧 —— 阅读时那句话像是
+ * 时间的前半段。给 spacers 一个右侧留白，让「说明 → 读数」之间有明确的断裂。 */
 .card-head .spacer { margin-left: auto; }
+.card-head .sub.spacer { padding-right: 4px; }
 .card-body { padding: 14px 16px; }
 
 .grid { display: grid; gap: 14px; }
@@ -477,13 +567,62 @@ button, input, select, textarea { font: inherit; color: inherit; }
  * 只能是它内部的表格包装层（`.card-scroll`）。
  */
 .view-fill { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+/* 锁框布局：外框不动，只有列表滚。
+ *
+ * 与 `.view-fill` 是两件事：`.view-fill` 在 ≤1200px 会退回「按内容定高、整页
+ * 滚动」（那是仪表盘两块面板的正确行为），而资产页的筛选条与分页条必须一直
+ * 留在视野里 —— 795 行数据、50 行一屏，用户翻到第 7 页时还得能改筛选条件。
+ * 所以这里用自己的类，不参与那条媒体查询。
+ *
+ * 顺带修掉一个真缺陷：`.card { overflow-x:auto }` 会把这个卡片变成滚动容器，
+ * 于是表头上的 `position:sticky; top:0` 相对它定位，而它自己从不纵向滚动 ——
+ * 实测资产表滚到 700px 时表头是 -537px（完全滚出），概览页的两张表却是 0px
+ * （粘住）。同一个表格组件两种行为，是缺陷不是意图。锁框之后表头粘在
+ * `.card-scroll` 上，两处一致。 */
+.fill-locked { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+.fill-locked > .card-fill { flex: 1 1 auto; min-height: 0; }
+.fill-locked > .flex-none { flex: 0 0 auto; }
+/* 锁框布局必须压过 1200px 断点的那组回退规则。
+ *
+ * 那组规则为仪表盘面板写的是「`.card-fill` 改 display:block、`.card-scroll` 只
+ * 横向滚」，前提是「视图整体滚动」。资产页恰恰相反：外框不动、只有列表滚。两条
+ * 意图撞在一起时，实测结果是**用户滚不动**——1100 / 899 / 600 / 420 四个宽度下
+ * 卡片内容 3629px 被 `overflow:hidden` 裁到 617px，而卡片自己成了滚动盒
+ * （`cardSH 3629 > cardCH 617`），`.card-scroll` 因为 `overflow-y:visible` 完全不
+ * 滚动。表头也一起掉到 -604px。所以这里用两个类以上的特指度（0,3,0 / 0,2,0）
+ * 把它钉回来，而不是靠声明顺序赌。 */
+.fill-locked > .card.card-fill { display: flex; overflow: hidden; }
+.fill-locked .card-scroll { overflow: auto; }
 .row-fill { flex: 1 1 auto; min-height: 0; }
-/* 纵向堆叠变体：一行一个面板。每个面板仍然平分剩余高度，两块合起来就填满
-   容器 —— 否则单个 `.col` 子元素会按自身内容定高，在下面留下死空间。
-   `flex: 1 1 0`（而不是 `auto`）才是让各份等分的关键：用 `auto` 时，
-   较高的那张表的内容会决定怎么分。 */
+/* 首页两块面板的高度分配。
+ *
+ * 以前两者严格等分剩余高度（`flex: 1 1 0`），于是两块都只剩约 216px 的表体 ——
+ * 而「按 Agent 统计」只有 7 行，被一个跟内容无关的上限切掉，还要在卡片里再滚一次
+ * （两层滚动条）；「最近改动」有 8 行，也一起被压。
+ *
+ * 现在按内容的真实需要分配：
+ *   - 按 Agent 统计：**不设上限**，有多少行画多少行（`flex: 0 0 auto`）。它是
+ *     这台机器的总账，行数就是信息本身，把它裁掉等于让读者以为只有 7 个 agent。
+ *   - 最近改动：给一个明确的大上限（`min(52vh, 620px)`），超出才在卡片内滚动。
+ *     它是有意截断的「最近 8 条」，需要的是可读的行高而不是无限高。
+ * 两块加起来超过视口时，整个视图滚动（这是缩小窗口后本来就该发生的事）。
+ */
 .row-fill.col { display: flex; flex-direction: column; gap: 14px; }
-.row-fill.col > .flex-1-min { flex: 1 1 0; min-height: 0; display: flex; }
+.row-fill.col > .flex-1-min { flex: 0 0 auto; min-height: 0; display: flex; }
+/* 按 Agent 统计：随内容长高，不滚。
+ *
+ * 只放开**纵向**。写成 `overflow: visible` 会连带取消横向滚动盒 —— 这张表有
+ * `min-width: 792px`，在 899 / 600 / 420 下比卡片宽，`visible` 让它直接溢出到
+ * 卡片外（实测三个宽度的 thead 与数字列都越界）。`overflow-y: visible` 配
+ * `overflow-x: auto` 在 CSS 里是非法的组合（一个为 visible、另一个不是时，
+ * visible 会被算成 auto），所以纵向也写成 `auto` 并靠 `max-height: none` 保证
+ * 不出现纵向滚动条：内容有多高盒子就多高，`auto` 只会横向接管。
+ */
+.row-fill.col > .panel-agents { flex: 0 0 auto; }
+.row-fill.col > .panel-agents .card-scroll { max-height: none; overflow: auto; }
+/* 最近改动：大上限，超出才滚。 */
+.row-fill.col > .panel-recent { flex: 0 0 auto; }
+.row-fill.col > .panel-recent .card-scroll { max-height: min(52vh, 620px); overflow: auto; }
 .card-fill { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 /* `.card { overflow-x:auto }` 在本样式表更靠后的位置（防裁切章节）声明，
    且特指度相同，所以覆盖它需要两个类。 */
@@ -562,14 +701,37 @@ button, input, select, textarea { font: inherit; color: inherit; }
 /* 标签列里的长路径或不断开的长 token 要折行，而不是把整行撑宽；CJK 本来
    就能在任意位置断行，所以那里保持正常规则。 */
 .set-label label { overflow-wrap: anywhere; }
+/* 说明文字：占满标签列，但**给右侧控件留一条固定的呼吸位**。
+ *
+ * 以前是 `max-width: 62ch`。62ch 在 1440px 的设置页里远小于标签列的实际宽度，
+ * 于是出现用户看到的那种情形：右边还有 300px 空着，文字却在半途折行 —— 而
+ * 「本机统计」那一条的说明连着折成两行，旁边的开关和读数却孤零零地贴在顶部。
+ * 62ch 本来是给「超宽屏别让一行太长」用的，正确做法是限制整块内容宽度（版心），
+ * 不是限制这一个段落。
+ *
+ * 同时给标签列一个右侧内边距：说明文字再宽也不该顶到开关上（这是「右侧有按钮 /
+ * 文本 / 图标时保持一点间距」的落点）。 */
 .set-hint {
   font-size: var(--fs-micro); color: var(--text-3); font-weight: 400; margin-top: 4px;
-  line-height: 1.5; max-width: 62ch;
+  line-height: 1.5;
 }
+.set-label { padding-right: 24px; }
 .set-control {
   flex: 0 1 auto; min-width: 0; margin-left: auto;
   display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end;
+  /* 同一行里「控件 + 只读读数」两件东西之间要有缝。以前是 0 —— 于是本机统计那
+     一行的「54 次扫描…」直接贴着开关的右边缘，看起来像开关的一部分。 */
+  gap: 10px;
+  /* 右侧留白：读数不该顶到卡片右缘。设置页的内容区是「标签列 + 控件列」两栏，
+     控件列贴边时，最后那行文字与卡片边框之间只剩 16px 内边距，视觉上像是被裁
+     掉了半个字。留出 4px，与 `.card-head .sub.spacer` 的处理保持一致。 */
+  padding-right: 4px;
 }
+/* 本机统计的读数是这一行最右侧的**文字**（旁边没有按钮收尾），它需要比开关这类
+   实心控件更多的右边距 —— 实心块的边缘自身就带着视觉重量，纯文字没有。
+   8px 是「与卡片内边距同量级但不夸张」的取值，实测在 1440 下与右卡片边框之间
+   留出 24px。 */
+.set-control > .stats-value-right { margin-right: 8px; }
 .items { align-items: center; }
 
 .switch {
@@ -681,6 +843,15 @@ table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(9)
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(9)) th:nth-child(8):not([class*="col-"]) { width: 112px; }
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(9)) th:nth-child(9):not([class*="col-"]) { width: 104px; }
 table.tbl:not(:has([class*="col-"])):has(thead > tr > th:last-child:nth-child(9)) th:nth-child(n+3):nth-child(-n+7):not([class*="col-"]) { width: 72px; }
+/* 项目表（9 列）的表头一律不换行。
+ *
+ * 五个 kind 计数列各 72px，内边距 12+12 之后内容只有 48px —— 而中文表头
+ * 「MCP 服务」需要 77px。于是它被折成「MCP 服」/「务」两行（那一列比
+ * 别的列高出一行）。这四个字是这个列的唯一标识，折行只会让它更难读；把列宽
+ * 让给表头、把数值列的内容居中即可，表格本来就在滚动盒里。
+ */
+table.tbl.proj-tbl th { white-space: nowrap; }
+table.tbl.proj-tbl th.col-num, table.tbl.proj-tbl td.col-num { width: 84px; padding-inline: 8px; }
 
 table.tbl th {
   text-align: left; font-size: var(--fs-micro); text-transform: uppercase; letter-spacing: .07em;
@@ -698,6 +869,32 @@ table.tbl td { padding: 9px 12px; border-bottom: 1px solid var(--table-border); 
    `.col-name` 是唯一一列弹性列：它拿走固定列留下的每一个像素，其内容用
    省略号收尾，而不是把行撑宽。 */
 table.tbl th.col-check, table.tbl td.col-check { width: 44px; }
+/* 复选框：浏览器默认是 13×13（Chromium 实测），低于 WCAG 2.2 AA 的 24×24
+   （Target Size Minimum，2.5.8）。这一页有 51 个勾选框（全选 + 50 行），逐个
+   点中 13px 的方块在触摸板与触摸屏上都是失误来源。
+ *
+ * `padding` 对原生 checkbox **不起作用**（它由 UA 的 appearance 定尺，实测加了
+ * 4px 内边距后仍是 13×13）。能真正扩大命中区的只有两条路：改 appearance 自绘
+ * （会丢掉原生对勾与高对比度模式下的系统样式），或者给一个真正可点的盒子。
+ * 这里选后者：把勾选框放大到 16px，再让**单元格本身**承担命中区 —— `label`
+ * 包住它，`label` 的高度就是单元格高度（44px 宽 × 行高），点格子任意处都能
+ * 切换。自绘这条路留给真正需要它的场合，不为了达标牺牲系统样式。 */
+input[type="checkbox"] {
+  width: 16px; height: 16px; margin: 0;
+  accent-color: var(--accent);
+}
+/* 表格里的勾选框：整格可点。单元格内边距收到最小，由 `label` 自己撑开命中区，
+   视觉上勾选框仍落在与原设计同一位置的 16px 方框里。
+ *
+ * 表头那颗（全选）单独给高度：`th` 的上下内边距是 8px、内容高只有 15px，于是
+ * 表头的 label 实测 15px 高 —— 比表体的 24px 矮，达不到 2.5.8。两者取同一
+ * 下限，命中区一致。
+ */
+table.tbl td.col-check, table.tbl th.col-check { padding-left: 8px; padding-right: 4px; }
+table.tbl label.tick {
+  display: flex; align-items: center; justify-content: center;
+  min-width: 24px; min-height: 24px; cursor: pointer;
+}
 table.tbl th.col-kind, table.tbl td.col-kind { width: 92px; }
 table.tbl th.col-name, table.tbl td.col-name { width: auto; min-width: 0; }
 table.tbl th.col-agent, table.tbl td.col-agent { width: 152px; }
@@ -727,7 +924,29 @@ table.tbl.tbl-agents { min-width: 460px; }
    `col-agent { width:auto }` 仍然让更窄的卡片（≤1200px，此时两块面板改为
    堆叠）把余量还回去。 */
 table.tbl.tbl-agents th.col-agent, table.tbl.tbl-agents td.col-agent { width: 260px; }
-table.tbl.tbl-agents th.col-num, table.tbl.tbl-agents td.col-num { width: 56px; }
+/* 数字列 56px 装不下自己表头的文字：中文「MCP 服务」实测 77px、英文
+   「MCP servers」103px，而单元格里只有 56px（内边距各 12px → 内容 32px）。
+   于是表头被硬切成「MCP 服…」——`text-overflow` 在 `th` 上没有声明，那是**不带
+   省略号的裁切**，读者看不出少了字。两处一起改：宽度按最长的中文表头给足
+   （76px，内边距收到 8px → 内容 60px），英文表头允许折成两行而不是被切掉
+   （`nowrap` 在 `th` 上意味着永远切）。数值单元格仍然 nowrap：一个折行的
+   「373 MB」比截断更难读。 */
+table.tbl.tbl-agents th.col-num { white-space: normal; line-height: 1.25; }
+table.tbl.tbl-agents th.col-num, table.tbl.tbl-agents td.col-num { width: 76px; padding-inline: 8px; }
+/* 首页「按 Agent 统计」：表格左右各留一点内边距。
+ *
+ * 这张表没有首列勾选框，第一格就是 agent 名 —— 于是名字紧贴卡片边框，与上面
+ * 卡片头里的标题不在一条竖轴上（实测首列文字左缘 271px，标题文字 287px）。
+ * 资产表有 44px 的勾选列天然留白，这张表没有，得自己补。
+ *
+ * 加在首/末单元格上，不加在 `<table>` 上：表格盒的 `padding-inline` 与首格
+ * 自己的 `padding-left` 会叠加，首列反而更靠里（两者相加后实测差 16px）；而
+ * `table-layout: fixed` 下单元格内边距本来就被算进列宽，不会把表格撑宽。
+ */
+table.tbl.tbl-agents thead th:first-child,
+table.tbl.tbl-agents tbody td:first-child { padding-left: 16px; }
+table.tbl.tbl-agents thead th:last-child,
+table.tbl.tbl-agents tbody td:last-child { padding-right: 16px; }
 table.tbl.tbl-recent { min-width: 440px; }
 table.tbl.tbl-recent th.col-kind, table.tbl.tbl-recent td.col-kind { width: 76px; }
 table.tbl.tbl-recent th.col-agent, table.tbl.tbl-recent td.col-agent { width: 100px; }
@@ -740,6 +959,21 @@ table.tbl th.col-scope, table.tbl td.col-scope { white-space: nowrap; }
 table.tbl th.col-agent, table.tbl td.col-agent,
 table.tbl th.col-owner, table.tbl td.col-owner,
 table.tbl th.col-name, table.tbl td.col-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 资产表的宽度下限：44 + 92 + 148 + 84 + 84 + 112 + 104 = 668 的固定列，再加
+   方案里 152px 的弹性名称列。低于 820px 就在 `.card-scroll` 里横滚（那是设计
+   内的横向滚动，不是破版），而不是把名字列压成零宽。 */
+table.tbl.tbl-assets { min-width: 820px; }
+/* 行末「⋯」：安静地待在最后一列，悬停/聚焦行时才升到前景。
+ *
+ * 这里**不能**用 `opacity` 压低它。它不是装饰，是一个有文字的控件（字形「⋯」），
+ * 所以适用正文的 4.5:1 —— 而半透明会把实际显示色压到 2.18:1（浅色主题，白底）/
+ * 2.89:1（深色主题，深色表面）；只量 computed color 与背景是看不出这一点的，
+ * 因为透明度不在那两项里。这里用本来就属于「三级文字」这一档的 `--text-3`
+ * （5.01 / 6.42）并撤掉透明度；安静靠颜色分档表达，不靠让它读不出来。 */
+table.tbl td.col-act { text-align: right; }
+.row-more { color: var(--text-3); }
+table.tbl tbody tr:hover .row-more,
+.row-more:focus-visible { color: var(--text); }
 table.tbl tbody tr { cursor: pointer; }
 table.tbl tbody tr:hover { background: var(--row-hover); }
 /* 只读清单表：行只承载信息，所以不用手型光标撒谎。 */
@@ -836,10 +1070,38 @@ table.tbl .t-mono { display: block; overflow: hidden; text-overflow: ellipsis; w
 .tl-item.ok::before { background: var(--green); }
 .tl-item.failed::before { background: var(--red); }
 .tl-item.rolled-back::before { background: var(--amber); }
-.tl-head { display: flex; align-items: center; gap: 8px; }
-.tl-title { font-weight: 550; font-size: var(--fs-small); }
-.tl-time { margin-left: auto; font-size: var(--fs-micro); color: var(--text-3); font-variant-numeric: tabular-nums; }
-.tl-meta { font-size: var(--fs-micro); color: var(--text-3); font-family: var(--mono); margin-top: 2px; word-break: break-all; }
+.tl-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.tl-title { font-weight: 550; font-size: var(--fs-small); min-width: 0; }
+/* 时间戳固定在右侧，且**不与正文争同一行宽**：`margin-left:auto` + `flex:none`
+   让它永远占住自己那份宽度，正文只能用到它左边为止。
+   以前 `.tl-time` 没有 `flex: none`，而 `.tl-meta`（下面那条长路径）是块级、
+   宽度 100%，于是路径的**第二行**会铺到时间戳的正下方，视觉上像是压在时间上
+   —— 一行 100 多字符的 sandbox 路径会折成两行，第二行
+   直接穿过了右上角的时间。 */
+.tl-time {
+  margin-left: auto; flex: none;
+  font-size: var(--fs-micro); color: var(--text-3); font-variant-numeric: tabular-nums;
+  white-space: nowrap; align-self: flex-start; padding-top: 1px;
+}
+/* 明细行：右侧给时间戳让位，并把超长路径限制在 2 行内（完整值在 title 里）。
+ *
+ * 两个坑都实测过：
+ *  1. `display: -webkit-box` 在这个文件里被更靠后的一条规则覆盖成了 `flow-root`
+ *     （那是 `.tl-meta` 以前为了 `word-break` 加的），于是 `-webkit-line-clamp`
+ *     完全不生效 —— 一条 sandbox 绝对路径会折成三行以上，把相邻记录挤下去。
+ *     这里显式声明 `display: -webkit-box` 并把 `-webkit-box-orient` 放在同一
+ *     条规则里，不依赖别处的值。
+ *  2. `padding-right` 只在内容真的撞到右边时才看得出效果；`-webkit-box` 下它不
+ *     影响行盒宽度，所以改用 `width: calc(100% - 92px)` —— 92px 是时间戳
+ *     「10/22 14:45:37」的实测宽度（约 80px）加一点间距。
+ */
+.tl-meta {
+  font-size: var(--fs-micro); color: var(--text-3); font-family: var(--mono);
+  margin-top: 2px; word-break: break-all;
+  width: calc(100% - 92px);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden;
+}
 
 /* ---------------- 抽屉 ---------------- */
 .drawer-scrim {
@@ -879,7 +1141,18 @@ table.tbl .t-mono { display: block; overflow: hidden; text-overflow: ellipsis; w
 }
 
 textarea.editor {
-  width: 100%; min-height: 300px; resize: vertical; font-family: var(--mono);
+  /* 高度随抽屉/对话框的可用空间伸缩，而不是固定 300px。
+   *
+   * 侧边抽屉在 1440×900 下有 847px 的可用高度，而编辑器只占 300px —— 于是
+   * 「内容」那块在屏幕下半截留下 500 多像素的空白，同时正文要在一个矮框里滚。
+   * 这是资产详情页最主要的工作区（读、改、预览），把空间让给它。
+   *
+   * `min-height` 保留 300px 作下限（窄窗口或字段多时不会塌成一条），`height`
+   * 取视口的一部分：抽屉正文区 847px 里，编辑器拿到约 46vh，剩下的留给路径、
+   * 动作条与提示。`resize: vertical` 仍然开着，用户可以再拉高。 */
+  width: 100%;
+  min-height: 300px; height: 46vh; max-height: 620px;
+  resize: vertical; font-family: var(--mono);
   font-size: var(--fs-small); line-height: 1.55; padding: 11px 12px; border-radius: var(--radius-sm);
   border: 1px solid var(--border); background: var(--editor-bg); outline: none; color: var(--text);
 }
@@ -911,6 +1184,10 @@ textarea.editor:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(-
 .alert {
   padding: 9px 12px; border-radius: var(--radius-sm); font-size: var(--fs-small);
   border: 1px solid; margin-bottom: 12px;
+  /* 提示条里最常见的内容是引擎原样抛出的 URL 与 TLS 细节 —— 一个没有断点的长
+     字符串。420px 视口实测：更新检查失败那条把卡片撑到 385px（容器 323px），整页
+     出现横向滚动条。`anywhere` 让它在任意位置断行，而不是把版面推宽。 */
+  overflow-wrap: anywhere;
 }
 .alert.err { background: var(--red-soft); border-color: var(--alert-err-border); color: var(--alert-err-text); }
 .alert.warn { background: var(--amber-soft); border-color: var(--alert-warn-border); color: var(--alert-warn-text); }
@@ -931,9 +1208,25 @@ textarea.editor:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(-
 .modal-scrim.on { display: flex; }
 .modal {
   background: var(--surface); border-radius: var(--r-md); box-shadow: var(--shadow-lg);
-  width: 620px; max-width: 100%; max-height: 86vh; display: flex; flex-direction: column;
+  /* 宽度按内容与视口伸缩，不再是写死的 620px。
+   *
+   * 620px 对「确认删除」这类两三行的对话框够用，但「新建技能」是个真正的表单：
+   * 名称/版本、描述、作者/许可、允许的工具、目标位置清单、SKILL.md 正文 —— 六组
+   * 字段挤在 620px 里，右侧「写入以下位置」那列复选框被压得只能靠内滚动看，
+   * 而屏幕明明有 1440px 宽。
+   *
+   * 880px 是**表单档**的上限。短表单（更新设置、安装确认）用 `.modal-narrow`
+   * 退回 620px —— 把一段三行的设置表单拉到 880px，标签与输入框之间会空出一大片，
+   * 比原来更难读。宽度取决于「这张表单有多少内容」，所以由 `openModal` 的调用方
+   * 声明，见 app.js 里 `opts.width` 的说明。
+   *
+   * 上限约 900px 是刻意的：再宽一行文字就太长，读起来会串行。
+   */
+  width: min(880px, 92vw); max-width: 100%; max-height: 86vh;
+  display: flex; flex-direction: column;
   border: 1px solid var(--border);
 }
+.modal.modal-narrow { width: min(620px, 92vw); }
 .modal-head {
   padding: 14px 18px; border-bottom: 1px solid var(--border); font-weight: 620;
   display: flex; align-items: center;
@@ -959,13 +1252,58 @@ textarea.editor:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(-
 .toast.ok { background: var(--toast-ok); }
 .toast.err { background: var(--toast-err); }
 .toast.warn { background: var(--toast-warn); }
+/* 状态图标：颜色之外的第二条信息通道（色觉障碍读者靠它分辨）。 */
+.toast-ico {
+  flex: none; width: 16px; height: 16px; border-radius: var(--r-pill);
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, .22); font-size: 10px; font-weight: 700; line-height: 1;
+}
+.toast-msg { min-width: 0; }
 @keyframes pop { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
 
 .empty { padding: 40px 20px; text-align: center; color: var(--text-3); font-size: var(--fs-small); }
+/* 项目表：撑满滚动盒，空态才落在面板中央。
+ *
+ * 表格的高度默认由内容决定（189px），而它所在的 `.card-scroll` 有 764px —— 于是
+ * 空态那块只占 139px、贴在最上面，剩下的 600 多像素一片空白。`height: 100%`
+ * 让表格至少与滚动盒等高；有数据时它仍然按行数长高（超过容器才滚动）。
+ * `tbody` 也要跟着撑开，否则 td 拿不到剩余高度、`.empty-fill` 的居中无从谈起。
+ */
+table.tbl.proj-tbl { height: 100%; }
+table.tbl.proj-tbl tbody tr:only-child { height: 100%; }
+
+/* 占满面板高度的空态：文案落在整块区域的中央。
+ *
+ * 用在「面板本身被拉伸到剩余高度、内容却是空的」场合（项目页）。不这样做时，
+ * 40px 的内边距把文案顶在面板最上面，下面几百像素全空着 —— 与「页面还在加载」
+ * 难以区分。
+ */
+.empty.empty-fill {
+  height: 100%; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  padding: 40px 20px;
+}
 
 /* 发现结果 */
 .grow { flex: 1; min-width: 0; }
-.disc-hint { margin-top: 8px; font-size: var(--fs-small); max-width: 68ch; }
+/* 发现页的说明文字。
+ *
+ * `max-width: 68ch` 是个「一行别太长」的通用限制，但它比这张卡片的内容宽度
+ * 还窄 —— 于是在 1440px 下会出现这种情形：右边还空着近 500px，句子却已经
+ * 折行，第二行只剩几个字。两行文字的右缘因此参差不齐（第一行顶到 68ch，第二
+ * 行短得多），看起来像排版事故。
+ *
+ * 这里改用 `text-wrap: pretty`（Chromium 117+ 支持，WebView2 满足）：它让浏览器
+ * 在折行时避免「末行孤儿词」，同时不再人为限制宽度 —— 卡片本身的内边距已经是
+ * 合理的行长了。再给一个宽松的兜底上限，避免超宽屏上真的拉成一行 200 字。
+ */
+.disc-hint {
+  margin-top: 8px; font-size: var(--fs-small);
+  max-width: none; text-wrap: pretty; line-height: 1.6;
+}
+@supports not (text-wrap: pretty) {
+  .disc-hint { max-width: 80ch; }
+}
 .disc-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px 8px; border-bottom: 1px solid var(--border); }
 .disc-row:last-child { border-bottom: 0; }
 .disc-main { flex: 1; min-width: 0; }
@@ -1008,8 +1346,16 @@ code.inline {
 /* ---- 工具类（放在这里而不是写成行内 style 属性，好让渲染进程继续保持严格的
    `style-src 'self'` CSP） ---- */
 .flex-1 { flex: 1; }
+/* 不参与伸缩的 flex 项。锁框布局里筛选条、批量条、分页条都用它 —— `flex:0 0 auto`
+   是「按内容定高、不抢表格的剩余高度」的唯一写法（`flex:none` 是同一个值的简写，
+   但显式写出三档更好读）。 */
+.flex-none { flex: 0 0 auto; }
 .flex-1-min { flex: 1; min-width: 0; }
 .mb-8 { margin-bottom: 8px; }
+/* 纵向卡片栈：卡片之间的间距由容器给，而不是每张卡自带 `margin-top`。
+   这样「第一张卡与视图顶部」和「卡与卡之间」是两件独立的事，也不会因为某张卡
+   在不同数据下缺席而留下一段双倍空隙。 */
+.stack-14 { display: flex; flex-direction: column; gap: 14px; }
 .mb-12 { margin-bottom: 12px; }
 .mb-14 { margin-bottom: 14px; }
 .mt-12 { margin-top: 12px; }
@@ -1024,6 +1370,10 @@ code.inline {
 .fs-26 { font-size: var(--fs-display); }
 .fw-400 { font-weight: 400; }
 .gap-8 { gap: 8px; }
+/* 卡片内条目之间的呼吸位。健康检查页的每条发现都是一小块独立信息（标题 + 两三条
+   明细 + 文件路径），8px 时相邻两条几乎连成一段；12px 能把它们分开，同时不让
+   一屏只剩两三条。 */
+.gap-12 { gap: 12px; }
 .col { flex-direction: column; }
 .wrap { white-space: pre-wrap; }
 .tinted { background: var(--accent-soft); }
@@ -1033,6 +1383,63 @@ code.inline {
   font-size: var(--fs-small); padding: 5px 8px; border-radius: var(--r-sm);
   border: 1px solid var(--border); background: var(--select-bg); color: var(--text);
 }
+/* ---- 筛选 / 分组控件 ----
+ *
+ * 以前这里是五个裸 `<select>` 挤在一行里：没有标签（只有 aria-label，视觉用户
+ * 看到的是「全部类型 / 全部 Agent / 两种作用域 / 精选+自管 / 默认排序」五段
+ * 并列的短语，分不清哪个是筛哪个是排），没有「当前生效条件」的汇总，也没有
+ * 清除入口 —— 而清空按钮只在一个很隐蔽的分支里（onlyShadowed）才出现。
+ *
+ * 现在每一维是一个「小标题 + 控件」的字段组：标题说明这一维在过滤什么，
+ * 控件本体保持原生 `<select>`（键盘、输入法、读屏全部沿用系统实现，不自绘）。
+ * 条件是「与」关系，所以把它们并排放在一行、每维之间用分隔线断开。
+ */
+.filter-bar { display: flex; align-items: flex-end; gap: 10px 14px; flex-wrap: wrap; }
+.filter-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.filter-field > label {
+  font-size: var(--fs-micro); color: var(--text-3); font-weight: 600;
+  letter-spacing: .04em; text-transform: uppercase; white-space: nowrap;
+}
+.filter-field > label .filter-count {
+  font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.filter-field select { min-width: 132px; }
+/* 分隔线：只在两维之间画，第一个前面不画。它替代了原来那种「五段短语挤在
+   一起、靠间距猜边界」的读法。 */
+.filter-sep { align-self: flex-end; width: 1px; height: 26px; background: var(--border); flex: none; }
+/* 右侧动作区：计数 + 导入包。`margin-left:auto` 把它推到行的末端。 */
+.filter-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+/* 已生效条件汇总条。
+ *
+ * 只在「有非默认条件」时出现。它同时回答三个问题：现在筛了什么（逐个说出来）、
+ * 有多少条命中（数字）、怎么回到全部（一键清除）。以前这三件事分散在页脚计数、
+ * 五个下拉的值、以及一个偶发的 chip 上。
+ */
+.filter-active {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 12px; border-top: 1px solid var(--border);
+  background: var(--surface-2);
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+.filter-active .lead { font-size: var(--fs-micro); color: var(--text-3); white-space: nowrap; }
+.filter-active .chip { cursor: default; }
+.filter-active .chip button {
+  all: unset; cursor: pointer; margin-left: 2px; color: inherit;
+  width: 14px; height: 14px; display: inline-flex; align-items: center;
+  justify-content: center; border-radius: var(--r-xs); font-size: 10px;
+}
+.filter-active .chip button:hover { background: rgba(0, 0, 0, .08); }
+[data-theme="dark"] .filter-active .chip button:hover { background: rgba(255, 255, 255, .14); }
+.filter-active .spacer { margin-left: auto; }
+/* 空态内嵌的紧凑版：不要底色与上下边框（它已经在 `.empty` 里，再叠一层会像
+   第二张卡片），只保留条目与清除按钮。 */
+.filter-active.inline {
+  background: transparent; border-top: 0; border-radius: 0;
+  padding: 10px 0 0; justify-content: center;
+}
+.filter-active.inline .spacer { display: none; }
 .log-box {
   font-size: var(--fs-micro); background: var(--log-bg); border: 1px solid var(--border);
   border-radius: var(--r-sm); padding: 10px; max-height: 280px; overflow: auto;
@@ -1041,9 +1448,22 @@ code.inline {
   font-family: var(--mono); font-size: var(--fs-micro); line-height: 1.6;
   border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden;
 }
-.diff-scroll { max-height: 52vh; overflow: auto; }
+/* 预览改动的滚动盒。
+ *
+ * `max-height: 52vh` 只在内容超长时才起作用，短 diff（三五行的 memory 文件）
+ * 会让盒子缩到 100px 出头 —— 而它旁边就是「应用并保存」按钮，一小块预览很难
+ * 判断「我到底改了什么」。给一个下限：`min-height: 240px`，短 diff 也有一块
+ * 像样的预览区，长 diff 仍然按 52vh 滚。
+ *
+ * 用 `min()` 保证小窗口下不把对话框撑出屏幕：240px 与 40vh 取小者。
+ */
+.diff-scroll { min-height: min(240px, 40vh); max-height: 52vh; overflow: auto; }
 .picker-box {
-  max-height: 260px; overflow: auto; border: 1px solid var(--border);
+  /* 260px 只放得下 6 行目标，而一台机器上装了 17 个 agent、每个又有 global 与
+     project 两种位置 —— 新建技能时必须在这个小框里滚着找目标，而下面 SKILL.md
+     正文被挤到视口之外，得先滚外层再滚内层。改成按视口给高度：常见窗口下能一次
+     看到十几个目标，正文也留在同一屏内。 */
+  max-height: min(38vh, 340px); overflow: auto; border: 1px solid var(--border);
   border-radius: var(--r-sm); padding: 8px;
 }
 /* 计数行，“2 次扫描 · 0 次应用 · …”。
@@ -1085,10 +1505,29 @@ code.inline {
 .ctxmenu button.danger { color: var(--red); }
 .ctxmenu hr { border: 0; border-top: 1px solid var(--border); margin: 4px 6px; }
 
-/* ---- 分页器 ---- */
-.pager { display: flex; align-items: center; gap: 10px; justify-content: flex-end; padding: 10px 14px; }
+.empty-filters {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
+  gap: 8px; margin-top: 12px;
+}
+
+/* ---- 分页器 ----
+ *
+ * 它不是一个独立的卡片，而是表格卡片的**页脚**：与内容区域是同一块面板。
+ * 因此不要四角圆角（只保留底部两角）、不要上边框（用一条浅描边区分层级），
+ * 也不要外边距 —— 以前它是 `.card pager`，四角圆 + 上边框 + 与表格之间 14px
+ * 的间隙，读起来像「表格下面又贴了一张小卡片」。
+ */
+.pager {
+  display: flex; align-items: center; gap: 8px; justify-content: flex-end;
+  padding: 8px 12px;
+  border-top: 1px solid var(--table-border);
+  border-radius: 0 0 var(--radius) var(--radius);
+  background: var(--surface);
+}
 .pager .info { font-size: var(--fs-micro); color: var(--text-3); font-variant-numeric: tabular-nums; }
 .pager button { min-width: 30px; }
+/* 页码读数（「1 / 2」）与前后按钮组成一个整体控件，不要像三段散落的文字。 */
+.pager .page-num { font-size: var(--fs-small); color: var(--text-2); font-variant-numeric: tabular-nums; padding: 0 2px; }
 
 /* ---- 更新横幅 ---- */
 .update-banner {
@@ -1103,13 +1542,28 @@ code.inline {
 /* ---- 矩阵视图 ---- */
 table.matrix td.yes { color: var(--green); font-weight: 700; }
 table.matrix td.no { color: var(--text-3); }
+/* 矩阵表头：不旋转，也不裁切。
+ *
+ * 以前是 `rotate(-58deg)` + 固定 22px 宽 + 容器 `height:90px`，结果是
+ * 「DEEPSEEK HA…」「SHARED AGENT S…」被切掉 —— 而那正是读者要对照的 agent 名。
+ * 旋转表头只在「列多 + 名字短」时划算；这里 18 个 agent 名字长度差异很大，
+ * 旋转后每个都要省略号收尾，等于把「哪一列是谁」这个唯一信息弄丢了。
+ *
+ * 改成横排后还有第二层裁切要处理：表格的通用规则里有 `table.tbl th, td
+ * { overflow: hidden }` 与固定列宽，于是「WORKBUDDY」被切成「WORKBUDD / Y」、
+ * 「缺失数」被切成两行。表头要按**内容**定宽（`min-width` 跟随文字），并把
+ * `overflow` 放开 —— 它本来就不该滚，只是不该被裁。
+ */
 table.matrix th.rot {
-  height: 90px; vertical-align: bottom; white-space: nowrap; text-align: center;
+  height: auto; vertical-align: bottom; white-space: nowrap; text-align: left;
+  padding: 8px 10px;
 }
 table.matrix th.rot > div {
-  transform: rotate(-58deg); transform-origin: bottom left;
-  width: 22px; margin-left: auto; margin-bottom: 6px;
+  transform: none; transform-origin: initial;
+  width: auto; margin: 0; white-space: nowrap;
 }
+/* 最后一列（缺失数）：同样不折行。 */
+table.matrix th:last-child { white-space: nowrap; }
 /* ---------- 交互打磨 ----------
    每个可点击元素都有一条短促的缓动过渡；悬停抬起；按下下沉；
    键盘焦点有可见的焦点环。所有颜色都走变量 —— 对主题安全。 */
@@ -1294,7 +1748,13 @@ table.tbl.static tbody tr:last-child td { border-bottom: 0; }
 .upd-log-date { font-size: var(--fs-micro); color: var(--text-3); white-space: nowrap; }
 .upd-log-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .upd-log-notes {
-  white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: auto;
+  /* 200px 只装得下七八行，而一条发布说明动辄十几条（实测某版有 9 条），
+     于是**每一条**都要在小框里滚 —— 滚动条一层套一层，读者分不清自己在滚发布
+     说明还是滚整页。改成「能放多少放多少，超过一屏才滚」：上限取视口的一半，
+     既保留「不会因为某一条特别长把后面全挤下去」的保护，又让常见长度的说明
+     完整显示。 */
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 50vh; overflow: auto;
   background: var(--code-bg); border: 1px solid var(--border);
   border-radius: var(--radius-sm); padding: 10px 12px;
   font-family: var(--mono); font-size: var(--fs-micro); line-height: 1.6;
@@ -1377,6 +1837,17 @@ details > summary { cursor: pointer; user-select: none; }
   .nav-item { padding: 8px 0; }
   .nav-group { text-indent: -999px; overflow: hidden; padding: 10px 0 4px; }
   .nav { padding: 6px; }
+  /* 图标轨道下的状态条：56px 宽放不下「扫描于 3 分钟前 · 2 项待处理」，剩下的
+     半个字（实测渲染成「扫…」）比不留更糟。与 `.app.collapsed` 同一处理——长文案
+     视觉隐藏但留在无障碍树里（它是 aria-live 的内容），圆点 + 短读数承担可见
+     状态。短读数是必需的：同一宽度下三枚导航徽标都是 `display:none`，「有 2 项
+     待处理」否则就只剩一个颜色。 */
+  .side-foot { justify-content: center; padding-inline: 0; }
+  .side-foot-text {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip-path: inset(50%); white-space: nowrap;
+  }
+  .side-foot-short { display: inline; }
 
   .grid-4, .grid-3, .grid-2 { grid-template-columns: 1fr; }
   .skl-stats { grid-template-columns: 1fr; }
