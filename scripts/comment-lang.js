@@ -32,9 +32,44 @@ const PATTERNS = [
   'tauri-shell/core/src/**/*.rs',
   '.github/workflows/*.yml',
 ];
-/** 注释行的起手式：`//`、`#`、`/*`、`*`、`///`。 */
+/** 注释行的起手式：`//`、`/*`、`*`、`///`、`//!`，以及 YAML 的 `#`。 */
 const HAS_CJK = /[\u4e00-\u9fff]/u;
 const HAS_WORD = /[A-Za-z]{3,}/;
+/**
+ * Rust 的 `#[test]` / `#[cfg(...)]` / `#![...]` 是属性，不是注释。
+ *
+ * 判据一开始只写了 `#`（为 YAML 注释），结果把集成测试里成片的 `#[test]` 全算成
+ * 「没翻译的英文注释」—— 四个测试文件虚报 127 行、全仓虚报 432 行。尺子本身不准，
+ * 覆盖率就没意义，所以这里先排除属性行。
+ */
+const RUST_ATTRIBUTE = /^#!?\[/;
+/**
+ * 块注释里以 `*` 开头、其实是代码续行的（`*slot = format!(…`、`*sink.lock()…`）。
+ * 这些是解引用表达式，被 `*` 前缀误当成注释行。
+ */
+const BLOCK_CODE_LINE = /^\*(?:\w+\s*[.=[]|self\b)/;
+/**
+ * 命令行示例（`*   node scripts/x.js --flag`、`set VAR=1`、`cargo tauri build`）。
+ * 注释里出现它们是让人照抄的，不是要翻译的句子。
+ */
+const COMMAND_EXAMPLE = /^[*#\/\s]*(?:node|npm|npx|cargo|rustup|set|export|powershell|\.\\|AK_[A-Z_]+=|tauri-shell\\|tauri-shell\/)\S*/i;
+/**
+ * 纯枚举/标识符行：`3. navigator.language`、`* common.*`、`// \`a\`\u3001\`b\`\u3002`。
+ * 这些行的内容就是标识符本身，翻译它们等于改代码里的名字，只能保持原样。
+ */
+const IDENTIFIER_ONLY = /^[*#\/\s]*(?:\d+\.\s*)?[`'\w.*<>|/\\-]+[\u3000-\u303f\u4e00-\u9fff]*$/u;
+
+function isCommentLine(s) {
+  if (!s.startsWith('#') && !s.startsWith('//') && !s.startsWith('/*') && !s.startsWith('*')) return false;
+  if (RUST_ATTRIBUTE.test(s)) return false;
+  if (BLOCK_CODE_LINE.test(s)) return false;
+  // shebang 与「命令行示例」不是散文：`#!/usr/bin/env node`、
+  // `*   node scripts/x.js --flag`、`*   set VAR=1` 都是要照抄的命令。
+  if (s.startsWith('#!')) return false;
+  if (COMMAND_EXAMPLE.test(s)) return false;
+  if (IDENTIFIER_ONLY.test(s)) return false;
+  return true;
+}
 
 function walk(dir, out = []) {
   // `dist/` 是 copy-frontend.js 从 src/renderer 复制过去的产物，数它会把同一批
@@ -75,7 +110,7 @@ for (const pattern of PATTERNS) {
     for (const line of lines) {
       const s = line.trim();
       if (!s) continue;
-      if (!(s.startsWith('//') || s.startsWith('#') || s.startsWith('/*') || s.startsWith('*') || s.startsWith('///'))) continue;
+      if (!isCommentLine(s)) continue;
       comments++;
       if (!HAS_CJK.test(s) && HAS_WORD.test(s)) englishOnly++;
     }

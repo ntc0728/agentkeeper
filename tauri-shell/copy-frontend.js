@@ -6,8 +6,8 @@
  * 前端只有 `src/renderer` 一个源头；`dist` 是派生产物，所以手改这里的东西永远留不住。
  * 全流程只有两处差异，都在这一个脚本里施加，因此不可能各自漂移：
  *
- *   1. <html data-shell="tauri">  — lets CSS/JS branch on the host shell
- *   2. <script src="tauri-bridge.js">  — the window.ak shim over invoke()
+ *   1. <html data-shell="tauri">  —— 让 CSS/JS 能按宿主外壳分支
+ *   2. <script src="tauri-bridge.js">  —— 铺在 invoke() 之上的 window.ak 垫片
  *
  * 每次构建外壳之前都要跑它。它是幂等的，并且会逐字节校验自己的产物，所以过期的
  * dist/ 不可能悄悄混进构建（那种故障看起来就像「我改的 UI 没生效」）。

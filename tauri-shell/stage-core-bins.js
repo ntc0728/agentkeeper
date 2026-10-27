@@ -15,14 +15,13 @@
  * 而外壳 crate 里没有 sidecar —— 它在 core crate 里，那个 crate 自己没有 Tauri
  * 构建脚本。所以外壳的构建可以要求一个由别的 crate 产出的文件，两边都不必互相等。
  *
- * Usage:
- *   node tauri-shell/stage-core-bins.js              # build + stage
- *   node tauri-shell/stage-core-bins.js --no-build   # stage existing artefacts
- *   AK_CARGO=<path>     explicit cargo (this repo keeps cargo off PATH; see
- *                       scripts/rust-env.ps1)
+ * 用法：
+ *   node tauri-shell/stage-core-bins.js              # 构建并暂存
+ *   node tauri-shell/stage-core-bins.js --no-build   # 只暂存已有产物
+ *   AK_CARGO=<路径>      显式指定 cargo（这个仓库故意不把 cargo 放进 PATH；
+ *                       见 scripts/rust-env.ps1）
  *
- * Exit 0 = every file the bundler will look for is in place, exit 1 = not, with
- * the reason.
+ * 退出 0 = 打包器要找的每个文件都已就位；退出 1 = 没就位，并给出原因。
  */
 
 const fs = require('fs');

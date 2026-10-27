@@ -21,7 +21,7 @@
  *   列表被编辑过。如果你新增一个 agent，记得同时把它加到 adapters.rs 的
  *   `AGENTS` 里；生成的测试会在你这么做之前一直失败，而这正是本意。
  *
- *   node scripts/gen-adapters-snapshots.js      (or: npm run tauri:adapters)
+ *   node scripts/gen-adapters-snapshots.js      （或：npm run tauri:adapters）
  */
 'use strict';
 const fs = require('fs');
@@ -116,7 +116,7 @@ mod tests {
     //!
     //! 这里的一切都是生成的：请在
     //!
-    //!     npm run tauri:adapters      (scripts/gen-adapters-snapshots.js)
+    //!     npm run tauri:adapters      （scripts/gen-adapters-snapshots.js）
     //!
     //! 之后、即每次改动 scripts/adapter-table.js 之后重跑。下面那两个 JSON
     //! 常量就是那个脚本的输出——把 os.homedir() 设成 FAKE_HOME 求值后的

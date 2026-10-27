@@ -1,17 +1,16 @@
-//! Agent adapter table — the declarative list of supported agents.
+//! Agent 适配器表——受支持 agent 的声明式清单。
 //!
-//! 17 agents, declaration order is fixed: workbuddy, claude-code,
-//! codex, cursor, opencode, gemini-cli, copilot, windsurf, cline, amp,
-//! continue, roo, goose, zed, warp, pi, dsh. The cross-agent shared directory
-//! (`~/.agents/skills`, [`SHARED_SKILLS_DIR`]) is *not* one of them: it has no
-//! agent of its own, and scan.rs surfaces it as a separate pseudo-agent
-//! (`shared`), so it is never counted in the 17.
+//! 共 17 个 agent，声明顺序固定：workbuddy、claude-code、
+//! codex、cursor、opencode、gemini-cli、copilot、windsurf、cline、amp、
+//! continue、roo、goose、zed、warp、pi、dsh。跨 agent 共享目录
+//! （`~/.agents/skills`，即 [`SHARED_SKILLS_DIR`]）*不*在其中：它本身并不属于
+//! 任何一个 agent，而 scan.rs 会把它当作独立的伪 agent（`shared`）暴露出来，
+//! 所以它从不计入这 17 个里。
 //!
-//! Every adapter is pure data. `installed` is always `existsDir(home)` — the
-//! the declaration also keeps a per-agent `detected` predicate that is
-//! never called, and they are *not* all the same check: workbuddy's would also
-//! require `~/.workbuddy/settings.json`. Do not reintroduce it without that
-//! distinction.
+//! 每个适配器都是纯数据。`installed` 恒等于 `existsDir(home)` ——
+//! 声明里还保留着每个 agent 各自的 `detected` 谓词，但它从未被调用，而且它们
+//! *并不*都是同一种检查：workbuddy 的那个还会额外要求
+//! `~/.workbuddy/settings.json`。没有这层区分，就不要把它重新引进来。
 
 pub struct Paths {
     pub skills: &'static [&'static str],
@@ -27,7 +26,7 @@ pub struct ProjectPaths {
     pub rules: &'static [&'static str],
     pub memory: &'static [&'static str],
     pub mcp: &'static [&'static str],
-    /// `None` == the reference adapter declares no `projects.plugins`.
+    /// `None` == 参考侧的适配器没有声明 `projects.plugins`。
     pub plugins: Option<&'static [&'static str]>,
 }
 
@@ -438,29 +437,27 @@ pub static AGENTS: &[Agent] = &[
     },
 ];
 
-/// Cross-agent shared Agent Skills standard directory.
+/// 跨 agent 共享的 Agent Skills 标准目录。
 pub const SHARED_SKILLS_DIR: &str = "~/.agents/skills";
 
-/// `~` (and, as a superset, `env:NAME`) token resolution, mirroring
-/// 与 `resolve_home()` 的口径一致。
+/// `~` 记号解析（并且作为超集，也解析 `env:NAME`），与 `resolve_home()`
+/// 的口径保持一致。
 ///
-/// The reference is `token.replace(/^~(?=$|[\\/])/, os.homedir())` — only the tilde
-/// is substituted and the remainder is left byte-for-byte intact, so the
-/// result is `C:\Users\me/.workbuddy` with a forward slash. That mixed form
-/// is what `agents[].home` and every asset's `root` contain, so it has to be
-/// reproduced exactly; `norm_str` cleans it up for path-derived fields.
+/// 参考实现是 `token.replace(/^~(?=$|[\\/])/, os.homedir())` —— 只替换波浪号，
+/// 其余部分逐字节原样保留，所以结果是带正斜杠的 `C:\Users\me/.workbuddy`。
+/// `agents[].home` 和每个资产的 `root` 里装的就是这种混合形态，因此必须精确
+/// 复现；`norm_str` 会在由路径派生的字段里把它清理干净。
 pub fn resolve_home(token: &str, user_home: &str) -> Option<String> {
     if token.is_empty() {
         return None;
     }
-    // `env:NAME` expansion is implemented but unreachable today: no adapter
-    // declares a `home` that starts with `env:`. `envOverrides`
-    // (PI_CODING_AGENT_DIR / DSH_HOME on `pi` and `dsh`) is declared but never
-    // read, so leaving it unwired has no observable effect. Wiring it up means
-    // adding `env_home: Option<&'static str>` to `Agent`, preferring
-    // `std::env::var(env_home)` over `resolve_home(agent.home, ..)` in
-    // `scan_all` (scan.rs) / `home_of` (keeper.rs), and regenerating the
-    // snapshots (`npm run tauri:adapters`) — they assert plain `~` expansion.
+    // `env:NAME` 展开已经实现，但今天走不到：没有任何适配器声明的 `home` 是以
+    // `env:` 开头的。`envOverrides`（`pi` 和 `dsh` 上的 PI_CODING_AGENT_DIR /
+    // DSH_HOME）虽然声明了，但从未被读取，所以不把它接上线并没有任何可观察的
+    // 影响。要接上线，就得给 `Agent` 加上 `env_home: Option<&'static str>`，
+    // 在 `scan_all`（scan.rs）/ `home_of`（keeper.rs）里让
+    // `std::env::var(env_home)` 优先于 `resolve_home(agent.home, ..)`，并且重新
+    // 生成快照（`npm run tauri:adapters`）——这些快照断言的是纯粹的 `~` 展开。
     if let Some(rest) = token.strip_prefix("env:") {
         return std::env::var(rest).ok();
     }
@@ -477,21 +474,20 @@ pub fn resolve_home(token: &str, user_home: &str) -> Option<String> {
     Some(token.to_string())
 }
 
-/// `byId(agentId)` — `undefined` for an unknown id, never a panic.
+/// `byId(agentId)` —— 未知 id 返回 `undefined`，绝不 panic。
 ///
-/// The write path resolves an agent before every mutation; an id that does not
-/// exist must surface as `cannot resolve … for <id>` rather than writing to a
-/// guessed path.
+/// 写入路径在每次变更之前都要先解析出 agent；一个不存在的 id 必须以
+/// `cannot resolve … for <id>` 的形式暴露出来，而不是写到一个靠猜的路径上。
 pub fn by_id(id: &str) -> Option<&'static Agent> {
     AGENTS.iter().find(|a| a.id == id)
 }
 
 /// `agent.family` — 每个适配器声明的分组标签。
 ///
-/// Exactly one behaviour depends on it: `Keeper.mcpBucketFor()` writes copilot's
-/// servers under `servers` and everyone else's under `mcpServers`. Keeping it a
-/// lookup here rather than a field on all 17 literals means the table stays a
-/// pure description of paths; add a real field the day a second consumer exists.
+/// 恰好只有一处行为依赖它：`Keeper.mcpBucketFor()` 把 copilot 的 server 写到
+/// `servers` 下，其余所有 agent 则写到 `mcpServers` 下。让它在这里做成查表、
+/// 而不是在 17 个字面量上都加一个字段，是为了让这张表保持为对路径的纯描述；
+/// 等到出现第二个消费者那一天，再加真正的字段。
 pub fn family(id: &str) -> &'static str {
     match id {
         "workbuddy" => "workbuddy",
@@ -515,17 +511,16 @@ pub fn family(id: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    //! Snapshot tests against the declared adapter table.
+    //! 针对声明的适配器表做快照测试。
     //!
-    //! Everything here is generated: run
+    //! 这里的一切都是生成的：跑
     //!
     //!     npm run tauri:adapters      (scripts/gen-adapters-snapshots.js)
     //!
-    //! after any change to scripts/adapter-table.js. The two JSON constants below
-    //! are that script's output — the adapter table evaluated with os.homedir()
-    //! set to FAKE_HOME, plus every path template resolved against it. Never
-    //! edit them by hand: a hand-edited snapshot asserts whatever the editor
-    //! believed, not what the table says.
+    //! 只要改过 scripts/adapter-table.js 就要重新生成。下面那两个 JSON 常量
+    //! 就是该脚本的输出——用 os.homedir() 设为 FAKE_HOME 之后求值得到的适配器
+    //! 表，外加针对它解析出来的每一条路径模板。绝不要手工编辑它们：手改过的
+    //! 快照断言的是编辑者当时相信的东​西，而不是这张表实际说了什么。
     use super::*;
     use crate::model::join_native;
     use serde_json::Value;

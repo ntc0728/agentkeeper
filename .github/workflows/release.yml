@@ -83,10 +83,9 @@ jobs:
           cat > "$RUNNER_TEMP/stamp-version.js" <<'NODE'
           const fs = require('fs');
           const confPath = 'tauri-shell/src-tauri/tauri.conf.json';
-          // Both workspace members carry the version: the shell reports it in
-          // the UI, and the core reports it in the MCP server's serverInfo.
-          // A release where they disagree is a release where the agent and the
-          // GUI report different versions of the same program.
+          // 工作区的两个成员都要带上版本号：外壳在界面里报它，内核在 MCP 服务的
+          // serverInfo 里报它。两者不一致，就意味着同一个程序的 Agent 侧与图形界面
+          // 报出了两个不同的版本。
           const cargoPaths = [
             'tauri-shell/src-tauri/Cargo.toml',
             'tauri-shell/core/Cargo.toml',
@@ -97,8 +96,8 @@ jobs:
           const m = /^v(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/.exec(ref);
           if (!m) {
             console.log(`ref ${JSON.stringify(ref)} is not a vX.Y.Z tag — keeping ${current}`);
-            // main pushes have no version in the ref; the tree version feeds
-            // the synthetic release tag `v<version>-ci.<run_number>`.
+            // 推 main 的 ref 里没有版本号；用代码树里的版本去拼那个合成的发布 tag
+            // `v<version>-ci.<run_number>`。
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${current}\n`);
             process.exit(0);
           }
@@ -111,7 +110,7 @@ jobs:
           conf.version = version;
           fs.writeFileSync(confPath, JSON.stringify(conf, null, 2) + '\n');
           for (const cargoPath of cargoPaths) {
-            // First `version = "…"` in Cargo.toml is `[package] version`.
+            // Cargo.toml 里第一个 `version = "..."` 就是 `[package] version`。
             const cargo = fs.readFileSync(cargoPath, 'utf8');
             const patched = cargo.replace(/^(version = )"[^"]*"/m, `$1"${version}"`);
             if (patched === cargo) {

@@ -1,15 +1,15 @@
-//! Write-path validators.
+//! 写入路径上的校验器。
 //!
-//! Every write goes through here first; issues are returned rather than thrown
-//! so the UI can block the write instead of producing a file the agent will
-//! silently ignore (or crash on).
+//! 每一次写入都先经过这里；问题是以返回值的形式给出的，而不是抛异常——
+//! 这样 UI 就能拦住这次写入，不至于产出一个会被 agent 悄悄忽略（或者
+//! 直接崩在上面）的文件。
 //!
-//! Parity notes:
-//! * issue objects are built with keys in `level`, `field`, `message` order,
-//!   because the renderer renders them positionally in one place;
-//! * issue *order* is part of the contract — the UI lists them as returned;
-//! * string lengths the reference side compares with `.length` are UTF-16 code units,
-//!   not bytes and not chars.
+//! 与参考实现对齐的注意事项：
+//! * 问题对象在构造时键的顺序固定为 `level`、`field`、`message`，
+//!   因为渲染层有一处是按位置来渲染它们的；
+//! * 问题的*顺序*也是契约的一部分——UI 是照着返回顺序逐条列出的；
+//! * 参考侧用 `.length` 比较的字符串长度是 UTF-16 码元数，
+//!   既不是字节数，也不是字符数。
 
 use regex::Regex;
 use serde_json::{json, Value};
@@ -23,7 +23,7 @@ const RESERVED_SKILL_NAMES: [&str; 9] = [
     ".", "..", "con", "prn", "aux", "nul", "com1", "com2", "lpt1",
 ];
 
-/// `RULES.mcpServerName`'s allow-list of extra config keys.
+/// `RULES.mcpServerName` 允许的额外配置键白名单。
 const KNOWN_MCP_KEYS: [&str; 10] = [
     "command",
     "args",
@@ -47,16 +47,16 @@ fn mcp_name_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$").expect("mcp name regex"))
 }
 
-/// `/^\d+(\.\d+)*/` — deliberately NOT anchored at the end, so `1.0.0-beta`
-/// passes. `\d` is written as `[0-9]` because JS `\d` is ASCII-only while the
-/// Rust `regex` crate's `\d` is Unicode-aware by default.
+/// `/^\d+(\.\d+)*/` —— 故意不在末尾加锚点，好让 `1.0.0-beta` 也能通过。
+/// `\d` 这里写成 `[0-9]`，是因为 JS 的 `\d` 只认 ASCII，而 Rust `regex`
+/// crate 的 `\d` 默认是 Unicode 语义的。
 fn version_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^[0-9]+(\.[0-9]+)*").expect("version regex"))
 }
 
-/// `/^https?:\/\//i`. `-u` keeps the case folding ASCII-only like a non-`u`
-/// The regex is ASCII-only (otherwise e.g. `ſ` would fold to `s`).
+/// `/^https?:\/\//i`。`-u` 让大小写折叠保持 ASCII 语义，与不带 `u` 的
+/// 情况一致。这里的正则是纯 ASCII 的（否则像 `ſ` 这种字符会被折叠成 `s`）。
 fn http_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i-u)^https?://").expect("http url regex"))
@@ -67,18 +67,18 @@ fn issue(level: &str, field: &str, message: impl Into<String>) -> Value {
 }
 
 /* ------------------------------------------------------------------ */
-/* JS coercion helpers                                                 */
+/* JS 强制转换辅助函数                                                   */
 /* ------------------------------------------------------------------ */
 
-/// `String(v)`. `model::js_string` matches JS for scalars but prints JSON for
-/// arrays/objects, so the container cases are handled here: JS gives
-/// `[].join(',')` for arrays and `"[object Object]"` for plain objects.
+/// `String(v)`。`model::js_string` 对标量的行为与 JS 一致，但对数组/对象会打印
+/// JSON，所以容器的情况在这里单独处理：JS 对数组给出 `[].join(',')` 的结果，
+/// 对普通对象给出 `"[object Object]"`。
 fn js_str(v: &Value) -> String {
     match v {
         Value::Array(items) => items
             .iter()
             .map(|item| {
-                // `[null].join(',')` is "" — null/undefined holes stringify empty.
+                // `[null].join(',')` 得到 "" —— null/undefined 的空隙会被转成空串。
                 if item.is_null() {
                     String::new()
                 } else {
@@ -93,7 +93,7 @@ fn js_str(v: &Value) -> String {
     }
 }
 
-/// The float `1.0` renders as `"1"`, while serde renders the JSON float `1.0`.
+/// 浮点数 `1.0` 应该渲染成 `"1"`，而 serde 会把 JSON 浮点 `1.0` 原样渲染。
 fn js_number(n: &serde_json::Number) -> String {
     if let Some(i) = n.as_i64() {
         return i.to_string();
@@ -109,12 +109,12 @@ fn js_number(n: &serde_json::Number) -> String {
     }
 }
 
-/// JS `.length` for the fields the validators measure.
+/// 针对校验器要度量的那些字段，取 JS 的 `.length` 语义。
 fn utf16_len(s: &str) -> usize {
     s.encode_utf16().count()
 }
 
-/// `data[key] || ''` — JS `||` catches `0`, `false`, `""`, `null` as well.
+/// `data[key] || ''` —— JS 的 `||` 同样会把 `0`、`false`、`""`、`null` 一并吃掉。
 fn prop_str(obj: &Value, key: &str) -> String {
     match obj.get(key) {
         Some(v) if js_truthy(v) => js_str(v),
@@ -122,9 +122,8 @@ fn prop_str(obj: &Value, key: &str) -> String {
     }
 }
 
-/// `Object.keys(v)` for the values that can reach it: objects keep insertion
-/// order (serde_json `preserve_order`), and a JSON array's enumerable keys are
-/// its indices.
+/// 对能走到这里的那些取值实现 `Object.keys(v)`：对象保持插入顺序
+/// （serde_json 开了 `preserve_order`），而 JSON 数组的可枚举键就是它的下标。
 fn object_keys(v: &Value) -> Vec<String> {
     match v {
         Value::Object(map) => map.keys().cloned().collect(),
@@ -143,19 +142,19 @@ fn check_version(data: &Value, issues: &mut Vec<Value>) {
 }
 
 /* ------------------------------------------------------------------ */
-/* validators                                                          */
+/* 各个校验器                                                           */
 /* ------------------------------------------------------------------ */
 
-/// Validate a skill frontmatter + body.
+/// 校验技能（skill）的 frontmatter 与正文。
 ///
-/// `body` is `opts.body`: `None` models `undefined`, `Some(Value::Null)`
-/// models an explicit JSON `null` — and `String(null).trim()` is `"null"`, so
-/// the latter does NOT trip the empty-body error.
+/// `body` 对应 `opts.body`：`None` 建模的是 `undefined`，`Some(Value::Null)`
+/// 建模的是显式的 JSON `null` —— 而 `String(null).trim()` 的结果是 `"null"`，
+/// 所以后者并不会触发「正文为空」这个错误。
 pub fn validate_skill(data: &Value, body: Option<&Value>, dir_name: Option<&Value>) -> Vec<Value> {
     let mut issues = Vec::new();
 
-    // 解析口径: `data.name || ''` means the number 0 and `false` silently
-    // become "", i.e. "name is required" rather than a type error.
+    // 解析口径: `data.name || ''` 意味着数字 0 和 `false` 会静默地变成 ""，
+    // 也就是报「name 是必填的」，而不是报类型错误。
     let raw_name = prop_str(data, "name");
     let name = ecma_trim(&raw_name).to_string();
 
@@ -168,8 +167,8 @@ pub fn validate_skill(data: &Value, body: Option<&Value>, dir_name: Option<&Valu
             "name must be lowercase letters/digits/hyphen, max 64 chars",
         ));
     }
-    // Checked on the trimmed name, lowercased — independently of the branch
-    // above, so `CON` yields both the casing error and the reserved-name error.
+    // 检查的是 trim 之后并转成小写的名字——与上面那个分支相互独立，
+    // 所以 `CON` 会同时得到大小写错误和保留名错误。
     if RESERVED_SKILL_NAMES.contains(&name.to_lowercase().as_str()) {
         issues.push(issue(
             "error",
@@ -207,8 +206,8 @@ pub fn validate_skill(data: &Value, body: Option<&Value>, dir_name: Option<&Valu
         ));
     }
 
-    // 解析口径: no truthiness gate here — only `undefined` skips the check.
-    // `Some(Null)` stringifies to "null" and passes.
+    // 解析口径: 这里不做真值判断——只有 `undefined` 会跳过这项检查。
+    // `Some(Null)` 会被转成 "null"，因此能通过。
     if let Some(b) = body {
         if ecma_trim(&js_str(b)).is_empty() {
             issues.push(issue("error", "body", "SKILL.md body is empty"));
@@ -240,7 +239,7 @@ pub fn validate_skill(data: &Value, body: Option<&Value>, dir_name: Option<&Valu
     issues
 }
 
-/// Validate one MCP server entry.
+/// 校验一条 MCP server 条目。
 pub fn validate_mcp_server(id: &str, cfg: &Value) -> Vec<Value> {
     let mut issues = Vec::new();
 
@@ -252,8 +251,8 @@ pub fn validate_mcp_server(id: &str, cfg: &Value) -> Vec<Value> {
         ));
     }
 
-    // `!cfg || typeof cfg !== 'object'`. JSON arrays are `typeof 'object'` in
-    // JS, so an array does NOT take this early return.
+    // `!cfg || typeof cfg !== 'object'`。在 JS 里 JSON 数组的 `typeof` 就是
+    // `'object'`，所以数组并不会走到这个提前返回上。
     if !js_truthy(cfg) || !(cfg.is_object() || cfg.is_array()) {
         issues.push(issue("error", "config", "server config must be an object"));
         return issues;
@@ -280,17 +279,16 @@ pub fn validate_mcp_server(id: &str, cfg: &Value) -> Vec<Value> {
         }
     }
 
-    // 解析口径: `typeof null === 'object'` and `Array.isArray(null)` is false,
-    // so `env: null` is accepted while `env: []` is rejected.
+    // 解析口径: `typeof null === 'object'`，且 `Array.isArray(null)` 为 false，
+    // 所以 `env: null` 会被接受，而 `env: []` 会被拒绝。
     if let Some(env) = cfg.get("env") {
         if !env.is_object() && !env.is_null() {
             issues.push(issue("error", "env", "env must be an object"));
         }
     }
 
-    // `Object.keys(cfg)` in insertion order. For an array this yields the
-    // indices, so a non-empty array config also produces one warning per item
-    // (`field` is the raw key, not "config").
+    // `Object.keys(cfg)`，按插入顺序。对数组来说得到的是下标，所以非空的数组
+    // 配置也会每一项产出一条告警（`field` 是原始的键，而不是 "config"）。
     for key in object_keys(cfg) {
         if !KNOWN_MCP_KEYS.contains(&key.as_str()) {
             issues.push(issue(
@@ -329,11 +327,11 @@ pub fn validate_mcp_server(id: &str, cfg: &Value) -> Vec<Value> {
     issues
 }
 
-/// Validate a plugin manifest.
+/// 校验插件的清单文件。
 pub fn validate_plugin(data: &Value) -> Vec<Value> {
     let mut issues = Vec::new();
 
-    // Plain truthiness, no trim and no string coercion.
+    // 这里就是朴素的真值判断，既不 trim，也不做字符串强制转换。
     if !data.get("name").map(js_truthy).unwrap_or(false) {
         issues.push(issue("error", "name", "plugin name is required"));
     }
@@ -353,8 +351,8 @@ pub fn validate_plugin(data: &Value) -> Vec<Value> {
     issues
 }
 
-/// Validate a rule. `body` arrives already coerced to a string (the caller
-/// does that, matching the reference).
+/// 校验一条规则（rule）。传进来的 `body` 已经是字符串了（由调用方完成这次
+/// 强制转换，与参考实现保持一致）。
 pub fn validate_rule(body: &str) -> Vec<Value> {
     let mut issues = Vec::new();
 
@@ -376,7 +374,7 @@ pub fn validate_rule(body: &str) -> Vec<Value> {
     issues
 }
 
-/// Validate a memory file.
+/// 校验一个记忆文件（memory）。
 pub fn validate_memory(body: &str) -> Vec<Value> {
     let mut issues = Vec::new();
 
@@ -387,13 +385,13 @@ pub fn validate_memory(body: &str) -> Vec<Value> {
     issues
 }
 
-/// `String(payload.body || '')` — the coercion `validateRule` / `validateMemory`
-/// rely on.
+/// `String(payload.body || '')` —— 这正是 `validateRule` / `validateMemory`
+/// 所依赖的那次强制转换。
 fn body_str(payload: &Value) -> String {
     prop_str(payload, "body")
 }
 
-/// Dispatch validation by asset kind.
+/// 按资产类型分派到对应的校验器。
 pub fn validate_by_kind(kind: &str, payload: &Value) -> Vec<Value> {
     match kind {
         "skill" => {
@@ -414,7 +412,7 @@ pub fn validate_by_kind(kind: &str, payload: &Value) -> Vec<Value> {
             validate_mcp_server(&name, cfg)
         }
         "plugin" => {
-            // `payload.data || payload` — falls back to the whole payload.
+            // `payload.data || payload` —— 回退成整个 payload。
             let fallback;
             let data = match payload.get("data").filter(|v| js_truthy(*v)) {
                 Some(data) => data,
@@ -431,7 +429,7 @@ pub fn validate_by_kind(kind: &str, payload: &Value) -> Vec<Value> {
     }
 }
 
-/// `isBlocking(issues)` — any `level === 'error'`.
+/// `isBlocking(issues)` —— 只要有一条 `level === 'error'` 就算拦住了。
 pub fn is_blocking(issues: &[Value]) -> bool {
     issues
         .iter()
@@ -487,7 +485,7 @@ mod tests {
             ]
         );
 
-        // JS `||` turns 0 into '' — "required", not a type complaint.
+        // JS 的 `||` 会把 0 变成 '' —— 于是报「必填」，而不是报类型问题。
         let issues = validate_skill(&json!({"name": 0, "description": "d"}), None, None);
         assert_eq!(issues[0]["message"], "name is required");
     }
@@ -517,18 +515,18 @@ mod tests {
 
     #[test]
     fn description_length_is_utf16_units() {
-        // 512 chars, 1024 UTF-16 units -> allowed.
+        // 512 个字符 = 1024 个 UTF-16 码元 -> 允许通过。
         let ok: String = "😀".repeat(512);
         assert!(validate_skill(&json!({"name": "a", "description": ok}), None, None).is_empty());
 
-        // 513 chars, 1026 UTF-16 units -> warn. A char count would say 513.
+        // 513 个字符 = 1026 个 UTF-16 码元 -> 告警。按字符数算会得出 513。
         let long: String = "😀".repeat(513);
         let issues = validate_skill(&json!({"name": "a", "description": long}), None, None);
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0]["level"], "warn");
         assert_eq!(issues[0]["field"], "description");
 
-        // 342 CJK chars: 1026 bytes, 342 UTF-16 units -> allowed.
+        // 342 个 CJK 字符：1026 字节、342 个 UTF-16 码元 -> 允许通过。
         let cjk: String = "一".repeat(342);
         assert!(validate_skill(&json!({"name": "a", "description": cjk}), None, None).is_empty());
     }
@@ -588,7 +586,7 @@ mod tests {
         );
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0]["field"], "version");
-        // 0 is falsy -> the whole check is skipped.
+        // 0 是假值 -> 整项检查被跳过。
         assert!(validate_skill(
             &json!({"name":"a","description":"d","version":0}),
             None,
@@ -600,7 +598,7 @@ mod tests {
     #[test]
     fn body_undefined_vs_null() {
         assert!(validate_skill(&json!({"name":"a","description":"d"}), None, None).is_empty());
-        // String(null) === "null" -> non-empty, so no error.
+        // String(null) === "null" -> 非空，所以不报错。
         assert!(validate_skill(
             &json!({"name":"a","description":"d"}),
             Some(&json!(null)),
@@ -621,7 +619,7 @@ mod tests {
             1
         );
 
-        // String(0) === "0" -> non-empty.
+        // String(0) === "0" -> 非空。
         let zero = json!(0);
         assert!(
             validate_skill(&json!({"name":"a","description":"d"}), Some(&zero), None).is_empty()
@@ -688,7 +686,7 @@ mod tests {
                 json!({"level":"warn","field":"args","message":"npx without -y can block on an interactive install prompt"})
             ]
         );
-        // No args at all -> joined "" -> also warns.
+        // 完全没有 args -> join 得到 "" -> 同样告警。
         assert_eq!(
             validate_mcp_server("srv", &json!({"command":"npx"})).len(),
             1
@@ -706,8 +704,8 @@ mod tests {
             ]
         );
 
-        // Arrays are `typeof 'object'`: no early return, falls through to the
-        // stdio/http error (and, being empty, produces no index warnings).
+        // 数组的 `typeof` 就是 `'object'`：不会提前返回，而是一路落到
+        // stdio/http 那条错误上（又因为是空数组，所以不会产出下标告警）。
         let issues = validate_mcp_server("srv", &json!([]));
         assert_eq!(
             issues,
@@ -722,7 +720,7 @@ mod tests {
 
     #[test]
     fn mcp_array_config_scans_indices_as_keys() {
-        // The key of an array is its index, as a string.
+        // 数组的键就是它的下标，以字符串的形式呈现。
         let issues = validate_mcp_server("srv", &json!([1]));
         assert_eq!(
             fields(&issues),
@@ -814,7 +812,7 @@ mod tests {
         // plugin: `payload.data || payload`
         assert!(validate_by_kind("plugin", &json!({"name":"p"})).is_empty());
 
-        // mcp: a missing config is `undefined` -> early config error.
+        // mcp: 缺失的 config 就是 `undefined` -> 直接报 config 错误。
         let issues = validate_by_kind("mcp", &json!({"name":"srv"}));
         assert_eq!(issues[0]["message"], "server config must be an object");
 
