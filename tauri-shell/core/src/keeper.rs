@@ -29,6 +29,8 @@ use std::path::Path;
 use super::adapters::{by_id, family, resolve_home, Agent};
 use super::assets;
 use super::frontmatter;
+use super::library;
+use super::linkfs::{self, LinkMethod};
 use super::model::{basename, js_string, js_truthy, slug};
 use super::registry;
 use super::scan;
@@ -1255,6 +1257,439 @@ impl Keeper {
         }
         tx
     }
+
+    /* -------------------------------------------------------------- */
+    /* 共享（M2）：启用到库 / 停用 / 从库里删                             */
+    /* -------------------------------------------------------------- */
+
+    /// 当前的库句柄。每次现算：库位置可以被设置切换，缓存进字段就会在切换后指向旧根。
+    pub fn library(&self) -> library::Library {
+        library::Library::resolve(&self.user_home, &self.settings())
+    }
+
+    fn settings(&self) -> Value {
+        settings::read(self.store.root_str())
+    }
+
+    /// 设置里的链接方式偏好（`linkMethod`，`auto` = 交给能力顺序）。
+    fn link_prefer(&self) -> Option<LinkMethod> {
+        let raw = self
+            .settings()
+            .get("linkMethod")
+            .and_then(Value::as_str)
+            .unwrap_or("auto")
+            .to_string();
+        store::parse_link_method(&raw)
+    }
+
+    /// 库内某个 `<kind>/<slug>` 主副本是否已经存在（只有 skill 有目录形态）。
+    fn library_asset_dir(&self, kind: &str, slug: &str) -> Option<String> {
+        let lib = self.library();
+        let dir = match kind {
+            "skill" => lib.skill_dir(slug),
+            "rule" => lib.dir_for("rule").join(format!("{}.md", slug)),
+            "memory" => lib.dir_for("memory").join(format!("{}.md", slug)),
+            _ => return None,
+        };
+        dir.exists().then(|| store::native_str(&dir))
+    }
+
+    /// 把库内资产启用到某个 agent / scope —— **删 + 建链接在同一个事务里**。
+    ///
+    /// `input`：`{ assetId?, name?, kind?, slug?, agentId, scope, projectId? }`。
+    /// `assetId` 给定时从扫描结果里取来源路径（最常见的调用方式）；否则要求
+    /// `name` + `kind` 指向一份**已经在库里**的主副本（用于「补启用」，例如库内
+    /// 已有的 skill 还没挂到某个 agent 上）。
+    ///
+    /// op 顺序不能变：目标已存在时 `linkDir` 会直接报「目标已被占用」，所以真实
+    /// 目录必须先删；而删除与建链接只有在同一个事务里才可能一起回滚
+    /// （`docs/SHARED-ASSETS-IMPLEMENTATION.md` §11.3）。
+    pub fn enable_asset(&self, input: &Value) -> Value {
+        let lib = self.library();
+        // 用 `non_empty` 而不是 `prop`：`prop` 对缺失字段返回字符串 "undefined"
+        // （它模仿 JS 的 `String(undefined)`），在这里会把「没给 kind」读成
+        // 「给了个不认识的 kind」。
+        let kind = non_empty(input, "kind").unwrap_or_else(|| "skill".to_string());
+        if kind != "skill" {
+            return unsatisfied(match kind.as_str() {
+                "rule" | "memory" => "rule.shareUnsupported",
+                _ => "share.unsupportedKind",
+            });
+        }
+        // 来源与名字：给了 assetId 就以扫描结果为准，否则用 name/kind 在库里找。
+        let (name, from, from_agent) = match non_empty(input, "assetId") {
+            Some(id) => {
+                let Some(a) = self.index_get(&id) else {
+                    return unsatisfied("share.unknownAsset");
+                };
+                (
+                    prop(&a, "name"),
+                    // 扫描报出来的 `dir` 可能混着 `/`（agent 的 home token 用 `/` 拼），
+                    // 而 `Op::copy_dir` 的前置校验用的是 `Path::is_dir()`，在 Windows 上
+                    // 它对 `/` 分隔的路径并不总是成立。统一成原生分隔符再进事务。
+                    a.get("dir")
+                        .and_then(|v| v.as_str())
+                        .map(|d| store::native_str(Path::new(d)))
+                        .unwrap_or_default(),
+                    prop(&a, "agentId"),
+                )
+            }
+            None => (prop(input, "name"), String::new(), String::new()),
+        };
+        if name.is_empty() {
+            return unsatisfied("share.unknownAsset");
+        }
+        let slug_name = slug(&name);
+
+        // 库内主副本：优先用已有的；没有就把来源目录当作主副本并记下来。
+        let existing = self.library_asset_dir("skill", &slug_name);
+        let store_keeper = existing.is_none();
+        let keeper = match &existing {
+            Some(p) => p.clone(),
+            None => {
+                if from.is_empty() {
+                    return unsatisfied("share.unknownAsset");
+                }
+                store::native_str(&lib.skill_dir(&slug_name))
+            }
+        };
+
+        let agent_id = prop(input, "agentId");
+        let scope = {
+            let s = prop(input, "scope");
+            if s.is_empty() {
+                "global".to_string()
+            } else {
+                s
+            }
+        };
+        let target = json!({
+            "agentId": agent_id,
+            "scope": scope,
+            "projectId": input.get("projectId").cloned().unwrap_or(Value::Null),
+        });
+        let Some(dir) = self.skill_dir_for(&target) else {
+            return skipped("agent has no skill directory", &target);
+        };
+        let dst = join(&dir, &[&slug_name]);
+        let dst_path = Path::new(&dst);
+
+        // 已经是指向库内主副本的链接：什么都不做，而不是删了重建。
+        if linkfs::is_link(dst_path) && lib.owns_target(dst_path) {
+            return json!({
+                "ok": true,
+                "written": [],
+                "skipped": [{ "target": target, "reason": "already linked" }],
+                "keeper": keeper,
+            });
+        }
+        // 位置本身就是库内主副本（伪 agent `shared`）：没有可建的链接。
+        if existing.as_deref() == Some(dst.as_str()) {
+            return json!({
+                "ok": true,
+                "written": [],
+                "skipped": [{ "target": target, "reason": "already in the library" }],
+                "keeper": keeper,
+            });
+        }
+
+        let mut ops: Vec<Op> = Vec::new();
+        let mut written: Vec<Value> = Vec::new();
+        if let Some(parent) = Path::new(&dir).parent() {
+            ops.push(Op::mkdir(&store::native_str(parent)));
+        }
+        // 顺序：**先把内容搬进库，再删旧位置，最后建链接**。
+        //
+        // 不能先删：`copyDir` 的来源就是 agent 侧那个目录 —— 先删掉它，拷贝就没源
+        // 可读了（`copy source missing`）。也不能先建链接：目标已存在时 `linkDir`
+        // 直接拒绝（§11.3）。三条都在同一个事务里，任一条失败其余全部回滚。
+        if store_keeper {
+            // 来源目录整体成为库内主副本。用 `copyDir` 而不是 `write`：skill 是整棵
+            // 目录（SKILL.md + 资源），`copyDir` 是事务里唯一认得「一棵树」的 op，
+            // 它自己的撤销就是删掉拷贝出来的那份。
+            ops.push(Op::copy_dir(&keeper, &from));
+            written.push(json!(keeper));
+        }
+        // 旧位置：要么是真实目录（内容已在库里），要么是一条指向别处的链接。
+        if dst_path.exists() || linkfs::is_link(dst_path) {
+            if store_keeper && from.is_empty() {
+                return unsatisfied("share.unknownAsset");
+            }
+            ops.push(Op::delete(&dst));
+            written.push(json!(dst));
+        }
+        ops.push(Op::link_dir_with(&dst, &keeper, self.link_prefer()));
+        written.push(json!(dst));
+
+        let mut tx = self.store.transaction(
+            &ops,
+            &json!({
+                "kind": "skill",
+                "action": if store_keeper { "converge" } else { "enable" },
+                "agentId": input.get("agentId").cloned().unwrap_or(Value::Null),
+                "projectId": input.get("projectId").cloned().unwrap_or(Value::Null),
+                "assetName": name,
+                "library": keeper,
+                "fromAgent": from_agent,
+            }),
+        );
+        if !tx.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return tx;
+        }
+        // 台账只在事务成功之后写：失败时不动它，是「台账不是真相」的前提之一。
+        // 实际用掉的方式要从盘上读回（事务的日志只写进 `audit.jsonl`，应答里没有）：
+        // 猜一个会让台账记错方式，doctor 随后就会报一条假的 `link.ledgerDrift`。
+        let method = linkfs::link_kind(Path::new(&dst)).unwrap_or(LinkMethod::Symlink);
+        if let Err(e) = self.record_link(&lib, "skill", &slug_name, &keeper, &dst, method) {
+            tx["ok"] = json!(false);
+            tx["error"] = json!(e);
+        }
+        self.invalidate();
+        if let Value::Object(m) = &mut tx {
+            m.insert("written".to_string(), json!(written));
+            m.insert("skipped".to_string(), json!([]));
+            m.insert("keeper".to_string(), json!(keeper));
+            m.insert("storedInLibrary".to_string(), json!(store_keeper));
+        }
+        tx
+    }
+
+    /// 往台账里登记（或更新）一条链接。台账读不出来时**不覆盖**，原样报错。
+    fn record_link(
+        &self,
+        lib: &library::Library,
+        kind: &str,
+        slug_name: &str,
+        src: &str,
+        dst: &str,
+        method: LinkMethod,
+    ) -> Result<(), String> {
+        let mut ledger = lib.load_ledger()?;
+        lib.record(
+            &mut ledger,
+            library::LinkEntry::new(kind, slug_name, src, dst, method),
+        );
+        lib.save_ledger(&ledger)
+    }
+
+    /// 停用某个 agent 上的库内链接：**只删链接，库内主副本一个字节都不动**。
+    ///
+    /// 三道闸缺一不可（§4.2）：不是链接就拒绝（`share.notLinked`）；指向库外就拒绝
+    /// （`share.foreignLink`，删它会动到用户自己的目录）；库内主副本永不删除 ——
+    /// 本函数里没有任何一条 op 指向库内路径。
+    pub fn disable_asset(&self, input: &Value) -> Value {
+        let lib = self.library();
+        let kind = non_empty(input, "kind").unwrap_or_else(|| "skill".to_string());
+        let mut name = non_empty(input, "name").unwrap_or_default();
+        if name.is_empty() {
+            if let Some(id) = non_empty(input, "assetId") {
+                name = self
+                    .index_get(&id)
+                    .map(|a| prop(&a, "name"))
+                    .unwrap_or_default();
+            }
+        }
+        if name.is_empty() {
+            return unsatisfied("share.unknownAsset");
+        }
+        let slug_name = slug(&name);
+        let agent_id = prop(input, "agentId");
+        let scope = {
+            let s = prop(input, "scope");
+            if s.is_empty() {
+                "global".to_string()
+            } else {
+                s
+            }
+        };
+        let Some(dir) = self.skill_dir_for(&json!({
+            "agentId": agent_id,
+            "scope": scope,
+            "projectId": input.get("projectId").cloned().unwrap_or(Value::Null),
+        })) else {
+            return skipped("agent has no skill directory", input);
+        };
+        let dst = join(&dir, &[&slug_name]);
+        let dst_path = Path::new(&dst);
+
+        if !linkfs::is_link(dst_path) {
+            return unsatisfied_with("share.notLinked", json!({ "path": dst }));
+        }
+        if !lib.owns_target(dst_path) {
+            return unsatisfied_with("share.foreignLink", json!({ "path": dst }));
+        }
+
+        let mut tx = self.store.transaction(
+            &[Op::delete(&dst)],
+            &json!({
+                "kind": kind,
+                "action": "disable",
+                "agentId": input.get("agentId").cloned().unwrap_or(Value::Null),
+                "projectId": input.get("projectId").cloned().unwrap_or(Value::Null),
+                "assetName": name,
+            }),
+        );
+        if !tx.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return tx;
+        }
+        let mut ledger_err = None;
+        if let Ok(mut ledger) = lib.load_ledger() {
+            ledger.remove(&dst);
+            if let Err(e) = lib.save_ledger(&ledger) {
+                ledger_err = Some(e);
+            }
+        }
+        self.invalidate();
+        if let Value::Object(m) = &mut tx {
+            m.insert("written".to_string(), json!([dst]));
+            m.insert("skipped".to_string(), json!([]));
+            if let Some(e) = ledger_err {
+                m.insert("ledgerWarning".to_string(), json!(e));
+            }
+        }
+        tx
+    }
+
+    /// 从库里删除一个资产：先把它移进 `<store>/.trash/<kind>/<slug>-<ts>/`，
+    /// 再删掉所有指向它的链接，最后清台账。
+    ///
+    /// 顺序的意义：先让主副本离开原位，再拆链接 —— 否则中途失败会留下一批悬空
+    /// 链接，而用户看不到「内容还在回收站里」这个事实。每一步都进 `audit.jsonl`，
+    /// 因为这是一次删除，而回收站会在一段时间后自己清空：审计线是它的唯一书面记录。
+    pub fn remove_from_library(&self, kind: &str, name: &str) -> Value {
+        let lib = self.library();
+        let slug_name = slug(name);
+        let Some(src) = self.library_asset_dir(kind, &slug_name) else {
+            return unsatisfied_with("share.unknownAsset", json!({ "kind": kind, "name": name }));
+        };
+        let mut ledger = match lib.load_ledger() {
+            Ok(l) => l,
+            Err(e) => {
+                // 台账读不出来就不能确认「哪些链接指向它」，宁可什么都不做也不留悬空链接。
+                return json!({ "ok": false, "code": "link.ledgerDrift", "error": e });
+            }
+        };
+        // 先读链接清单，**再**搬主副本：台账按 `src` 路径索引，而 `normalize` 先做
+        // canonicalize —— 主副本一旦移进 `.trash`，原路径上的 `links_to` 就一条也
+        // 找不到了（它变成一条读不出来的路径），链接清单会静默为空。
+        let links: Vec<String> = ledger
+            .links_to(&src)
+            .iter()
+            .map(|e| e.dst.clone())
+            .collect();
+        let trash = self
+            .store
+            .root()
+            .join(".trash")
+            .join(lib_dir_name(kind))
+            .join(format!("{}-{}", slug_name, trash_stamp()));
+        if let Some(parent) = trash.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let trash_str = store::native_str(&trash);
+        match std::fs::rename(Path::new(&src), &trash) {
+            Ok(()) => {}
+            Err(_) => {
+                // 跨卷（库在某些机器上会在另一个盘上）：先拷过去再删原处。
+                store::copy_dir(Path::new(&src), &trash);
+                store::rmrf(Path::new(&src));
+            }
+        }
+        settings::audit(
+            self.store.root_str(),
+            &json!({
+                "action": "library.trash",
+                "kind": kind,
+                "name": slug_name,
+                "from": src,
+                "to": trash_str,
+            }),
+        );
+
+        let mut removed: Vec<Value> = Vec::new();
+        let mut failed: Vec<Value> = Vec::new();
+        for dst in &links {
+            let p = Path::new(dst);
+            let result = if !linkfs::is_link(p) {
+                // 已经换成真实目录/文件：这不是我们的链接，绝不删。
+                Err("this path is no longer a link".to_string())
+            } else if !lib.owns_target(p) {
+                Err("this link points outside the library".to_string())
+            } else {
+                linkfs::unlink(p).map_err(|e| e.to_string())
+            };
+            match result {
+                Ok(()) => {
+                    ledger.remove(dst);
+                    settings::audit(
+                        self.store.root_str(),
+                        &json!({ "action": "library.unlink", "kind": kind, "name": slug_name, "path": dst }),
+                    );
+                    removed.push(json!(dst));
+                }
+                Err(reason) => failed.push(json!({ "path": dst, "reason": reason })),
+            }
+        }
+        let ledger_err = lib.save_ledger(&ledger).err();
+        self.invalidate();
+        json!({
+            "ok": true,
+            "trashed": trash_str,
+            "removed": removed,
+            "failed": failed,
+            "ledgerWarning": ledger_err,
+        })
+    }
+}
+
+/// `.trash/<kind>/` 里的目录名：与库内 `dir_for` 同一套命名。
+fn lib_dir_name(kind: &str) -> &'static str {
+    match kind {
+        "rule" => "rules",
+        "memory" => "memory",
+        "mcp" => "mcp",
+        _ => "skills",
+    }
+}
+
+/// 回收站条目名里的时间戳（UTC，`YYYYMMDDTHHMMSS`）。排序即时间序。
+fn trash_stamp() -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let iso = super::model::iso_from_millis(ms);
+    iso.chars()
+        .filter(|c| c.is_ascii_digit() || *c == 'T')
+        .take(15)
+        .collect()
+}
+
+/// `input[key]` 的非空字符串。
+fn non_empty(input: &Value, key: &str) -> Option<String> {
+    input
+        .get(key)
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 「这一步做不了」的统一形状：一个可读的 code，不给散文让渲染层去猜。
+fn unsatisfied(code: &str) -> Value {
+    unsatisfied_with(code, Value::Null)
+}
+
+fn unsatisfied_with(code: &str, detail: Value) -> Value {
+    json!({ "ok": false, "code": code, "detail": detail })
+}
+
+/// 「没有可写的东西」：沿用 `distribute` 的 `skipped[]` 形状。
+fn skipped(reason: &str, target: &Value) -> Value {
+    json!({
+        "ok": false,
+        "written": [],
+        "skipped": [{ "target": target, "reason": reason }],
+    })
 }
 
 #[cfg(test)]

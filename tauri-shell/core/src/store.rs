@@ -859,22 +859,21 @@ pub const RESTORE_SYMLINK_FAILED: &str = "store.symlinkRestoreFailed";
 /// 把这些都说成「路径写不进去」，而用户据此会去改权限 —— 改错了地方。
 pub const STORE_LINK_FAILED: &str = "store.linkFailed";
 
-/// 链接方式偏好（设置里的 `linkMethod`）。
+/// 链接方式偏好（设置里的 `linkMethod`）的解析。
 ///
-/// `auto` 交给 `linkfs::create_*` 自己按能力顺序挑；其余值只用来**收窄** ——
-/// 一个建不出来的偏好会让事务失败（`store.linkFailed`），而不是悄悄换成别的方式：
-/// 「我选的 junction 变成了 symlink」是用户无法察觉的语义变化。
+/// `auto`（空串 / 未知值）交给 `linkfs::create_*` 自己按能力顺序挑；其余值只用来
+/// **收窄** —— 一个建不出来的偏好会让事务失败（`store.linkFailed`），而不是悄悄换成
+/// 别的方式：「我选的 junction 变成了 symlink」是用户无法察觉的语义变化。
 ///
-/// 偏好只从环境变量 `AK_LINK_METHOD`（`symlink` | `junction` | `hardlink`）读，
-/// 不读设置文件：`core` 不知道 store 根在哪，把写入路径绑到一份可被外部改写的
-/// JSON 上不是这里该做的事。M2 打开共享页之后，偏好由 UI 随 `enable_asset` 的
-/// input 传入，落到 `linkfs::create_dir_link` 的 `prefer` 实参上。
-fn preferred_link_method() -> Option<crate::linkfs::LinkMethod> {
+/// 偏好由调用方随 `Op::link_dir_with` / `Op::link_file_with` 传进事务，不再从环境
+/// 变量读：它是用户在这一步的显式选择，藏进进程级全局量会让同一次会话里的两个选择
+/// 互相覆盖。
+pub fn parse_link_method(raw: &str) -> Option<crate::linkfs::LinkMethod> {
     use crate::linkfs::LinkMethod;
-    match std::env::var("AK_LINK_METHOD").ok().as_deref() {
-        Some("symlink") => Some(LinkMethod::Symlink),
-        Some("junction") => Some(LinkMethod::Junction),
-        Some("hardlink") => Some(LinkMethod::Hardlink),
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "symlink" => Some(LinkMethod::Symlink),
+        "junction" => Some(LinkMethod::Junction),
+        "hardlink" => Some(LinkMethod::Hardlink),
         _ => None,
     }
 }
@@ -1053,6 +1052,13 @@ pub struct Op {
     pub patch: Option<Value>,
     /// `json` 操作：完全控制。返回 `None` 会中止事务。
     pub mutate: Option<Box<dyn Fn(Value) -> Option<Value>>>,
+    /// `linkDir` / `linkFile` 的方式偏好：`Some` 时只试这一种，`None` 时按
+    /// `linkfs::create_*` 的能力顺序自动挑。
+    ///
+    /// 偏好随 op 走而不是从环境变量读：它是用户在这一步显式选的东西
+    /// （设置里的 `linkMethod` 由共享页随请求传下来），把它藏在一个进程级全局量里
+    /// 会让同一次会话里两个不同的选择互相覆盖。
+    pub prefer: Option<crate::linkfs::LinkMethod>,
 }
 
 impl Op {
@@ -1064,6 +1070,7 @@ impl Op {
             content: None,
             patch: None,
             mutate: None,
+            prefer: None,
         }
     }
 
@@ -1110,10 +1117,24 @@ impl Op {
         op
     }
 
+    /// 同上，但只接受 `method` 这一种链接方式（建不出来就失败，而不是悄悄换一种）。
+    pub fn link_dir_with(dst: &str, src: &str, method: Option<crate::linkfs::LinkMethod>) -> Op {
+        let mut op = Op::link_dir(dst, src);
+        op.prefer = method;
+        op
+    }
+
     /// 在 `dst` 建一个指向 `src` 的文件链接。
     pub fn link_file(dst: &str, src: &str) -> Op {
         let mut op = Op::new(OpKind::LinkFile, dst);
         op.from = Some(src.to_string());
+        op
+    }
+
+    /// 同上，但只接受 `method` 这一种方式。
+    pub fn link_file_with(dst: &str, src: &str, method: Option<crate::linkfs::LinkMethod>) -> Op {
+        let mut op = Op::link_file(dst, src);
+        op.prefer = method;
         op
     }
 }
@@ -1429,7 +1450,7 @@ impl Store {
                         if let Some(parent) = Path::new(&real).parent() {
                             let _ = std::fs::create_dir_all(parent);
                         }
-                        let prefer = preferred_link_method();
+                        let prefer = op.prefer;
                         let created = if is_dir {
                             crate::linkfs::create_dir_link(Path::new(&src), Path::new(&real), prefer)
                         } else {
@@ -1493,12 +1514,22 @@ impl Store {
                         // `exists()` 会跟随链接：一条悬空的 junction / symlink 在它眼里
                         // 「不存在」，于是删除会被静默跳过，事务"成功"但链接还在。
                         if p.exists() || crate::linkfs::is_link(p) {
-                            if std::fs::symlink_metadata(p)
+                            // 链接一律走 `unlink`：目录符号链接上 `RemoveDirectoryW` 成功而
+                            // `remove_file` 报 Access denied，文件符号链接上正好相反（§3.3），
+                            // 而 `remove_dir` 在 junction 上会**跟进库内**把内容删掉。
+                            // `unlink` 是唯一同时处理这三种情况的删法。
+                            let result = if crate::linkfs::is_link(p) {
+                                crate::linkfs::unlink(p)
+                            } else if std::fs::symlink_metadata(p)
                                 .map(|m| m.is_dir())
                                 .unwrap_or(false)
                             {
                                 rmrf(p);
-                            } else if let Err(e) = std::fs::remove_file(p) {
+                                Ok(())
+                            } else {
+                                std::fs::remove_file(p)
+                            };
+                            if let Err(e) = result {
                                 // 删不掉要说出来：一个「成功」的事务留下一个还在的条目，
                                 // 是用户最难查的那类问题。
                                 return Err(TxError::plain(format!(

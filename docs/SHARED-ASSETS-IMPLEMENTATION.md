@@ -14,11 +14,12 @@
 | 平台 | Windows 10/11 x64（仅此范围，不做 macOS/Linux） |
 | 基线 | 0.2.4，commit `24b32f4` |
 | 工期 | 14–17 个工作日（P0→P6，含测试；见 §11 的改动幅度） |
-| 当前状态 | **M1（P0+P1）已完成并验收**（2026-11-02）；M2 起未开始。验收记录见 §16 |
+| 当前状态 | **M1（P0+P1）、M2（P2）已完成并验收**（2026-11-02）；M3 起未开始。验收记录见 §16 与 §17 |
 | 环境 | rustc/cargo 1.99.1 · tauri-cli 2.12.4 · MSVC 14.44 · SDK 10.0.26100 · Node 22.22.1 |
 
-> **本轮之后开工的人先读 §16**：那里有 M1 的实际交付清单、实测结论（与本手册初稿不同的
-> 地方已就地改写）、以及 M2 可以直接接手的三条接口。
+> **本轮之后开工的人先读 §16 与 §17**：§16 是 M1 的实际交付清单与实测结论（与本手册初稿
+> 不同的地方已就地改写），§17 是 M2 的交付清单、三条验收的落点、以及在实施中修掉的五个
+> 既有缺陷 —— 其中三个会直接毁数据，M3 起的人务必先看一遍。
 
 ---
 
@@ -1294,12 +1295,11 @@ if !linkfs::is_link(path) { return share_not_linked(); }
 if !lib.owns_target(path) { return share_foreign_link(); }
 ```
 
-**M2 需要自己补的两件事**（本轮刻意没做，避免与 P2 的实现选择打架）：
+**M2 当时需要自己补的两件事**（都已在 §17 完成）：
 
-- `store.transaction` 目前从环境变量 `AK_LINK_METHOD`（`symlink|junction|hardlink`）读链接方式偏好；
-  P2 应改成由 `enable_asset` 的 input 传入，落到 `Op::link_dir` 的第三个参数上（现在是 `None` = 自动）。
-- `.trash/` 的**写入**（`remove_from_library`）还没实现；清理侧（`settings::remove_expired_trash`）
-  已经在了，并且有 `trashDays` 设置。写的时候注意：`fs::rename` 同卷优先，跨卷回退 `copy_dir + rmrf`。
+- 链接方式偏好原来从环境变量 `AK_LINK_METHOD` 读 —— 现在由 `Op::prefer` 随 op 传入，
+  `Keeper::enable_asset` 从设置里的 `linkMethod` 解析后落到 `Op::link_dir_with`（见 §17.3）。
+- `.trash/` 的写入（`remove_from_library`）—— 已实现，见 §17.4。
 
 ### 16.7 给下一位的三条提醒
 
@@ -1310,3 +1310,174 @@ if !lib.owns_target(path) { return share_foreign_link(); }
    新增的「同一物理对象」判断不要再写第三份。
 3. **不要用 `std::fs::remove_dir` 删任何可能是 junction 的路径**。`rmrf` 已经守住了这条，
    但测试脚手架（`common::cleanup`）走的就是 `rmrf`，所以新增夹具也别绕过它。
+
+---
+
+## 17. M2 实施记录（2026-11-02，已完成）
+
+M2 = §4（Skills 共享）+ §10 的 P2。**只做 M2**：MCP / 规则 / UI / CLI 一概没碰。
+下面每一步都能用命令复现。
+
+### 17.1 交付清单
+
+| 文件 | 改动 | 说明 |
+|---|---|---|
+| `tauri-shell/core/src/sharing.rs` | **新增 ~670 行** | `Verdict` / `FileDiff` / `CopyNode` / `ConvergeGroup` / `ConvergePlan` / `TreeDigest`、`digest_dir`（逐文件流式 SHA-256）、`diff_trees`、`plan_converge`、`skill_dirs_of`；9 条单测 |
+| `tauri-shell/core/src/keeper.rs` | +≈400 | `library()`、`enable_asset`、`disable_asset`、`remove_from_library`、`record_link`、`library_asset_dir`、`link_prefer` |
+| `tauri-shell/core/src/scan.rs` | +≈35 | `scan_skills` 的 `meta.link`（`skill_link_meta`）；**id 不变** |
+| `tauri-shell/core/src/library.rs` | +≈45 / −12 | `pub fn is_under`（「这条路径是否在库下」）；**`normalize` 改成纯词法**（见 §17.2 第 1 条）；`owns_target` 改为「看链接指向」 |
+| `tauri-shell/core/src/store.rs` | +≈40 / −15 | `Op::prefer` + `Op::link_dir_with` / `Op::link_file_with`；`parse_link_method`（取代 `AK_LINK_METHOD`）；`Op::delete` 对链接走 `linkfs::unlink` |
+| `tauri-shell/core/src/lib.rs` | +1 | `pub mod sharing;`（字母序） |
+| `src/renderer/engine-zh.js` | +≈20 | `CODE_ZH` 增 `link.ledgerDrift`、`share.notLinked`、`share.foreignLink`、`share.unknownAsset`、`share.unsupportedKind`、`rule.shareUnsupported`；`PATTERNS` 增 4 条 |
+| `tauri-shell/src-tauri/tests/sharing.rs` | **新增 ~600 行** | 9 条集成用例，覆盖 §4.4 三条验收 + 三道安全闸 + 事务原子性 |
+| `tauri-shell/src-tauri/tests/write_path.rs` | +1 | `Op` 字面量补 `prefer: None`（结构体加了字段） |
+| `tauri-shell/src-tauri/tests/common/mod.rs` | 1 行 | `MAIN_SEPARATOR_STR`（新测试目标把这个既有 clippy 警告暴露出来，顺手清零） |
+| `changelog/next.json` | +1 条 | `feat：共享资产 M2：Skills 收敛…` |
+
+**没有做的事**（留给后面的阶段，不要以为漏了）：`list_library` / `plan_converge` /
+`apply_converge` 等 8 个 Tauri 命令与桥接（M6/P5）、`doctor` 的 7 类 finding（M5/P5）、
+MCP 物化（M3）、`compose`（M4）、`ak-scan --shared` 与 5 个 MCP 工具（M7/P6）、
+`library_migrate`（P6）、共享页视图（M6）。`enable_asset` / `disable_asset` /
+`remove_from_library` **已经可以从外部调用**，M6 只需要把命令与桥接照 §8.2 加上去。
+
+### 17.2 实施中修掉的五个既有缺陷（都在 M2 的写入路径上，属「必须清零」）
+
+1. **`library::normalize` 跟随链接，把五条链接折叠成一条**（最隐蔽的一个）。
+   它原来用 `fs::canonicalize` 归一；而 agent 侧每一条链接都指回库内主副本，于是
+   五条 `dst` 全部归一成同一个键 —— `Ledger::upsert` 认为它们是同一条，最后一次
+   登记覆盖前面所有，台账永远只剩一条。同一个原因还让 `links_to(src)` 把每一条
+   链向那个主副本的链接都算成 `src` 命中。
+   **修法**：`normalize` 改成纯词法（去掉长路径前缀、折叠 `.`/`..`、抹平重复与末尾
+   分隔符、小写，UNC 前缀保留），**绝不 `canonicalize`**。回归测试：
+   `library::tests::two_links_to_one_target_stay_two_entries`。
+   ⚠️ **不要把它改回去**：链接的身份是它自己的路径，不是它现在指向哪里；
+   「是不是同一个物理对象」是 `linkfs::same_target` 的事，两者正好相反。
+2. **`Op::delete` 在目录符号链接上报 Access denied**。`Delete` 分支原本对「非目录」
+   一律 `remove_file`，而**目录符号链接**上 `RemoveDirectoryW` 能成功、`remove_file`
+   要求 `FILE_ATTRIBUTE_DIRECTORY`（§3.3 的实测表里有一条，但当时的 `Delete` 没照办）。
+   于是一次停用会让整个事务失败。**修法**：链接一律走 `linkfs::unlink`
+   （它对目录 symlink / 文件 symlink / junction 三种都试）。
+3. **`enable_asset` 的 op 顺序**：正确顺序是 **搬进库 → 删旧位置 → 建链接**。
+   §4.2 写的是「mkdir → delete → linkDir」，那是**主副本已经在库里**的情形；一旦来源
+   就是 agent 侧那个目录，先 `delete` 会让随后的 `copyDir` 无源可读
+   （`copy source missing`）。两条前置条件撞在一起时，只有「先拷贝」同时满足。
+4. **`remove_from_library` 必须先读链接清单再搬主副本**。台账按 `src` 索引，而
+   `normalize` 对不存在的路径原样保留 —— 主副本一旦移进 `.trash`，原路径上的
+   `links_to` 就一条也找不到，函数会「成功」地把库内目录搬走却留下五条悬空链接。
+5. **扫描报出来的 `dir` 混着 `/`**（agent 的 home token 用 `/` 拼，例如
+   `…\home/.claude/skills/pdf`）。`Op::copy_dir` 的前置校验用 `Path::is_dir()`，在
+   Windows 上对这类路径并不总成立。`enable_asset` 现在统一 `native_str` 之后再进事务。
+
+### 17.3 链接方式偏好：从环境变量改成随 op 传
+
+`store.transaction` 原来从 `AK_LINK_METHOD` 读「用户偏好」。那是进程级全局量：同一次
+会话里两个不同的选择会互相覆盖，而且 `core` 不该去读环境变量。现在是 `Op::prefer`：
+
+```rust
+ops.push(Op::link_dir_with(&dst, &keeper, prefer));            // prefer 来自设置里的 linkMethod
+let prefer = store::parse_link_method(&settings["linkMethod"]); // "auto"（及未知值）→ None
+```
+
+`auto` 仍然是 `None` = 按能力顺序自动挑；给了值就只试那一种，建不出来 →
+`store.linkFailed`，**不会悄悄换一种**（语义变化是用户看不见的）。
+
+### 17.4 `.trash` 与审计
+
+`remove_from_library(kind, name)`：
+
+1. 先从台账读出指向它的链接清单（见 §17.2 第 4 条）；
+2. `fs::rename(主副本 → <store>/.trash/<kind>/<slug>-<YYYYMMDDTHHMMSS>/)`，
+   跨卷失败则 `copy_dir + rmrf`；
+3. 每条链接触发一次 `linkfs::unlink`，**先过三道闸**：不是链接 → 不动；指向库外 → 不动；
+4. 每一步各记一行 `audit.jsonl`（`library.trash` / `library.unlink`）；
+5. 最后落台账。返回 `{ ok, trashed, removed[], failed[], ledgerWarning }` ——
+   `failed[]` 非空时该条链接**原样留着**，因为一个删不掉的链接比一条假的「已删」好查。
+
+清理侧（`settings::remove_expired_trash` + `trashDays`）M1 就做好了，这里不重复。
+
+### 17.5 收敛口径（`plan_converge`）的实现细节
+
+1. **哈希逐文件流式**（64 KiB 一块），不 `read` 整份；摘要 = 排序后的
+   「相对路径 + 种类 + 文件 sha256」逐行再 SHA-256 一次。
+2. **排除构建树不另抄一份清单**：直接走 `store::list_files`，它已经跳过 `SKIP_DIRS`、
+   按 canonicalize 去环。所以 `store.rs` 里不需要多一个 `pub(crate)` 访问器。
+3. **`kind` 不同一律算 `Diverged`**（`FileDiff.state = "kind"`）：一个文件与一条指向
+   同内容的链接，按内容比是「相同」，收敛成链接之后语义已经变了。
+4. **有文件读不出来**（权限、占用、悬空链接）→ 整组按 `Diverged` 处理、差异清单留空
+   ——「读不全」不等于「相同」，这里不能猜。
+5. 库内已有的主副本会作为一组的第一份参与比较，所以「库里已有一份、agent 侧还有真实
+   副本」也能收敛；已经是「一份真实 + 若干链接」的组**不再出现**在方案里
+   （那是 `doctor` 的纳管问题，不是收敛问题）。
+6. 同一个 slug 的副本按**物理路径**去重，所以全局链接 + 项目链接指向同一个库内目录时
+   不会被算成「两份」。
+
+### 17.6 M2 验收三条（落点与怎么跑）
+
+```powershell
+cd tauri-shell
+cargo test -p agentkeeper-core --lib sharing          # 9 passed
+cargo test -p agentkeeper-core --lib library          # 10 passed（含台账回归）
+cargo test -p agentkeeper-shell --test sharing        # 9 passed
+```
+
+| # | §4.4 验收 | 测试 | 结果 |
+|---|---|---|---|
+| 1 | 5 个 agent × 同名同内容 → 库内 1 份 + 5 条链接，`audit.jsonl` 有记录，改库内正文五处同时生效 | `five_identical_skills_converge_into_one_library_copy` | ✅ 五条 `dst` 都 `same_target(keeper)`；台账 5 条；改 `SKILL.md` 后五处都读到 `NEW BODY` |
+| 2 | 内容不同的一组 → 置灰，`plan_converge` 返回 `Diverged` 并列出差异文件名 | `diverged_skills_are_reported_with_diff_file_names` | ✅ `actionable() == 0`，`FileDiff{rel:"SKILL.md", state:"different"}`，且**零写入**（库目录都没建） |
+| 3 | 停用只删链接 / 删库入 `.trash` | `disabling_removes_only_the_link_and_keeps_the_library_copy`、`removing_from_the_library_moves_it_to_the_trash_and_unlinks_every_agent` | ✅ 主副本逐字节不动；`.trash\skills\pdf-<ts>\` 里有 `SKILL.md`；链接全删；审计含 `library.trash` / `library.unlink` |
+| + | 三道安全闸（不是链接 / 指向库外） | `disabling_refuses_paths_that_are_not_managed_links` | ✅ `share.notLinked` / `share.foreignLink`，两处磁盘状态都不动 |
+| + | 事务原子性：库内 `skills` 被占成文件 → 启用失败但来源原样 | `a_failed_enable_leaves_the_source_untouched` | ✅ 来源仍是真实目录，文件清单与事务前一致 |
+
+### 17.7 一个必须知道的扫描器行为（收敛之后「资产条数」怎么数）
+
+收敛之后**再扫**，`assets` 里那条 skill 只剩 **1 条**，不是 5 条。
+原因是既有的 `scan::dedupe_by_physical_path`（`scan.rs:1347`）按 `canonicalize` 后的
+物理路径去重 —— 收敛完成后五个位置就是同一个物理目录，其余四个 agent 记在
+`meta.alsoSeen` 里。
+
+这是**既有口径**，不是本次改动引入的，也不是 bug：同一份物理内容在资产表里本来就只
+出现一次（去重之前就是这样，只是那时它们真的是 5 份拷贝）。§7.1 说的「收敛后资产条数
+不涨」指的正是这一点。**P5 的 `sameInode` 只影响 `effective` 视图（跨 scope 的链接），
+不要去动 `dedupe_by_physical_path`** —— 改了会连带改变所有现有资产表的计数。
+
+### 17.8 全量门禁（本轮最后一次运行）
+
+```text
+cargo test --workspace                  380 passed / 0 failed   （基线 361 → +19：core +10、sharing +9）
+cargo clippy --workspace --all-targets  无新增 warning（逐 target 均 ≤ 基线 25 / 2 / 29 / 5 / 5 / 2）
+node scripts/check.js                   all 8 gates passed
+node scripts/ui-audit.js                total findings: 0
+node scripts/tauri-i18n.js              MISS 0 / CODE-MISS 0 / AMBIGUOUS 0
+node scripts/test-affected.js           all selected targets passed
+node scripts/comment-lang.js            英文注释 13 行（sharing.rs 0 行），中文覆盖率 99.8%
+node scripts/changelog.js check         ok（26 entries）
+```
+
+### 17.9 M3 可以直接接手的接口
+
+```rust
+// 1) 已经在 M2 落地的三个写入口（M6/P6 只需要加命令与桥接，见 §8.2）
+keeper.enable_asset(&json!({ "assetId", "agentId", "scope", "projectId" }));  // → 事务结果
+keeper.disable_asset(&json!({ "name", "kind", "agentId", "scope" }));         // → 事务结果
+keeper.remove_from_library("skill", "pdf");                                  // → { ok, trashed, … }
+
+// 2) 收敛方案（只读，M7 的 converge_plan 工具直接复用）
+let lib = keeper.library();                       // 现算，跟随 libraryRoot 设置
+let cap = lib.capability(store_root);             // 探测落 <store>/probe
+let plan = sharing::plan_converge(&assets, &lib, &cap);
+plan.to_json();                                   // { groups[], savedBytes }
+plan.actionable();                                // 可一键收敛的组数
+
+// 3) 链接方式偏好（M3 写文件链接时同样用它）
+store::Op::link_file_with(&dst, &src, Some(LinkMethod::Symlink));
+```
+
+**给 M3 的三条提醒**：
+
+1. `enable_asset` 目前只认 **skill**：`rule` / `memory` 返回 `rule.shareUnsupported`，
+   其它 kind 返回 `share.unsupportedKind`。M3 加 MCP 时要么扩这个分支，要么走
+   `materialize_mcp`（§5.3），**不要在 `enable_asset` 里塞第二种语义**。
+2. `remove_from_library` 读不出台账时会**拒绝**（返回 `link.ledgerDrift`），因为它无法
+   确认哪些链接指向这条主副本。别把它改成「尽力而为」，那会留下悬空链接。
+3. `.trash` 的目录名是 `<slug>-<YYYYMMDDTHHMMSS>`，排序即时间序；`trashDays` 的清理
+   在 `settings::ensure_store` 里，启动时尽力而为、不阻塞。

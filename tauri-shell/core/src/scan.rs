@@ -37,6 +37,7 @@ use rayon::prelude::*;
 use super::adapters::{resolve_home, Agent, AGENTS, SHARED_SKILLS_DIR};
 use super::frontmatter;
 use super::jsonc::strip_json_comments;
+use super::linkfs;
 use super::model::*;
 
 const SKILL_MANIFEST: &str = "SKILL.md";
@@ -254,6 +255,41 @@ impl Ctx {
 /* skills（技能）                                                        */
 /* ------------------------------------------------------------------ */
 
+/// 一个 skill 目录的链接标注：`null` 表示它不是链接（绝大多数资产）。
+///
+/// 判据走 `linkfs::entry_link_kind` 而不是 `file_type().is_symlink()`：junction 在
+/// 目录枚举层的 `is_dir()` 是 false，只看 `file_type()` 会把我们建的链接当成普通
+/// 目录（§11.5）。
+///
+/// 这里**只报事实**：方式、目标、以及目标是不是一个 `/skills/<slug>` 形态的库内
+/// 位置。台账是否登记过不在这里判 —— 扫描是只读的，而「这条链接归不归我们管」是
+/// `Library::owns_target` 加台账的事（`doctor` 负责）。
+///
+/// **不参与 `model::asset_id`**：id 只由 `dir` 决定，所以把真实目录换成链接之后
+/// 同一份资产的 id 不变，收敛前后的资产条数才对得上（§7.1）。
+fn skill_link_meta(dir: &Path) -> Value {
+    let Some(method) = linkfs::entry_link_kind(dir) else {
+        return Value::Null;
+    };
+    let target = linkfs::read_target(dir);
+    // `<library>/skills/<slug>`：目标自己就长成库内主副本的样子。
+    let managed = target
+        .as_ref()
+        .map(|t| {
+            let parent = t.parent();
+            parent
+                .and_then(|p| p.file_name())
+                .map(|name| name.eq_ignore_ascii_case("skills"))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    json!({
+        "method": method.as_str(),
+        "src": target.map(|p| norm_str(&p)),
+        "managed": managed,
+    })
+}
+
 fn scan_skills(root_dir: &Path, ctx: &Ctx) -> Vec<Value> {
     let mut out = Vec::new();
     if !exists_dir(root_dir) {
@@ -338,7 +374,14 @@ fn scan_skills(root_dir: &Path, ctx: &Ctx) -> Vec<Value> {
                 "author": or_null(&fm.data, "author"),
                 "license": or_null(&fm.data, "license"),
                 "allowedTools": or_null(&fm.data, "allowed-tools"),
-                "bodyLines": fm.body.split('\n').count()
+                "bodyLines": fm.body.split('\n').count(),
+                // 这一条本身是不是链接（`null` = 绝大多数资产，不是链接）。
+                //
+                // 判据走 `linkfs::entry_link_kind` 而不是 `file_type().is_symlink()`：
+                // junction 在目录枚举层的 `is_dir()` 是 false，只看 `file_type()` 会把
+                // 我们建的链接当成普通目录（§11.5）。`managed` 只说明「指向库内」，
+                // 台账是否登记过要等 `doctor` 去对 —— 扫描是只读的，不该读台账。
+                "link": skill_link_meta(&skill_dir),
             }),
             description,
             tags: tags_of(&fm.data),

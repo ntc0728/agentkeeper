@@ -63,7 +63,7 @@ pub fn dir_snapshot(dir: &str) -> String {
         .iter()
         .map(|rel| {
             let full =
-                Path::new(dir).join(rel.replace('/', &std::path::MAIN_SEPARATOR.to_string()));
+                Path::new(dir).join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
             format!(
                 "{}#{}",
                 rel,

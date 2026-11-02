@@ -236,6 +236,11 @@ const EXACT = {
  * 以 `${...}` 归一化为 §n 后，与引擎源码逐条比对。
  */
 const PATTERNS = [
+  // 共享层（M2）：启用/停用时「这次什么都没做」的两种正常状态，以及两条逐条失败原因。
+  ['^already linked$', '该位置已是指向共享库的链接'],
+  ['^already in the library$', '该位置就是共享库内的主副本，无需建立链接'],
+  ['^this path is no longer a link$', '该位置已不再是链接'],
+  ['^this link points outside the library$', '该链接指向共享库之外'],
   ['^op[§1] is missing an "op" field$', 'op[§1] 缺少 "op" 字段'],
   ['^unknown op §1$', '未知操作：§1'],
   ['^scan payload is not cloneable: §1$', '扫描结果无法克隆：§1'],
@@ -411,6 +416,18 @@ const CODE_ZH = {
   // 前者要用户先停用/删掉那份副本，后者要先恢复库内主副本，两者都不该被说成
   // 「路径写不进去」。§1 由 `zhCode` 的第二个参数（路径）填充。
   'store.linkFailed': '未能建立链接（§1）。目标位置可能已被真实文件或目录占用，或来源已被删除；请先停用该位置上的副本后重试',
+  // 共享层（M2）：把库内资产启用到 agent、或把 agent 侧的位置停用时的四种拒绝。
+  // 每一种的修法都不一样，所以不能合成一句「操作失败」：
+  //   notLinked       —— 那个位置是用户自己的真实目录，不是我们建的链接
+  //   foreignLink     —— 是链接，但指向库外，删它会动到别人的目录
+  //   unknownAsset    —— 名字/assetId 在扫描结果与库里都找不到
+  //   unsupportedKind —— 本期只做 skill 共享
+  'share.notLinked': '「§1」不是由共享库建立的链接，而是真实目录或文件；为安全起见不会自动删除',
+  'share.foreignLink': '「§1」指向共享库之外，删除它会动到你自己的目录，已拒绝',
+  'share.unknownAsset': '在共享库与扫描结果里都没有找到这个资产',
+  'share.unsupportedKind': '当前版本只支持共享 skill 类资产',
+  'rule.shareUnsupported': '规则的共享将在后续版本提供；当前版本只支持 skill',
+  'link.ledgerDrift': '链接台账与磁盘上的实际情况不一致；请让健康检查以磁盘为准重建台账',
   'store.corruptTransaction': '事务记录已损坏',
   'store.opFieldMissing': '第 §1 项操作缺少 op 字段',
   'store.opPathMissing': '第 §1 项操作（§2）缺少 path 字段',

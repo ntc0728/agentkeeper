@@ -100,6 +100,10 @@
     {
       "kind": "feat",
       "text": "共享资产 M1：链接内核（linkfs / library 台账 / 事务新增 linkDir·linkFile 两种操作，失败还原保持链接种类）"
+    },
+    {
+      "kind": "feat",
+      "text": "共享资产 M2：Skills 收敛（同名同内容的多份 skill 收敛为库内一份 + 各处链接，内容不一致的只报告差异不动盘；启用/停用与从库删除，删除进回收站）"
     }
   ]
 }

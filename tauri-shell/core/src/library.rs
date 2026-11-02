@@ -167,14 +167,11 @@ impl Library {
     /// `disable_asset` 的安全闸与 `link.unmanaged` 的判定共用这一个函数：一个链接
     /// 指向库外时，删掉它会动到用户自己的目录，那是本功能绝不做的事。
     pub fn owns_target(&self, p: &Path) -> bool {
-        let root = normalize(&self.root);
-        for candidate in [p.to_path_buf(), linkfs::read_target(p).unwrap_or_default()] {
-            let s = normalize(&candidate);
-            if !s.is_empty() && (s == root || s.starts_with(&format!("{}\\", root))) {
-                return true;
-            }
-        }
-        false
+        // 链接看指向（`read_target` 不跟随、只读重解析点），真实路径看自身。
+        // 不能把两者都丢进 `normalize` 比较：`normalize` 现在不跟随链接，而这里
+        // 恰恰需要「这条链接指向哪里」。
+        let target = linkfs::read_target(p).unwrap_or_default();
+        is_under(&target, &self.root) || is_under(p, &self.root)
     }
 
     /// `p` 是否是库内某个 skill 的主副本目录（`<root>/skills/<slug>` 或更深）。
@@ -216,18 +213,63 @@ fn expand_home(raw: &str, user_home: &str) -> PathBuf {
     }
 }
 
-/// 比较用的小写化绝对路径（`\\?\` 前缀已去掉、末尾分隔符已抹平）。
+/// 比较用的小写化路径：**只做词法归一，绝不跟随链接**。
+///
+/// 跟随链接（`canonicalize`）在这里是一个数据错误：agent 侧每一条链接都指回库内
+/// 主副本，用 canonicalize 归一后它们**全部坍缩成同一个键**，`Ledger::upsert` 的
+/// 去重就会把五条链接当成同一条，最后只剩最后一条。同样地，`links_to(src)` 会
+/// 「找到」每一条链向那个主副本的链接。链接的身份是它**自己的路径**，不是它现在
+/// 指向哪里 —— 这一条与 `linkfs::same_target`（判断「是不是同一个物理对象」，
+/// 必须跟随）正好相反，两者不能互相替代。
+///
+/// 规则：反斜杠统一、去掉 `\\?\` 前缀、抹平 `.` / `..` 与重复分隔符、去尾分隔符、
+/// 小写。`..` 只在能抵掉一个普通段时才折叠，UNC 的 `\\server\share` 前缀原样保留。
 fn normalize(p: &Path) -> String {
-    let abs = match std::fs::canonicalize(p) {
-        Ok(c) => c,
-        Err(_) => p.to_path_buf(),
-    };
-    let mut s = store::native_str(&abs);
-    if let Some(rest) = s.strip_prefix(r"\\?\") {
-        s = rest.to_string();
+    let raw = store::native_str(p);
+    let raw = raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_string();
+    let (prefix, rest) = split_unc(&raw);
+    let mut out: Vec<&str> = Vec::new();
+    for seg in rest.split('\\').filter(|s| !s.is_empty() && *s != ".") {
+        if seg == ".." {
+            if out.last().map(|s| *s != "..").unwrap_or(false) {
+                out.pop();
+            }
+        } else {
+            out.push(seg);
+        }
     }
-    let s = s.trim_end_matches('\\').to_lowercase();
-    s
+    let joined = if prefix.is_empty() {
+        out.join("\\")
+    } else {
+        format!("{}{}", prefix, out.join("\\"))
+    };
+    joined.trim_end_matches('\\').to_lowercase()
+}
+
+/// 把 `\\server\share\...` 切成（`\\server\share\`，其余）。
+fn split_unc(raw: &str) -> (String, String) {
+    if let Some(rest) = raw.strip_prefix(r"\\") {
+        let mut it = rest.splitn(3, '\\');
+        let server = it.next().unwrap_or_default();
+        let share = it.next().unwrap_or_default();
+        let tail = it.next().unwrap_or_default();
+        return (format!(r"\\{}\{}\", server, share), tail.to_string());
+    }
+    (String::new(), raw.to_string())
+}
+
+/// `p` 的**字面路径**是否落在 `root` 之下（含相等，词法归一、不跟随链接）。
+///
+/// 「目标是否在库内」要看链接的指向，那是 [`Library::owns_target`]；这里只用来看
+/// 「这条路径本身是不是库里的东西」。两者共用同一份 `normalize`，所以不会出现
+/// 「安全闸说在库内、扫描说不在」的分歧。
+pub fn is_under(p: &Path, root: &Path) -> bool {
+    let r = normalize(root);
+    if r.is_empty() {
+        return false;
+    }
+    let s = normalize(p);
+    s == r || s.starts_with(&format!("{}\\", r))
 }
 
 /* ------------------------------------------------------------------ */
@@ -505,6 +547,40 @@ mod tests {
         )
         .expect("seed");
         assert!(lib.load_ledger().is_err(), "guessing a method would make doctor repair the wrong way");
+        store::rmrf(&root);
+    }
+
+    /// 两条**指向同一目标**的链接是台账里的两条，不是一条。
+    ///
+    /// 这是 M2 收敛时踩到的问题：`normalize` 曾经用 `canonicalize` 归一，于是每条
+    /// agent 侧链接的键都变成库内主副本的路径，五条链接被 `upsert` 折叠成一条。
+    #[test]
+    fn two_links_to_one_target_stay_two_entries() {
+        let root = temp("two-links");
+        let lib = Library::at(&root);
+        let keeper = root.join("skills").join("pdf");
+        std::fs::create_dir_all(&keeper).expect("keeper");
+        std::fs::write(keeper.join("SKILL.md"), "x").expect("file");
+        let mut l = lib.load_ledger().expect("empty");
+        for agent in ["a", "b"] {
+            let dst = root.join(agent).join("skills").join("pdf");
+            std::fs::create_dir_all(dst.parent().unwrap()).expect("dir");
+            crate::linkfs::create_dir_link(&keeper, &dst, None).expect("link");
+            lib.record(
+                &mut l,
+                LinkEntry::new(
+                    "skill",
+                    "pdf",
+                    &store::native_str(&keeper),
+                    &store::native_str(&dst),
+                    LinkMethod::Symlink,
+                ),
+            );
+        }
+        assert_eq!(l.entries.len(), 2, "links are identified by their own path");
+        assert_eq!(l.links_to(&store::native_str(&keeper)).len(), 2);
+        lib.save_ledger(&l).expect("save");
+        assert_eq!(lib.load_ledger().expect("reload").entries.len(), 2);
         store::rmrf(&root);
     }
 

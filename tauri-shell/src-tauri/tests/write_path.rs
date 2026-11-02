@@ -139,6 +139,7 @@ fn malformed_op_is_rejected_not_crashed() {
         content: None,
         patch: None,
         mutate: None,
+        prefer: None,
     };
     let bad = store.transaction(std::slice::from_ref(&op), &json!({ "kind": "rule" }));
     assert_eq!(bad["ok"], json!(false), "{}", bad);

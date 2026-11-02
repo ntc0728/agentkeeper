@@ -22,6 +22,7 @@ pub mod registry;
 pub mod scan;
 pub mod security;
 pub mod settings;
+pub mod sharing;
 pub mod store;
 pub mod toml_splice;
 pub mod update;
