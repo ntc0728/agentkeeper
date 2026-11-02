@@ -140,6 +140,17 @@ const AREAS = [
       { pkg: 'agentkeeper-core', args: ['--lib'] },
       { pkg: 'agentkeeper-shell', args: ['--test', 'contract'] },
       { pkg: 'agentkeeper-shell', args: ['--test', 'boundary'] },
+      { pkg: 'agentkeeper-shell', args: ['--test', 'doctor'] },
+    ],
+  },
+  {
+    name: 'doctor',
+    // 健康检查只读，但它的验收走完整扫描 + 真实事务，所以 core 单测与
+    // `--test doctor` 都要跑；`sharing.rs` 的漂移是 M3 的，这里不重复。
+    match: (f) => /tauri-shell\/core\/src\/doctor\.rs$/.test(f),
+    tests: [
+      { pkg: 'agentkeeper-core', args: ['--lib'] },
+      { pkg: 'agentkeeper-shell', args: ['--test', 'doctor'] },
     ],
   },
   {
@@ -170,6 +181,7 @@ const ALL_TESTS = [
   { pkg: 'agentkeeper-shell', args: ['--test', 'update'] },
   { pkg: 'agentkeeper-shell', args: ['--test', 'boundary'] },
   { pkg: 'agentkeeper-shell', args: ['--test', 'write_path'] },
+  { pkg: 'agentkeeper-shell', args: ['--test', 'doctor'] },
 ];
 
 /* ------------------------------------------------------------- 改动的文件 */

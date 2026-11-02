@@ -1391,8 +1391,14 @@ fn dedupe_by_physical_path(assets: Vec<Value>) -> Vec<Value> {
                     .to_lowercase()
             )
         } else {
+            // `kind` 必须参与键：同一个文件可以被一个 agent 同时声明为规则与
+            // 记忆（`claude-code` 的 `CLAUDE.md`、`codex` 的 `AGENTS.md` 都是），
+            // 那是两条不同类别的资产。只按物理路径拼键会把后一条折进前一条的
+            // `alsoSeen`，而 `alsoSeen` 只记 `agentId` / `rel`、不记类别 ——
+            // 于是记忆面板里那一条直接消失，计数也少一份。
             format!(
-                "file:{}",
+                "{}:file:{}",
+                kind,
                 physical(&primary, &mut real_cache)
                     .replace('\\', "/")
                     .to_lowercase()
@@ -1433,7 +1439,7 @@ fn compute_effective(assets: &[Value]) -> Vec<Value> {
         if let Value::Object(m) = &mut cloned {
             m.insert(
                 "effective".to_string(),
-                json!({"shadowedBy": [], "overrides": [], "live": true}),
+                json!({"shadowedBy": [], "overrides": [], "live": true, "sameInode": false}),
             );
         }
         if !map.contains_key(&id) {
@@ -1454,6 +1460,39 @@ fn compute_effective(assets: &[Value]) -> Vec<Value> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string()
+    }
+    /// 资产的物理路径键：canonicalize + 小写 + 去 `\\?\` 前缀。
+    ///
+    /// `sameInode` 判的是「这两条是不是同一个物理对象」，所以这里**必须跟随
+    /// 链接**；与 `library::normalize`（链接的身份是它自己的路径，绝不跟随）
+    /// 正好相反，两者不能互相替代。
+    fn physical_of(map: &HashMap<String, Value>, id: &str) -> String {
+        let a = get(map, id);
+        let raw = str_field(a, "dir")
+            .or_else(|| str_field(a, "file"))
+            .unwrap_or_default();
+        if raw.is_empty() {
+            return String::new();
+        }
+        let resolved = fs::canonicalize(Path::new(&raw)).unwrap_or_else(|_| PathBuf::from(&raw));
+        let mut s = crate::store::native_str(&resolved);
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            s = rest.to_string();
+        }
+        s.to_lowercase()
+    }
+    fn same_physical(phys: &HashMap<String, String>, a: &str, b: &str) -> bool {
+        match (phys.get(a), phys.get(b)) {
+            (Some(x), Some(y)) => !x.is_empty() && x == y,
+            _ => false,
+        }
+    }
+    fn mark_same_inode(map: &mut HashMap<String, Value>, id: &str) {
+        if let Some(Value::Object(m)) = map.get_mut(id) {
+            if let Some(Value::Object(e)) = m.get_mut("effective") {
+                e.insert("sameInode".to_string(), Value::Bool(true));
+            }
+        }
     }
 
     // 按 `kind:slug(name)` 分组，保留首次出现的顺序。
@@ -1477,6 +1516,31 @@ fn compute_effective(assets: &[Value]) -> Vec<Value> {
         if ids.len() < 2 {
             continue;
         }
+        // 同一块物理内容在同一个 `kind:slug` 组里出现两次时（典型是全局链接与
+        // 项目链接指向同一个库内主副本），它们之间不存在「遮蔽」：给两边都打
+        // `sameInode: true`，并从 `shadowedBy` / `overrides` 里排除这一对。
+        // 打早了会让界面上出现一条永远不该被隐藏的资产（§7.2）。
+        let phys: HashMap<String, String> = ids
+            .iter()
+            .map(|id| (id.clone(), physical_of(&map, id)))
+            .collect();
+        let mut by_phys: HashMap<&str, Vec<&String>> = HashMap::new();
+        for id in &ids {
+            let p = phys.get(id).map(|s| s.as_str()).unwrap_or("");
+            if !p.is_empty() {
+                by_phys.entry(p).or_default().push(id);
+            }
+        }
+        let mut same_inode: HashSet<&String> = HashSet::new();
+        for list in by_phys.values() {
+            if list.len() > 1 {
+                same_inode.extend(list.iter().copied());
+            }
+        }
+        for id in &same_inode {
+            mark_same_inode(&mut map, id);
+        }
+
         let projects: Vec<String> = ids
             .iter()
             .filter(|id| scope_of(&map, id) == "project")
@@ -1492,14 +1556,14 @@ fn compute_effective(assets: &[Value]) -> Vec<Value> {
             let agent = agent_of(&map, g);
             let shadows: Vec<String> = projects
                 .iter()
-                .filter(|p| agent_of(&map, p) == agent)
+                .filter(|p| agent_of(&map, p) == agent && !same_physical(&phys, g, p))
                 .cloned()
                 .collect();
             if !shadows.is_empty() {
                 if let Some(Value::Object(m)) = map.get_mut(g) {
                     m.insert(
                         "effective".to_string(),
-                        json!({"shadowedBy": shadows, "overrides": [], "live": false}),
+                        json!({"shadowedBy": shadows, "overrides": [], "live": false, "sameInode": false}),
                     );
                 }
             }
@@ -1508,15 +1572,19 @@ fn compute_effective(assets: &[Value]) -> Vec<Value> {
             let agent = agent_of(&map, p);
             let overrides: Vec<String> = globals
                 .iter()
-                .filter(|g| agent_of(&map, g) == agent)
+                .filter(|g| agent_of(&map, g) == agent && !same_physical(&phys, g, p))
                 .cloned()
                 .collect();
             if let Some(Value::Object(m)) = map.get_mut(p) {
                 m.insert(
                     "effective".to_string(),
-                    json!({"shadowedBy": [], "overrides": overrides, "live": true}),
+                    json!({"shadowedBy": [], "overrides": overrides, "live": true, "sameInode": false}),
                 );
             }
+        }
+        // 遮蔽关系重写之后再把 `sameInode` 补回去（上面的插入是整块替换）。
+        for id in &same_inode {
+            mark_same_inode(&mut map, id);
         }
     }
 
@@ -1605,14 +1673,16 @@ fn or_null(data: &Value, key: &str) -> Value {
 }
 
 /// `stripHeavy` —— 渲染层永远看不到 `raw`，而 `effective` 被缩减为 UI 会读的
-/// 三个字段。原地完成：这要跑过约 1000 个带着数 MB 元数据的资产，而参考实现
-/// 那套对象展开正是这个实现想要避免的那种拷贝。
+/// 四个字段（`sameInode` 是 M5 加的：跨 scope 指向同一物理对象的链接不构成遮蔽，
+/// 界面要靠它把这一类排除出「被遮蔽」的计数）。原地完成：这要跑过约 1000 个带着
+/// 数 MB 元数据的资产，而参考实现那套对象展开正是这个实现想要避免的那种拷贝。
 fn shrink_effective(a: &mut Value) {
     let reduced = match a.get("effective") {
         Some(Value::Object(e)) => json!({
             "live": e.get("live").cloned().unwrap_or(json!(true)),
             "shadowedBy": e.get("shadowedBy").cloned().unwrap_or(json!([])),
-            "overrides": e.get("overrides").cloned().unwrap_or(json!([]))
+            "overrides": e.get("overrides").cloned().unwrap_or(json!([])),
+            "sameInode": e.get("sameInode").cloned().unwrap_or(json!(false))
         }),
         _ => Value::Null,
     };
@@ -1998,4 +2068,196 @@ pub fn read_projects(store_root: &str) -> Vec<Value> {
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default()
+}
+
+/* ------------------------------------------------------------------ */
+/* 测试                                                                */
+/* ------------------------------------------------------------------ */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store;
+
+    fn temp(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "ak-scan-{}-{}-{}",
+            tag,
+            std::process::id(),
+            nanos
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn asset(
+        kind: &str,
+        name: &str,
+        agent: &str,
+        scope: &str,
+        project: Option<&str>,
+        dir: &str,
+    ) -> Value {
+        let id = asset_id(kind, name, agent, scope, project, Some(dir));
+        json!({
+            "id": id,
+            "kind": kind,
+            "name": name,
+            "agentId": agent,
+            "scope": scope,
+            "projectId": project,
+            "dir": dir,
+            "file": format!("{}{}SKILL.md", dir, std::path::MAIN_SEPARATOR_STR),
+            "size": 1,
+            "issues": [],
+        })
+    }
+
+    fn effective_of<'a>(eff: &'a [Value], id: &str) -> &'a Value {
+        eff.iter()
+            .find(|a| a.get("id").and_then(Value::as_str) == Some(id))
+            .unwrap_or_else(|| panic!("no asset {}", id))
+            .get("effective")
+            .expect("effective")
+    }
+
+    #[test]
+    fn a_global_and_a_project_link_to_one_physical_dir_do_not_shadow_each_other() {
+        let root = temp("same-inode");
+        let real = root.join("skills").join("pdf");
+        std::fs::create_dir_all(&real).expect("skill dir");
+        // 同一个物理目录的另一种写法：`.\` 参与词法路径但被 canonicalize 抹平。
+        let spelled = root.join("skills").join(".").join("pdf");
+
+        let global = asset(
+            "skill",
+            "pdf",
+            "claude-code",
+            "global",
+            None,
+            &store::native_str(&real),
+        );
+        let project = asset(
+            "skill",
+            "pdf",
+            "claude-code",
+            "project",
+            Some("proj"),
+            &store::native_str(&spelled),
+        );
+        let gid = global["id"].as_str().expect("id").to_string();
+        let pid = project["id"].as_str().expect("id").to_string();
+        assert_ne!(gid, pid, "两条资产的 id 必须不同，否则测的不是同一组");
+        let eff = compute_effective(&[global, project]);
+
+        // 同一份东西之间不存在「遮蔽」：两边都 live，且都带 sameInode。
+        assert_eq!(effective_of(&eff, &gid)["live"], json!(true));
+        assert_eq!(effective_of(&eff, &gid)["sameInode"], json!(true));
+        assert_eq!(effective_of(&eff, &gid)["shadowedBy"], json!([]));
+        assert_eq!(effective_of(&eff, &pid)["sameInode"], json!(true));
+        assert_eq!(effective_of(&eff, &pid)["overrides"], json!([]));
+        assert_eq!(summarize(&eff)["shadowed"], json!(0));
+
+        crate::store::rmrf(&root);
+    }
+
+    #[test]
+    fn distinct_physical_dirs_still_shadow_and_are_not_same_inode() {
+        let root = temp("distinct-dirs");
+        let gdir = root.join("a").join("pdf");
+        let pdir = root.join("b").join("pdf");
+        std::fs::create_dir_all(&gdir).expect("global dir");
+        std::fs::create_dir_all(&pdir).expect("project dir");
+
+        let global = asset(
+            "skill",
+            "pdf",
+            "claude-code",
+            "global",
+            None,
+            &store::native_str(&gdir),
+        );
+        let project = asset(
+            "skill",
+            "pdf",
+            "claude-code",
+            "project",
+            Some("proj"),
+            &store::native_str(&pdir),
+        );
+        let gid = global["id"].as_str().expect("id").to_string();
+        let pid = project["id"].as_str().expect("id").to_string();
+        let eff = compute_effective(&[global, project]);
+
+        assert_eq!(effective_of(&eff, &gid)["live"], json!(false));
+        assert_eq!(effective_of(&eff, &gid)["shadowedBy"], json!([pid]));
+        assert_eq!(effective_of(&eff, &gid)["sameInode"], json!(false));
+        assert_eq!(effective_of(&eff, &pid)["overrides"], json!([gid]));
+        assert_eq!(effective_of(&eff, &pid)["sameInode"], json!(false));
+        assert_eq!(summarize(&eff)["shadowed"], json!(1));
+
+        crate::store::rmrf(&root);
+    }
+
+    #[test]
+    fn shrink_effective_keeps_same_inode() {
+        let mut a = json!({
+            "raw": "x",
+            "effective": {
+                "live": true,
+                "shadowedBy": [],
+                "overrides": [],
+                "sameInode": true,
+            },
+        });
+        shrink_effective(&mut a);
+        assert!(a.get("raw").is_none(), "raw 永远不到渲染层");
+        assert_eq!(a["effective"]["sameInode"], json!(true));
+        assert_eq!(a["effective"]["live"], json!(true));
+    }
+
+    #[test]
+    fn one_file_declared_as_both_rule_and_memory_stays_two_assets() {
+        let dir = temp("kind-key");
+        let file = store::native_str(&dir.join("AGENTS.md"));
+        let rule = json!({
+            "kind": "rule",
+            "id": "rule:agents",
+            "name": "agents",
+            "agentId": "codex",
+            "scope": "global",
+            "file": file,
+        });
+        let memory = json!({
+            "kind": "memory",
+            "id": "memory:agents",
+            "name": "agents",
+            "agentId": "codex",
+            "scope": "global",
+            "file": file,
+        });
+        // 一个文件被同时声明为规则与记忆（适配器表里 13 个 agent 是这种写法）：
+        // 两条类别不同的资产，不能被物理路径去重折成一条。
+        let out = dedupe_by_physical_path(vec![rule, memory]);
+        assert_eq!(out.len(), 2, "two kinds are two assets: {:?}", out);
+        let kinds: Vec<&str> = out
+            .iter()
+            .filter_map(|a| a["kind"].as_str())
+            .collect();
+        assert!(kinds.contains(&"rule") && kinds.contains(&"memory"), "{:?}", kinds);
+
+        // 同类别同物理路径仍然折叠 —— 这是去重的本职工作。
+        let again = dedupe_by_physical_path(vec![out[0].clone(), out[0].clone()]);
+        assert_eq!(again.len(), 1);
+        assert_eq!(
+            again[0]["meta"]["alsoSeen"].as_array().map(|a| a.len()),
+            Some(1)
+        );
+
+        crate::store::rmrf(&dir);
+    }
 }

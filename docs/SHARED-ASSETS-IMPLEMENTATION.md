@@ -14,15 +14,17 @@
 | 平台 | Windows 10/11 x64（仅此范围，不做 macOS/Linux） |
 | 基线 | 0.2.4，commit `24b32f4` |
 | 工期 | 14–17 个工作日（P0→P6，含测试；见 §11 的改动幅度） |
-| 当前状态 | **M1（P0+P1）、M2（P2）、M3（P3）、M4（P4）已完成并验收**（2026-11-02）；M5 起未开始。验收记录见 §16、§17、§18 与 §19 |
+| 当前状态 | **M1（P0+P1）、M2（P2）、M3（P3）、M4（P4）、M5（P5 的 Rust 侧）已完成并验收**（2026-11-02）；M6 起未开始。验收记录见 §16、§17、§18、§19 与 §20 |
 | 环境 | rustc/cargo 1.99.1 · tauri-cli 2.12.4 · MSVC 14.44 · SDK 10.0.26100 · Node 22.22.1 |
 
-> **本轮之后开工的人先读 §16–§19**：§16 是 M1 的实际交付清单与实测结论（与本手册初稿
+> **本轮之后开工的人先读 §16–§20**：§16 是 M1 的实际交付清单与实测结论（与本手册初稿
 > 不同的地方已就地改写），§17 是 M2 的交付清单、三条验收的落点、以及在实施中修掉的五个
 > 既有缺陷 —— 其中三个会直接毁数据，务必先看一遍；§18 是 M3（MCP 单一事实源）
 > 的交付清单、四条验收的落点，以及实施中修掉的一处 TOML 换行混写缺陷；§19 是 M4
 > （规则与记忆共享）的交付清单、四条验收的落点，以及实施中修掉的三个缺陷（其中两个
-> 会静默写坏内容）。
+> 会静默写坏内容）；§20 是 M5（扫描与健康度）的交付清单、七类 finding 的判据与三条
+> 验收的落点，以及实施中清零的一处既有缺陷 —— 扫描去重会把「同一个文件的规则与记忆」
+> 折成一条，记忆计数因此少一份。
 
 ---
 
@@ -721,7 +723,11 @@ pub fn is_foreign_edit(target: &str, slug: &str, last_generated: &str) -> bool;
 
 ---
 
-## 7. M5 · 扫描与健康度
+## 7. M5 · 扫描与健康度（**已完成，见 §20**）
+
+> 本节是实施前的规格；实际交付、七类 finding 的判据、三条验收的落点与实施中清零的
+> 缺陷见 **§20**。与本节不同的地方（finding 的 `fix` 取值、`sameInode` 的判定口径、
+> 以及 `asset.duplicated` 只覆盖 skill 目录）以 §20 为准。
 
 ### 7.1 扫描打标
 
@@ -791,6 +797,13 @@ mcp.drift, link.ledgerDrift
 > 为什么不能一次全加：`scripts/tauri-i18n.js` 只**扫源码里的 code 字面量**，多出来
 > 的 `CODE_ZH` 条目不算错，但会在 `engine-zh.js` 里堆一段没人用的词条；
 > 而**漏加**会直接 CODE-MISS 失败。所以按阶段加，每阶段跑一次 `node scripts/tauri-i18n.js`。
+>
+> **M5 实际结果**：P1/M2/M3 已经加掉了清单里适用的部分（`store.linkFailed`、
+> `share.*`、`rule.foreignEdit`、`mcp.drift`、`link.ledgerDrift`）；七类 finding 的 code
+> 不是 `zhCode` 错误码，而是给界面的**数据字段**，所以 `doctor.rs` 里用常量而不是
+> 字符串字面量，`CODE-MISS` 保持 0，`engine-zh.js` 本期不动。`link.methodUnavailable`
+> 与 `converge.diverged` / `converge.partial` 属于 M6 的写入路径（`apply_converge`
+> 等命令），到那时再按这条规则加。
 
 ### 7.4 M5 验收
 
@@ -1756,3 +1769,155 @@ core::sharing::scope_base(&home, "claude-code", "global", None); // Some("<home>
    判据是 `linkfs::link_kind(p) == Some(Hardlink)`，别用 `nlink`（它对普通文件也会命中）。
 3. 规则区块的 slug 来自**文件名**（`AGENTS.md` → `agents`）。M6 若要支持「同一个文件里放多个
    来源的区块」，slug 得带上来源前缀；在那之前一个文件只有一个受管区块。
+
+---
+
+## 20. M5 实施记录（2026-11-02，已完成）
+
+M5 = §7（扫描与健康度）+ §10 的 P5 的 **Rust 侧**。**只做 M5**：共享页界面、8 个 Tauri
+命令与桥接（M6）、5 个 MCP 工具 / `ak-scan --shared` / `library_migrate`（M7）一概没碰。
+本期 `src/renderer/` 一个字节都没动 —— `doctor` 只提供数据，文案与交互留给 M6。
+
+### 20.1 交付清单
+
+| 文件 | 改动 | 说明 |
+|---|---|---|
+| `tauri-shell/core/src/doctor.rs` | **新增 787 行**（含 3 条单测） | 七类 finding 的只读检测：`DoctorFinding` / `DoctorReport` / `diagnose` / `check_ledger` / `check_scan_links` / `check_duplicated_skills` / `check_mcp_drift`、`same_content`、`canonical_key`；code / severity / fix 都是常量 |
+| `tauri-shell/core/src/scan.rs` | +271 / −9 | `compute_effective` 增加 `sameInode`（跨 scope 指向同一物理对象的两条不算互相遮蔽）；`shrink_effective` 保留该字段（否则它到不了渲染层）；**去重键补类别**（§20.5 的既有缺陷）；4 条单测 |
+| `tauri-shell/core/src/lib.rs` | +1 | `pub mod doctor;`（按字母序，`discover` 之后） |
+| `tauri-shell/src-tauri/tests/doctor.rs` | **新增 382 行** | 4 条集成用例：§7.4 三条验收 + doctor 零写入 |
+| `tauri-shell/src-tauri/tests/contract.rs` | 1 处断言 | `effective` 的键清单加 `sameInode`（M5 起是四个键） |
+| `scripts/test-affected.js` | +12 | 新增 `doctor` 区域；`scan` 区域补跑 `--test doctor`；`ALL_TESTS` 补 `--test doctor` |
+| `changelog/next.json` | +1 条 | `feat：共享资产 M5 …`（28 → 29 条） |
+
+**没有做的事**（留给 M6/M7，不要以为漏了）：`shared_doctor` / `apply_finding_fix` 等 8 个
+Tauri 命令与 `tauri-bridge.js`（M6）、共享页 `view-shared.js` 与 i18n（M6）、
+`link.fragile` 的修复动作（只报告、不改盘）、5 个 MCP 工具（M7）、`ak-scan --shared`（P6）、
+`library_migrate`（P6）、frontmatter 合并（§6.3 明确不做）。
+
+### 20.2 七类 finding 的判定口径（实现按这张表）
+
+| code | 级别 | 判据 | fix | 数据来源 |
+|---|---|---|---|---|
+| `link.dangling` | critical | 链接的 `read_target` 有值、但目标 `!exists` | `relink` | 台账 `dst` ∪ 扫描资产 `meta.link` |
+| `link.unmanaged` | info | 链接目标存在、但不在库根下 | `adopt` | 扫描资产（skill 目录） |
+| `link.hijacked` | critical | 台账有记录，路径存在但**已不是链接**（被换成真实目录/文件） | `relink`（仅 `contentMatches` 时 `fixable`） | 台账 |
+| `link.fragile` | info | `linkfs::link_kind(p) == Some(Hardlink)` | —（只提示） | 台账 ∪ 扫描 |
+| `asset.duplicated` | info | 同一个 slug 有 ≥2 份**真实目录**且逐文件摘要相同（库内主副本也参与比较） | `converge` | 扫描资产 + `<root>/skills/*` |
+| `mcp.drift` | warn | `sharing::plan_drift` 的每一条（M3 已实现的只读口径） | 三选一，`fix: null` | 库内 MCP 记录 + agent 配置 |
+| `link.ledgerDrift` | warn | 台账与磁盘的其余不符：台账损坏 / 目标读不出 / 指向别处 / 路径消失 / 库内链接未登记 | `rebuild`（以磁盘为准重建） | 台账 ∪ 扫描 |
+
+几个容易写错的边界，实现里都单独处理了：
+
+1. **「被顶掉」与「台账漂移」的边界**：路径上还是链接 → 归 `link.ledgerDrift`
+   （`wrongTarget` / `unreadableTarget`）；路径上变成真实目录/文件 → `link.hijacked`；
+   路径上什么都没有 → `link.ledgerDrift`（`missingLink`）。三种修法完全不同，不能合成一条。
+2. **`copy` 条目直接跳过**：`mode == "copy"` / `method == Copy` 的受管副本本来就不是链接，
+   报成「被顶掉」是误报。
+3. **硬链接必须先接住**：硬链接没有可读目标，若先走 `read_target` 会变成
+   `unreadableTarget`；所以 `link_kind == Hardlink` 的判定排在 `read_target` 之前
+   （单测 `a_hardlinked_rule_is_reported_as_fragile_not_as_hijacked` 钉住）。
+4. **去重**：`Collector` 按 `(code, 小写 path)` 去重。台账与扫描两边都看见同一条链接时
+   只报一条，`code` 不同则各报各的。
+5. **只读契约**：`diagnose` 没有 `&Store` 形参、不探测链接能力（探测会往
+   `<store>/probe` 写文件）、不写审计/台账。单测
+   `a_corrupt_ledger_is_a_finding_and_the_file_is_left_alone` 与集成
+   `doctor_never_writes_anything`（整棵夹具树逐字节比对）钉住这条。
+6. **`sameInode` 不进 `shadowedBy`**：同一个 `kind:slug` 组里 `canonicalize` 相同的一对，
+   两边都打 `sameInode: true`，互相不算遮蔽/覆盖（§7.2）。`shrink_effective` 已把该字段
+   加进发给渲染层的四个键里 —— 漏掉它 `effective` 视图就永远读不到。
+
+### 20.3 §7.4 三条验收（逐条落地在哪、怎么跑）
+
+```powershell
+cd tauri-shell
+cargo test -p agentkeeper-core --lib doctor      # 3 passed
+cargo test -p agentkeeper-core --lib scan        # 4 passed（M5 新增 4 条）
+cargo test -p agentkeeper-shell --test doctor    # 4 passed
+```
+
+| # | §7.4 验收 | 测试 | 结果 |
+|---|---|---|---|
+| 1 | 手工把一个 junction 换成真实目录 → `link.hijacked` 出现，`fixable: true` | `replacing_a_managed_link_with_a_real_directory_is_reported_as_hijacked` | ✅ `contentMatches: true`、`fixable: true`、`fix: relink`；检查前后台账逐字节不变 |
+| 2 | 删除库内主副本 → 所有指向它的链接报 `link.dangling` | `deleting_the_library_copy_makes_every_link_dangle` | ✅ 3 条链接 → 3 条 critical dangling，`fix: relink`；`link.hijacked` 为 0（悬空链接没有被误判） |
+| 3 | 收敛 30 个 skill 前后，资产条数与「Curated + managed」计数按台账精确对上（且 30 个 id 不变） | `thirty_converged_skills_keep_their_ids_and_match_the_ledger` | ✅ 60 份 → 30 条资产（§17.7 的既有口径）；台账 60 条 = 扫描里 60 个受管位置；Curated + managed = 30；30 个 id 与收敛前逐条相同；收敛干净后 doctor 零 finding |
+| + | doctor 只读 | `doctor_never_writes_anything` | ✅ 审计文件与整棵夹具树逐字节不变 |
+| + | 台账损坏 / 硬链接 / 库外链接 | `doctor::tests` 三条单测 | ✅ 坏台账只报一条 `corruptLedger` 且不动文件；硬链接报 fragile 不报 hijacked；库外链接报 unmanaged 且不动它 |
+
+> 第 3 条里「台账精确对上」的口径：扫描资产是**去重后**的物理条数（同一份内容只出现一次，
+> 其余位置进 `meta.alsoSeen`），而台账是**每个 agent 侧一条链接**。所以断言分两半：
+> 受管位置（资产本身 + 非 `shared` 的 `alsoSeen`）= 台账条数；总位置 = 30 份库内主副本 +
+> 60 条链接。不要用「资产条数 = 台账条数」——那会把库内主副本也算成链接。
+
+### 20.4 全量门禁（本轮最后一次运行）
+
+```text
+cargo test --workspace                  459 passed / 0 failed   （基线 448 → +11：core +7、doctor +4）
+cargo clippy --workspace --all-targets  无新增 warning（25 / 2 / 29 / 4 / 5，与 §19.5 的基线逐 target 相同；doctor 与新的测试目标 0 条）
+node scripts/check.js                   all 8 gates passed
+node scripts/ui-audit.js                total findings: 0
+node scripts/tauri-i18n.js              MISS 0 / CODE-MISS 0 / AMBIGUOUS 0（finding 的 code 用常量，不进 zhCode）
+node scripts/test-affected.js           all selected targets passed
+node scripts/comment-lang.js            英文注释 14 行（与基线相同，新文件 0 行），中文覆盖率 99.8%
+node scripts/changelog.js check         ok（29 entries）
+```
+
+### 20.5 实施中清零的既有缺陷：扫描去重把「同一文件的规则与记忆」折成一条
+
+适配器表里有 **13 个 agent** 把同一个文件同时声明在 `rules` 与 `memory` 两个列表里
+（`claude-code` 的 `CLAUDE.md`、`codex` 的 `AGENTS.md`、`cursor` / `continue` / `roo` 的
+`rules` 目录等）。`scan_rules` 与 `scan_memory` 于是各产出一条 kind 不同的资产，指向
+**同一个物理文件**。
+
+`dedupe_by_physical_path` 的普通分支原来用 `"file:<物理路径>"` 拼键，**键里没有类别**。
+后果（用假 home 实测，`.codex/AGENTS.md` 一份文件）：
+
+```text
+by {"skill":0,"mcp":0,"plugin":0,"rule":2,"memory":0}
+rule   codex   …\.codex\AGENTS.md   alsoSeen= 1
+```
+
+两条规则资产、**记忆一条都没有**；被折掉的那一条只留下 `agentId` / `rel` 进了
+`alsoSeen`，而 `alsoSeen` 不记类别 —— 界面上记忆面板里那一条直接消失，计数也少一份。
+这不是「同一份内容在多个 agent 出现」，而是「同一份内容被当成两个类别读出来」。
+
+修法：普通分支的键改为 `"<kind>:file:<物理路径>"`；`mcp`（带 `configKey`）与 `plugin`
+（只可能是 plugin）两个分支本来就有类别信息，不动。**同类别、同物理路径仍然折叠**，
+那是去重的本职；改变的只有「不同类别共享同一物理文件」这一种，而那一种本来就该是两条
+资产。回归测试：`scan::tests::one_file_declared_as_both_rule_and_memory_stays_two_assets`。
+
+> **不要改回去**：这条与 §17.7 的「不要去动 `dedupe_by_physical_path`」不冲突——
+> §17.7 说的是「不要靠改折叠规则来让收敛后的资产条数变多/变少」，这里修的是键里缺类别
+> 导致的**错折**。改完之后 `scan` 的资产表会多出本来就应该存在的记忆条目，这是修正，
+> 不是口径漂移。
+
+### 20.6 给 M6 的接口
+
+```rust
+// 1) 只读健康检查（扫描 + 检测；M6 的 shared_doctor 命令直接包一层）
+let lib = keeper.library();                                  // 跟随 libraryRoot 设置
+let projects = core::scan::read_projects(keeper.store.root_str());
+let (payload, _timings) = core::scan::scan_payload(&keeper.user_home, &projects);
+let assets = payload["assets"].as_array().cloned().unwrap_or_default();
+let report = core::doctor::diagnose(&lib, &assets, &keeper.user_home, None); // None = 只看全局
+report.to_json();          // { ok, findings[], counts{ total, critical, warn, info } }
+report.by_code(core::doctor::LINK_DANGLING);
+report.has_critical();
+
+// 2) finding 的形状（序列化后的键名与字段同名）
+// { code, severity, path, detail, fixable, fix? }
+// fix = "relink" | "adopt" | "converge" | "rebuild"，缺席表示没有单一修法
+```
+
+**给 M6 的三条提醒**：
+
+1. `shared_doctor` 会遍历库目录并做内容哈希，属于**耗时命令**：照 §8.2 的先例用
+   `async fn` + `spawn_blocking`（`scan` / `read_asset` 就是这么做），别在 UI 线程里同步跑。
+2. `doctor::diagnose` **不探测链接能力**（探测会写 `<store>/probe`）。M6 若要把
+   `asset.duplicated` 的一键收敛按钮按「本机能不能建链接」置灰，自己调
+   `lib.capability(store_root)` —— 那是一次真实的写盘，属于动作路径，不该混进只读检查。
+3. `findings[].path` 一律是 `store::native_str` 的绝对路径；文案按 code 查 `i18n.js` 的
+   `doctor.*`（§8.4），**不要**在 Rust 侧拼英文句子，否则 `tauri-i18n.js` 直接 MISS。
+   `apply_finding_fix` 按 `code` 分派；`link.hijacked` 必须先看 `fixable` /
+   `detail.contentMatches` —— 内容不一致时只能人工处理，不能自动 relink。
+

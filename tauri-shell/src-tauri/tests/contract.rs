@@ -1015,7 +1015,7 @@ fn scan_payload_carries_exactly_the_keys_the_renderer_reads() {
     }
 
     // 精简后的 `effective` 位于载荷一侧那个平行的 `effective` 数组上：
-    // 恰好三个键，别的什么都活不下来。
+    // 恰好四个键（M5 起多了 `sameInode`），别的什么都活不下来。
     for a in payload["effective"].as_array().unwrap() {
         assert!(
             a.get("raw").is_none(),
@@ -1025,7 +1025,12 @@ fn scan_payload_carries_exactly_the_keys_the_renderer_reads() {
         let eff = a["effective"].as_object().expect("effective object");
         let mut keys: Vec<&str> = eff.keys().map(|s| s.as_str()).collect();
         keys.sort();
-        assert_eq!(keys, vec!["live", "overrides", "shadowedBy"], "{:?}", keys);
+        assert_eq!(
+            keys,
+            vec!["live", "overrides", "sameInode", "shadowedBy"],
+            "{:?}",
+            keys
+        );
         // `keeper.scan()` 只对 `res.assets` 运行安全检查。
         assert!(a.get("security").is_none(), "effective carries no security");
     }
