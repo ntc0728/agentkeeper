@@ -37,9 +37,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use super::assets;
 use super::discover;
 use super::keeper::Keeper;
+use super::library_view;
 use super::model::{js_slice, js_string, js_truthy};
 use super::scan;
 use super::settings;
+use super::shared_ops;
 use super::store::Store;
 
 /// `initialize` 的应答内容，也是参考构建逐字给出的内容。
@@ -182,6 +184,50 @@ pub fn tools() -> Vec<Value> {
                 "repo": s("GitHub repo as owner/repo or a github.com URL"),
                 "agentId": s("target agent (default: first installed agent)")
             }, "required": ["repo"] }
+        }),
+        // 共享层（M7）：下面五个只能追加在末尾。`core/tests/mcp.rs` 的 `TOOLS`
+        // 按顺序钉死这份列表，重排或改名对已经记住名字的 agent 是破坏性变更。
+        json!({
+            "name": "list_library",
+            "description": "List the shared library: every skill/mcp/rule/memory master copy in the library root plus, per agent, whether it is enabled (linked from the library, materialised as one entry in the agent config, or composed into its rules file).",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "enable_asset",
+            "description": "Enable a library asset for one agent: replaces the agent-side copy with a link to the library master copy (skills), writes/updates one server entry in the agent config (mcp), or composes the shared block into the rules file (rule/memory). One reversible transaction. With kind=mcp the MCP server is added to the library first when it is not there yet.",
+            "inputSchema": { "type": "object", "properties": {
+                "name": s("asset name (skill folder name, mcp server name, or rule/memory slug)"),
+                "kind": { "type": "string", "enum": ["skill", "mcp", "rule", "memory"], "description": "asset kind (default skill)" },
+                "agentId": s("target agent id (e.g. claude-code, codex, cursor)"),
+                "scope": { "type": "string", "enum": ["global", "project"], "description": "global by default; a project scope also needs file (mcp) or projectId" },
+                "projectId": s("project id, required for a project-scope skill"),
+                "file": s("absolute config file for kind=mcp; discovered from the agent when omitted"),
+                "config": { "type": "object", "description": "server definition for kind=mcp when the server is not in the library yet (command, args, env, url...)" },
+                "assetId": s("asset id from list_assets; optional - the copy on disk is found by name + kind + agentId when omitted")
+            }, "required": ["name", "agentId"] }
+        }),
+        json!({
+            "name": "disable_asset",
+            "description": "Disable a library asset for one agent: removes only that agent's link (the library master copy stays on disk), removes the server entry from the agent config (mcp), or strips the shared block from the rules file (rule/memory). One reversible transaction, recorded in the audit log.",
+            "inputSchema": { "type": "object", "properties": {
+                "name": s("asset name (skill folder name, mcp server name, or rule/memory slug)"),
+                "kind": { "type": "string", "enum": ["skill", "mcp", "rule", "memory"], "description": "asset kind (default skill)" },
+                "agentId": s("target agent id (e.g. claude-code, codex, cursor)"),
+                "scope": { "type": "string", "enum": ["global", "project"], "description": "global by default; a project scope also needs file (mcp) or projectId" },
+                "projectId": s("project id, required for a project-scope skill"),
+                "file": s("absolute config file for kind=mcp; discovered from the agent when omitted"),
+                "assetId": s("asset id from list_assets; optional - the copy on disk is found by name + kind + agentId when omitted")
+            }, "required": ["name", "agentId"] }
+        }),
+        json!({
+            "name": "link_doctor",
+            "description": "Read-only health check of the shared layer: dangling links, links replaced by a real directory (hijacked), unmanaged copies, fragile hardlinks, duplicated content, mcp drift and ledger drift. Every finding carries a code and a path; fix one with the desktop app (nothing is written here).",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "converge_plan",
+            "description": "Read-only convergence plan: groups of same-name skills spread across agents, whether their content is identical, what would be replaced and how many bytes that saves. Writes nothing - apply it from the desktop app.",
+            "inputSchema": { "type": "object", "properties": {} }
         }),
     ]
 }
@@ -848,6 +894,106 @@ fn install_skill(keeper: &Keeper, args: &Value) -> Value {
 }
 
 /* ------------------------------------------------------------------ */
+/* 共享层（M7）                                                         */
+/* ------------------------------------------------------------------ */
+
+/// `list_library` —— 矩阵数据视图，与桌面端「共享」页读的是同一个函数。
+///
+/// 不缓存：库内容随时可能被别的 agent 改，矩阵里的「启用/未启用」必须来自盘上
+/// 的当前事实。也不发布到全局扫描缓存（`library_view` 用的是 `scan_payload_uncached`）。
+fn list_library(_keeper: &Keeper) -> Value {
+    text(library_view::list_library(_keeper))
+}
+
+/// `converge_plan` —— **只出方案，零写入**。
+fn converge_plan(_keeper: &Keeper) -> Value {
+    text(shared_ops::converge_plan(_keeper))
+}
+
+/// `link_doctor` —— 只读健康检查，与桌面端的健康面板同源。
+fn link_doctor(_keeper: &Keeper) -> Value {
+    text(shared_ops::doctor_report(_keeper))
+}
+
+/// 把 `tools/call` 的入参摊平成 [`Keeper::enable_asset`] / `disable_asset` 的入参。
+///
+/// 三件事不能省：
+/// 1. `name` / `kind` / `agentId` 是必填，缺了就在这里报 `ok:false`，而不是让
+///    keeper 把空名字当成「库里没有这份资产」——那会让 agent 以为资产不存在；
+/// 2. `scope` 缺省为 `global`（工具表里写的就是默认全局）；
+/// 3. 调用方给的 `config` 对象原样透传：`kind=mcp` 且库里还没有这条记录时，
+///    它就是这个服务器的定义。没有 `config` 也不拦 —— keeper 会返回它自己的
+///    `mcp.libraryMissing` 之类的 code。
+///
+/// `assetId` **不是必填**：agent 通常只知道名字。`Keeper::enable_asset` 在缺
+/// `assetId` 时会自己现扫一次、按 (kind, slug, agentId) 找到盘上那份真实副本，
+/// 所以 `{name, kind, agentId}` 这一组就足以完成首次收敛。这条路径是真实运行时
+/// 才发现缺的（见 §22.3）：只给名字时曾经一律报 `share.unknownAsset`。
+fn shared_input(args: &Value) -> Result<Value, Value> {
+    let name = arg_str(args, "name");
+    if name.is_empty() {
+        return Err(json!({ "ok": false, "error": "name is required" }));
+    }
+    let agent_id = arg_str(args, "agentId");
+    if agent_id.is_empty() {
+        return Err(json!({ "ok": false, "error": "agentId is required" }));
+    }
+    let mut m = Map::new();
+    m.insert("name".to_string(), json!(name));
+    m.insert(
+        "kind".to_string(),
+        json!(match arg_str(args, "kind") {
+            given if !given.is_empty() => given,
+            _ => "skill".to_string(),
+        }),
+    );
+    m.insert("agentId".to_string(), json!(agent_id));
+    m.insert(
+        "scope".to_string(),
+        json!(match arg_str(args, "scope") {
+            given if !given.is_empty() => given,
+            _ => "global".to_string(),
+        }),
+    );
+    for key in ["projectId", "file", "assetId"] {
+        let v = arg_str(args, key);
+        if !v.is_empty() {
+            m.insert(key.to_string(), json!(v));
+        }
+    }
+    if let Some(config) = args.get("config") {
+        if config.is_object() {
+            m.insert("config".to_string(), config.clone());
+        }
+    }
+    Ok(Value::Object(m))
+}
+
+fn enable_asset(keeper: &Keeper, args: &Value) -> Value {
+    let input = match shared_input(args) {
+        Ok(v) => v,
+        Err(e) => return text(e),
+    };
+    let r = keeper.enable_asset(&input);
+    if r.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        invalidate(keeper); // 新链接/新配置条目必须出现在下一次扫描里
+    }
+    text(r)
+}
+
+fn disable_asset(keeper: &Keeper, args: &Value) -> Value {
+    let input = match shared_input(args) {
+        Ok(v) => v,
+        Err(e) => return text(e),
+    };
+    let r = keeper.disable_asset(&input);
+    if r.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        invalidate(keeper);
+    }
+    text(r)
+}
+
+/* ------------------------------------------------------------------ */
 /* JSON-RPC 管道                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -897,6 +1043,11 @@ fn call_tool(keeper: &Keeper, req: &Value) -> Value {
         "import_bundle" => import_bundle(keeper, &args),
         "search_registry" => search_registry(keeper, &args),
         "install_skill" => install_skill(keeper, &args),
+        "list_library" => list_library(keeper),
+        "enable_asset" => enable_asset(keeper, &args),
+        "disable_asset" => disable_asset(keeper, &args),
+        "link_doctor" => link_doctor(keeper),
+        "converge_plan" => converge_plan(keeper),
         _ => {
             return fail(
                 req.get("id").cloned(),
@@ -1163,6 +1314,12 @@ mod tests {
                 "import_bundle",
                 "search_registry",
                 "install_skill",
+                // 共享层（M7）：只能追加，不能重排。
+                "list_library",
+                "enable_asset",
+                "disable_asset",
+                "link_doctor",
+                "converge_plan",
             ]
         );
         for t in tools() {
@@ -1181,7 +1338,7 @@ mod tests {
             &json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/list" }),
         );
         assert_eq!(resp["result"]["tools"][0]["name"], json!("list_assets"));
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 15);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 20);
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&home).ok();
     }
@@ -1346,7 +1503,7 @@ mod tests {
             &k,
             &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
         );
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 15);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 20);
         let resp = dispatch(
             &k,
             &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/nope" }),

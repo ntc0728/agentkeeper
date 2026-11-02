@@ -206,6 +206,43 @@ impl Keeper {
         assets::invalidate();
     }
 
+    /// 按 slug 现扫一次，找出某个 agent 侧那份**真实副本**（不是链接）。
+    ///
+    /// `agent_id` 为空时取第一个匹配到的 agent。命中要求三件事同时成立：
+    /// `kind == "skill"`、名字的 slug 相同、`meta.link` 为空（已经是链接的副本
+    /// 没有可搬的内容，把它当来源会让 `copyDir` 顺着链接再拷一份）。
+    ///
+    /// 与 [`Self::index_get`] 一样用**不缓存**的扫描：这次查找只为当前调用服务，
+    /// 发布到全局缓存会让别的调用方看到一份它没要求的索引。
+    fn scan_for_skill(&self, slug_name: &str, agent_id: &str) -> Option<(String, String)> {
+        let projects = scan::read_projects(self.store.root_str());
+        let (payload, _) = scan::scan_payload_uncached(&self.user_home, &projects);
+        payload
+            .get("assets")
+            .and_then(Value::as_array)?
+            .iter()
+            .filter(|a| prop(a, "kind") == "skill")
+            .filter(|a| slug(&prop(a, "name")) == slug_name)
+            .filter(|a| agent_id.is_empty() || prop(a, "agentId") == agent_id)
+            .filter(|a| {
+                a.get("meta")
+                    .and_then(|m| m.get("link"))
+                    .and_then(Value::as_str)
+                    .map(str::is_empty)
+                    .unwrap_or(true)
+            })
+            .find_map(|a| {
+                let dir = a.get("dir").and_then(Value::as_str)?;
+                if dir.is_empty() {
+                    return None;
+                }
+                Some((
+                    store::native_str(Path::new(dir)),
+                    prop(a, "agentId"),
+                ))
+            })
+    }
+
     /// 带一次扫描冷缓存兜底的缓存查找。
     ///
     /// 兜底那次扫描刻意用**不缓存**的变体：它只回答这一次查找，绝不能发布到
@@ -1356,6 +1393,22 @@ impl Keeper {
             return unsatisfied("share.unknownAsset");
         }
         let slug_name = slug(&name);
+
+        // 只给了名字（最常见的调用方式，尤其是经 MCP 调进来的 agent）：来源目录
+        // 得自己找。这里做**一次现扫**并按 (kind=skill, slug, agentId) 匹配，
+        // 而不是只依赖 `assets` 全局缓存 —— 那个缓存只由渲染层发起过的扫描填充，
+        // MCP 进程里它可能一直是空的。缺了这一步，`enable_asset {name, agentId}`
+        // 会在「库里还没有这份资产」时直接报 `share.unknownAsset`，而盘上明明有
+        // 一个真实目录可以收进库。
+        let (from, from_agent) = if from.is_empty() {
+            let hit = self.scan_for_skill(&slug_name, &prop(input, "agentId"));
+            match hit {
+                Some((dir, agent_id)) => (dir, agent_id),
+                None => (String::new(), String::new()),
+            }
+        } else {
+            (from, from_agent)
+        };
 
         // 库内主副本：优先用已有的；没有就把来源目录当作主副本并记下来。
         let existing = self.library_asset_dir("skill", &slug_name);

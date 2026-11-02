@@ -1215,22 +1215,24 @@ pub fn migrate_library(keeper: &Keeper, input: &Value) -> Value {
     };
     // 续跑：journal 的目标一致才继续；指向别处的 journal 说明另一个迁移没做完，
     // 覆盖它会让那批链接永久指错。
-    let (resumed, mut done) = match &ledger.migrating {
-        Some(m) if paths_equal(&m.to, &to) => (true, m.done.clone()),
+    let (resumed, mut done, mut relinked) = match &ledger.migrating {
+        Some(m) if paths_equal(&m.to, &to) => (true, m.done.clone(), m.relinked.clone()),
         Some(_) => {
             return fail_with(
                 "library.migrateTarget",
                 json!({ "from": from, "to": to, "reason": "anotherMigrationInFlight" }),
             )
         }
-        None => (false, Vec::new()),
+        None => (false, Vec::new(), Vec::new()),
     };
     // 1) journal 落盘（写在当前库根的台账里）。
-    ledger.migrating = Some(Migrating {
+    let journal = |done: &[String], relinked: &[String]| Migrating {
         from: from.clone(),
         to: to.clone(),
-        done: done.clone(),
-    });
+        done: done.to_vec(),
+        relinked: relinked.to_vec(),
+    };
+    ledger.migrating = Some(journal(&done, &relinked));
     if let Err(e) = lib.save_ledger(&ledger) {
         return fail_with("write.failed", json!({ "error": e }));
     }
@@ -1293,11 +1295,7 @@ pub fn migrate_library(keeper: &Keeper, input: &Value) -> Value {
         }
         // 每搬一项就刷新一次进度。写失败不中断：磁盘状态本身已经能回答
         // 「这一项在哪」，journal 只是让人更快看出来的记录。
-        ledger.migrating = Some(Migrating {
-            from: from.clone(),
-            to: to.clone(),
-            done: done.clone(),
-        });
+        ledger.migrating = Some(journal(&done, &relinked));
         let _ = lib.save_ledger(&ledger);
         settings::audit(
             keeper.store.root_str(),
@@ -1306,19 +1304,38 @@ pub fn migrate_library(keeper: &Keeper, input: &Value) -> Value {
     }
 
     // 3) 逐条重指链接，并更新台账里的 src。
+    //
+    // **每重指一条就落一次盘**（`done` 管顶层目录，`relinked` 管链接）。
+    // 中断之后重跑时，「顶层子项搬没搬」磁盘自己会答（源侧不在了），
+    // 「链接指没指对」磁盘答不了：旧库根要等第 4 步才删，所以「还指着旧根」
+    // 与「已经指对了」在磁盘上长得一样。只看 `read_target` 的话，一次中断后
+    // 每条链接都要被解开重建 —— 几百次无谓写入，而每一次都是一个悬空窗口。
     let mut links = 0usize;
-    for entry in &mut ledger.entries {
-        let new_src = relocate_path(&entry.src, &from, &to);
-        let dst_path = Path::new(&entry.dst);
-        if entry.mode == "copy" || entry.method == LinkMethod::Copy {
+    // 用索引遍历而不是 `&mut ledger.entries`：每重指一条就要把整份台账写盘
+    // （journal 在台账里），而同时持有条目可变借用与台账不可变借用是矛盾的。
+    for i in 0..ledger.entries.len() {
+        let (dst, old_src, mode, method) = {
+            let e = &ledger.entries[i];
+            (e.dst.clone(), e.src.clone(), e.mode.clone(), e.method)
+        };
+        let new_src = relocate_path(&old_src, &from, &to);
+        let dst_path = Path::new(&dst);
+        if mode == "copy" || method == LinkMethod::Copy {
             // 受管副本不是链接，搬库不改变它的位置；只把台账里的 src 换到新库。
-            entry.src = new_src;
+            ledger.entries[i].src = new_src;
+            continue;
+        }
+        // 已经重指过：上一次运行把这条链接改到新库根并写进了 journal。
+        if relinked.iter().any(|d| paths_equal(d, &dst)) || paths_equal(&old_src, &new_src) {
+            ledger.entries[i].src = new_src;
             continue;
         }
         if linkfs::entry_link_kind(dst_path).is_none() {
             // 不是链接（被顶掉 / 已删）：没有可重指的对象，只更新台账 src，
             // 让下一次 doctor 以正确的 src 判定这一条。
-            entry.src = new_src;
+            ledger.entries[i].src = new_src;
+            ledger.migrating = Some(journal(&done, &relinked));
+            let _ = lib.save_ledger(&ledger);
             continue;
         }
         let old_target = linkfs::read_target(dst_path);
@@ -1327,7 +1344,10 @@ pub fn migrate_library(keeper: &Keeper, input: &Value) -> Value {
             .map(|t| linkfs::same_target(t, Path::new(&new_src)))
             .unwrap_or(false)
         {
-            entry.src = new_src;
+            ledger.entries[i].src = new_src;
+            relinked.push(dst);
+            ledger.migrating = Some(journal(&done, &relinked));
+            let _ = lib.save_ledger(&ledger);
             continue;
         }
         if linkfs::unlink(dst_path).is_err() {
@@ -1336,21 +1356,24 @@ pub fn migrate_library(keeper: &Keeper, input: &Value) -> Value {
             continue;
         }
         let made = if Path::new(&new_src).is_dir() {
-            linkfs::create_dir_link(Path::new(&new_src), dst_path, Some(entry.method))
+            linkfs::create_dir_link(Path::new(&new_src), dst_path, Some(method))
         } else {
-            linkfs::create_file_link(Path::new(&new_src), dst_path, Some(entry.method))
+            linkfs::create_file_link(Path::new(&new_src), dst_path, Some(method))
         };
         match made {
             Ok(_) => {
-                entry.src = new_src;
+                ledger.entries[i].src = new_src.clone();
                 links += 1;
+                relinked.push(dst.clone());
+                ledger.migrating = Some(journal(&done, &relinked));
+                let _ = lib.save_ledger(&ledger);
                 settings::audit(
                     keeper.store.root_str(),
                     &json!({
                         "action": "library.relink",
-                        "path": entry.dst,
+                        "path": dst,
                         "from": old_target.map(|t| store::native_str(&t)).unwrap_or_default(),
-                        "to": entry.src,
+                        "to": new_src,
                     }),
                 );
             }
@@ -1489,9 +1512,13 @@ fn relocate_path(src: &str, from: &str, to: &str) -> String {
     if src_norm.eq_ignore_ascii_case(&from_norm) {
         return store::native_str(Path::new(to));
     }
+    // 前缀比较必须走字节切片，而这些路径里可能有非 ASCII（用户名、中文目录名），
+    // 直接 `src_norm[..len]` 会在字符边界上 panic。逐字节比大小写不敏感，与
+    // Windows 的口径一致。
     let prefix = format!("{}\\", from_norm);
+    let head = src_norm.as_bytes().get(..prefix.len());
     if src_norm.len() > prefix.len()
-        && src_norm[..prefix.len()].eq_ignore_ascii_case(&prefix)
+        && head.is_some_and(|h| h.eq_ignore_ascii_case(prefix.as_bytes()))
     {
         let rest = &src_norm[prefix.len()..];
         return store::normalize_path(&store::native_str(&Path::new(to).join(rest)));
@@ -2179,6 +2206,7 @@ mod tests {
             from: store::native_str(&old_root),
             to: new_str.clone(),
             done: vec!["skills".to_string()],
+            relinked: Vec::new(),
         });
         lib.save_ledger(&ledger).unwrap();
 
@@ -2195,6 +2223,94 @@ mod tests {
         let final_ledger = Library::at(&new_root).load_ledger().unwrap();
         assert!(final_ledger.migrating.is_none());
         assert_eq!(final_ledger.entries.len(), 1);
+        cleanup(&root, &home);
+    }
+
+    /// §9.3 的幂等验收：**在链接重指阶段被强杀**，重跑必须从 journal 继续，
+    /// 不得把已经指对的链接再解开重建一遍。
+    ///
+    /// 用「20 份 skill、每份 3 条链接」的规模夹具模拟真实中断：先手工把
+    /// 前 10 份 skill 的链接重指到新库根并记进 `relinked`（这正是被强杀那一刻
+    /// 台账的样子），再跑 [migrate_library]。断言 `links` 恰好等于**剩下**的
+    /// 30 条，并且已重指的 30 条一个字节都没被动过。
+    #[test]
+    fn migrate_resumes_the_relink_phase_without_redoing_finished_links() {
+        let _guard = assets::lock_for_test();
+        let root = temp("relink-root");
+        let home = temp("relink-home");
+        let k = keeper_at(&root, &home);
+        let lib = k.library();
+        let old_root = lib.root().to_path_buf();
+        let new_root = root.join("library2");
+        let new_str = store::native_str(&new_root);
+        std::fs::create_dir_all(&new_root).unwrap();
+
+        // 20 份 skill，每份 3 条链接。
+        let mut dsts: Vec<(String, PathBuf)> = Vec::new();
+        for i in 0..20 {
+            let slug = format!("s{:02}", i);
+            let src = lib.skill_dir(&slug);
+            write(&src.join("SKILL.md"), &format!("BODY {}", slug));
+            for agent in [".claude", ".codex", ".cursor"] {
+                let dst = home.join(agent).join("skills").join(&slug);
+                std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+                linkfs::create_dir_link(&src, &dst, None).unwrap();
+                record_link(&lib, &slug, &src, &dst);
+                dsts.push((slug.clone(), dst));
+            }
+        }
+        // 「搬迁阶段」已经做完：库里顶层子项全在新位置。
+        std::fs::rename(old_root.join("skills"), new_root.join("skills")).unwrap();
+
+        // 「重指到第 30 条时被杀」：前 10 份 skill 的链接已经指到新库根，
+        // 台账与 journal 已落盘。
+        let mut ledger = Library::at(&old_root).load_ledger().unwrap();
+        let mut relinked: Vec<String> = Vec::new();
+        for (slug, dst) in dsts.iter().take(30) {
+            let new_src = new_root.join("skills").join(slug);
+            linkfs::unlink(dst).unwrap();
+            linkfs::create_dir_link(&new_src, dst, None).unwrap();
+            ledger.repoint(&store::native_str(dst), &store::native_str(&new_src));
+            relinked.push(store::native_str(dst));
+        }
+        ledger.migrating = Some(Migrating {
+            from: store::native_str(&old_root),
+            to: new_str.clone(),
+            done: vec!["skills".to_string()],
+            relinked: relinked.clone(),
+        });
+        Library::at(&old_root).save_ledger(&ledger).unwrap();
+
+        let out = migrate_library(&k, &json!({ "to": new_str }));
+        assert_eq!(out["ok"], json!(true), "{}", out);
+        assert_eq!(out["resumed"], json!(true), "{}", out);
+        assert_eq!(out["moved"], json!(0), "顶层已搬完：{}", out);
+        assert_eq!(
+            out["links"],
+            json!(30),
+            "只该重指没重指过的 30 条：{}",
+            out
+        );
+
+        // 全部 60 条都指向新库根，且旧库根里没有留下链接。
+        for (slug, dst) in &dsts {
+            assert!(
+                linkfs::same_target(dst, &new_root.join("skills").join(slug)),
+                "{} 没有指到新库根",
+                dst.display()
+            );
+        }
+        let final_ledger = Library::at(&new_root).load_ledger().unwrap();
+        assert!(final_ledger.migrating.is_none());
+        assert_eq!(final_ledger.entries.len(), 60);
+        for e in &final_ledger.entries {
+            assert!(
+                e.src.eq_ignore_ascii_case(&store::native_str(&new_root.join(
+                    "skills"
+                ).join(&e.name)))
+            );
+            assert!(Path::new(&e.dst).exists(), "{} 不再是可用的链接", e.dst);
+        }
         cleanup(&root, &home);
     }
 }

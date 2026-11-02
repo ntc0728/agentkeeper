@@ -10,9 +10,15 @@
 //!   ak-scan --settings-save [root] <json>   应用一次设置补丁
 //!   ak-scan --search-url <json_opts>        精确的 registry URL
 //!   ak-scan --search <json_opts>            实时的 registry 搜索载荷
+//!   ak-scan --shared [home] [root]          共享层载荷 `{library, ledger, findings}`
 //!
 //! `--read` 会先跑一次扫描（冷缓存时命令本身也这么做），这样抽屉的返回结果就能
 //! 和 `read_asset` 对比。
+//!
+//! `--shared`（M7）把库根、台账与七类健康发现打成一份文档，好让「库在哪、
+//! 有哪几条链接、有哪些发现」在 shell 里可以逐字段 diff —— 桌面端的共享页与
+//! MCP 的 `list_library` / `link_doctor` 读的是同一批函数，所以这份输出就是
+//! 两者的等价物。**纯只读**：不建目录、不写台账。
 //!
 //! `--settings-*` 这几种模式存在的理由相同：它们让本 crate 里唯一的那条写入路径
 //! 脱离 GUI 也能触达，于是"在这台机器上保存到底有没有落盘"可以从 shell 里回答，
@@ -21,6 +27,8 @@
 //! 最有用的是 `--search-url`：它把 URL 拼装器从进程里提出来，于是那串字符可以
 //! 逐字节 diff，包括空格编成 `+` 以及各参数取整（clamp）的先后顺序。
 
+use agentkeeper_core::keeper::Keeper;
+use agentkeeper_core::store::Store;
 use agentkeeper_core::{assets, discover, registry, scan, settings, validate};
 
 fn main() {
@@ -111,6 +119,17 @@ fn main() {
         _ => {}
     }
 
+    // `--shared`（M7）：库根 + 台账 + 七类发现。
+    //
+    // 放在扫描之前：它自己就要跑一次扫描（`list_library` 内部用不发布缓存的
+    // 那次），提前跑一次普通扫描只会白干。参数顺序与 `--read` 一致。
+    if args.get(1).map(|a| a == "--shared").unwrap_or(false) {
+        let home = args.get(2).cloned().unwrap_or_else(default_home);
+        let root = args.get(3).cloned().unwrap_or_else(default_store);
+        print_json(&shared_payload(&home, &root));
+        return;
+    }
+
     let read_mode = args.get(1).map(|a| a == "--read").unwrap_or(false);
     let (home, store_root) = if read_mode {
         (
@@ -153,6 +172,36 @@ fn main() {
     };
 
     print_json(&out);
+}
+
+/// `--shared` 的载荷：`{ library, ledger, findings }`。
+///
+/// 三块都来自**桌面上同一批函数**：`library_view::list_library`（矩阵）、
+/// `Library::load_ledger`（台账）、`shared_ops::doctor_report`（发现）。
+/// 台账损坏时**不当作空**：`ledger` 变成 `{ ok:false, error }`，而不是一个
+/// 空列表 —— 把损坏读成「没有链接」会让调用方以为库是干净的。
+fn shared_payload(home: &str, root: &str) -> serde_json::Value {
+    let keeper = Keeper::new(Store::new(root), home);
+    let lib = keeper.library();
+    let ledger = match lib.load_ledger() {
+        Ok(l) => {
+            let mut j = l.to_json();
+            if let serde_json::Value::Object(m) = &mut j {
+                m.insert("ok".to_string(), serde_json::json!(true));
+                m.insert(
+                    "path".to_string(),
+                    serde_json::json!(agentkeeper_core::store::native_str(&lib.ledger_path())),
+                );
+            }
+            j
+        }
+        Err(e) => serde_json::json!({ "ok": false, "error": e }),
+    };
+    serde_json::json!({
+        "library": agentkeeper_core::library_view::list_library(&keeper),
+        "ledger": ledger,
+        "findings": agentkeeper_core::shared_ops::doctor_report(&keeper),
+    })
 }
 
 /// `@path` 形式从文件读 JSON，而不是从参数列表。

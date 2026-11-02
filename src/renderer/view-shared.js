@@ -36,7 +36,13 @@
     // 正在修那一条 finding（key = code|path）；用于禁用修复按钮。
     fixing: '',
     // 「收敛重复」正在探测。
-    convergeBusy: false
+    convergeBusy: false,
+    // 首次启用提示（§9.4）：bootstrap 说 `shared.enabled` 且第一次探测发现
+    // 可收敛的组时，在页顶挂一条横幅。**默认不收敛** —— 点进向导才会写盘。
+    hintGroups: 0,
+    hintDismissed: false,
+    // 探测只在每次打开共享页时跑一次（bootstrap 刻意不把候选数算进启动路径）。
+    hintProbed: false
   };
 
   const TABS = ['skills', 'mcp', 'rules', 'memory', 'health'];
@@ -289,8 +295,40 @@
   function retryLoad() {
     S.error = null;
     S.data = null;
+    S.hintProbed = false;
     paint();
     ensureData();
+  }
+
+  /**
+   * 首次启用提示的探测（§9.4）。
+   *
+   * `bootstrap` 只给 `shared.enabled`，候选数必须在这里现算：把 200 个目录的
+   * 遍历塞进窗口绘制之前那条同步命令里，等于给每次启动加一次全盘扫描。
+   * 探测只读（`planConverge` 零写入），失败静默 —— 一条「提示没出来」不该变成
+   * 一个报错弹窗。
+   */
+  function probeHint() {
+    if (S.hintProbed || S.hintDismissed) return;
+    const enabled = window.__akBoot && window.__akBoot.shared
+      ? window.__akBoot.shared.enabled !== false
+      : true;
+    if (!enabled) return;
+    S.hintProbed = true;
+    call('planConverge').then((r) => {
+      const n = r && r.ok !== false && Number(r.actionable)
+        ? Number(r.actionable)
+        : 0;
+      if (n <= 0) return;
+      S.hintGroups = n;
+      paint();
+    }).catch(() => { /* 提示是锦上添花：探测失败就当好，不打扰用户 */ });
+  }
+
+  function dismissHint() {
+    S.hintDismissed = true;
+    S.hintGroups = 0;
+    paint();
   }
 
   /** 健康检查是耗时命令：只在点进健康 tab 时跑，修完再跑一次。 */
@@ -1159,6 +1197,24 @@
         el('span', { class: 'shared-banner-text' }, t('shared.bannerCopy')),
         resyncButton()));
     }
+    // 首次发现重复技能（§9.4）：只提示一次、只说明、不动盘。按钮进的是同一个
+    // 收敛向导，用户在向导里确认之后才会写。
+    if (S.hintGroups > 0 && !S.hintDismissed) {
+      box.appendChild(el('div', { class: 'shared-banner' },
+        el('span', { class: 'shared-banner-ico', 'aria-hidden': 'true' }, 'i'),
+        el('span', { class: 'shared-banner-text' }, t('shared.hintGroups', { n: S.hintGroups })),
+        el('button', {
+          class: 'btn sm',
+          type: 'button',
+          onclick: () => void openConverge()
+        }, t('shared.hintReview')),
+        el('button', {
+          class: 'btn sm',
+          type: 'button',
+          'data-focus-key': 'shared-hint-dismiss',
+          onclick: dismissHint
+        }, t('shared.hintDismiss'))));
+    }
     box.appendChild(el('div', { class: 'shared-meta' },
       el('span', { class: 'muted fs-11' }, t('shared.root')),
       el('span', { class: 'mono fs-11 shared-root' }, String(d.root || '—'))));
@@ -1239,6 +1295,8 @@
     S.root = el('div', { class: 'shared-page' });
     paint();
     ensureData();
+    // 首次提示的探测排在数据之后：矩阵先画出来，横幅晚一步出现也不会挡住人。
+    probeHint();
     return S.root;
   }
 

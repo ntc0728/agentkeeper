@@ -216,6 +216,167 @@ fn a_failed_tool_result_carries_is_error() {
     assert_eq!(gone_resp["error"]["code"], json!(-32602), "{}", gone_resp);
 }
 
+/* ------------------------------------------------------------------ */
+/* 共享层（M7）                                                         */
+/* ------------------------------------------------------------------ */
+
+// 共享层的五个工具直接复用桌面端那八个命令的 core 入口：载荷必须是同一个
+// 形状，而不是「MCP 版本」的第二套。这里逐个核对最外层契约。
+#[test]
+fn shared_tools_reuse_the_desktop_payload_shapes() {
+    let fx = Fixture::new("mcp-shared-shape");
+    let keeper = fx.keeper();
+
+    // `list_library`：矩阵的唯一数据源，四类行与列都在。
+    let (resp, lib) = call(&keeper, "list_library", json!({}));
+    assert_eq!(resp["result"]["isError"], Value::Null, "{}", resp);
+    assert_eq!(lib["ok"], json!(true), "{lib}");
+    for key in ["root", "cap", "agents", "skills", "mcp", "rules", "memory"] {
+        assert!(lib.get(key).is_some(), "list_library lacks {key}: {lib}");
+    }
+    assert!(lib["cap"]["dirOrder"].is_array(), "{lib}");
+    assert_eq!(lib["agents"].as_array().unwrap().len(), 17);
+
+    // `converge_plan`：外层三个契约字段 + 只读（写盘为零）。
+    let before = lib["root"].as_str().unwrap_or_default().to_string();
+    let (_, plan) = call(&keeper, "converge_plan", json!({}));
+    assert_eq!(plan["ok"], json!(true), "{plan}");
+    assert!(plan["groups"].is_array(), "{plan}");
+    assert!(plan["savedBytes"].is_number(), "{plan}");
+    assert!(plan["actionable"].is_u64(), "{plan}");
+    assert!(
+        !std::path::Path::new(&before).exists(),
+        "a read-only plan must not create the library root: {before}"
+    );
+
+    // `link_doctor`：七类 finding 的固定外壳。
+    let (_, doctor) = call(&keeper, "link_doctor", json!({}));
+    assert_eq!(doctor["ok"], json!(true), "{doctor}");
+    assert!(doctor["findings"].is_array(), "{doctor}");
+    assert!(doctor["counts"].is_object(), "{doctor}");
+}
+
+// 只给 `name` + `agentId` 必须能收敛：这是 agent 最常见的调用方式（它手里没有
+// assetId），也是真实运行时才发现缺的那条路径 —— 缺 `assetId` 时曾经一律报
+// `share.unknownAsset`，因为来源目录只从**已发布**的扫描缓存里找，而 MCP
+// 进程里那份缓存常常是空的。
+#[test]
+fn enable_asset_works_from_a_name_alone() {
+    let fx = Fixture::new("mcp-shared-nameonly");
+    let skill = join(&fx.home, &[".workbuddy", "skills", "notes"]);
+    write(
+        &join(&skill, &["SKILL.md"]),
+        "---\nname: notes\ndescription: Keep meeting notes\n---\n\n# notes\n\nWrite it down.\n",
+    );
+    let keeper = fx.keeper();
+
+    // 不做任何预热调用（不先 list_assets），直接按名字启用。
+    let (_, enabled) = call(
+        &keeper,
+        "enable_asset",
+        json!({ "name": "notes", "kind": "skill", "agentId": "workbuddy" }),
+    );
+    assert_eq!(enabled["ok"], json!(true), "{enabled}");
+    let keeper_dir = enabled["keeper"].as_str().unwrap_or_default().to_string();
+    assert!(keeper_dir.contains("notes"), "{enabled}");
+
+    // agent 侧成了链接，且读得到库内那一份的正文。
+    assert!(
+        std::fs::symlink_metadata(&skill)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+            || std::path::Path::new(&skill).join("SKILL.md").is_file(),
+        "{skill}"
+    );
+    assert!(std::path::Path::new(&keeper_dir).join("SKILL.md").is_file());
+
+    // 矩阵里这一格变成 on —— 与桌面端看到的一致。
+    let (_, lib) = call(&keeper, "list_library", json!({}));
+    let row = lib["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == json!("notes"))
+        .unwrap_or_else(|| panic!("no skills row for notes: {lib}"));
+    assert_eq!(row["cells"]["workbuddy"]["state"], json!("on"), "{row}");
+}
+
+// 写工具必须真的走同一层事务：参数不足时是 `ok:false`（外层 `isError`），
+// 而且磁盘零写入；合法时链接落在 agent 侧、主副本落在库里。
+#[test]
+fn enable_and_disable_asset_go_through_the_shared_transaction() {
+    let fx = Fixture::new("mcp-shared-write");
+    let skill = join(&fx.home, &[".workbuddy", "skills", "pdf"]);
+    write(
+        &join(&skill, &["SKILL.md"]),
+        "---\nname: pdf\ndescription: Extract text from PDFs\n---\n\n# pdf\n\nUse pdftotext.\n",
+    );
+    let keeper = fx.keeper();
+
+    // 缺 name / agentId：工具契约层面就拒绝，不让 keeper 把空名字读成
+    // 「库里没有这份资产」。
+    let (resp, body) = call(&keeper, "enable_asset", json!({ "agentId": "workbuddy" }));
+    assert_eq!(body["ok"], json!(false), "{body}");
+    assert_eq!(resp["result"]["isError"], json!(true), "{resp}");
+    let (_, body) = call(&keeper, "disable_asset", json!({ "name": "pdf" }));
+    assert_eq!(body["ok"], json!(false), "{body}");
+
+    // 正常启用：agent 侧目录变成指向库内的链接，库内出现主副本。
+    let (_, enabled) = call(
+        &keeper,
+        "enable_asset",
+        json!({ "name": "pdf", "kind": "skill", "agentId": "workbuddy" }),
+    );
+    assert_eq!(enabled["ok"], json!(true), "{enabled}");
+    assert!(
+        enabled["keeper"].as_str().unwrap_or_default().contains("pdf"),
+        "{enabled}"
+    );
+    assert!(
+        std::path::Path::new(&skill).exists(),
+        "the agent side must still resolve the skill: {skill}"
+    );
+
+    // 再启用一次是空操作，不是错误。
+    let (_, again) = call(
+        &keeper,
+        "enable_asset",
+        json!({ "name": "pdf", "kind": "skill", "agentId": "workbuddy" }),
+    );
+    assert_eq!(again["ok"], json!(true), "{again}");
+    assert!(
+        again["written"].as_array().is_some_and(|w| w.is_empty()),
+        "{again}"
+    );
+
+    // 停用：只撤链接，库内主副本还在。
+    let keeper_dir = enabled["keeper"].as_str().unwrap_or_default().to_string();
+    let (_, disabled) = call(
+        &keeper,
+        "disable_asset",
+        json!({ "name": "pdf", "kind": "skill", "agentId": "workbuddy" }),
+    );
+    assert_eq!(disabled["ok"], json!(true), "{disabled}");
+    assert!(
+        !std::path::Path::new(&skill).exists(),
+        "disable must remove only the agent-side link: {skill}"
+    );
+    assert!(
+        std::path::Path::new(&keeper_dir)
+            .join("SKILL.md")
+            .is_file(),
+        "the library master copy must stay: {keeper_dir}"
+    );
+
+    // 停用第二次：那个链接已经不在，返回 unsatisfied 而不是成功。
+    let (_, twice) = call(
+        &keeper,
+        "disable_asset",
+        json!({ "name": "pdf", "kind": "skill", "agentId": "workbuddy" }),
+    );
+    assert_eq!(twice["ok"], json!(false), "{twice}");
+}
+
 // `set_baseline` 回的是一个普通对象，而写入路径只会在身后留下
 // 审计日志 —— 现在不再有任何事务目录。
 #[test]
@@ -236,8 +397,8 @@ fn set_baseline_answers_an_object_and_a_write_leaves_no_backup_tree() {
 /* 作为进程的服务器                                                     */
 /* ------------------------------------------------------------------ */
 /// `tools/list` 必须按顺序返回的每一个工具名。改名对已经记住该名字的 agent
-/// 是破坏性变更，所以这里把它钉死。
-const TOOLS: [&str; 15] = [
+/// 是破坏性变更，所以这里把它钉死。**只能追加**（共享层五个工具是 M7 追加的）。
+const TOOLS: [&str; 20] = [
     "list_assets",
     "read_asset",
     "scan",
@@ -253,6 +414,11 @@ const TOOLS: [&str; 15] = [
     "import_bundle",
     "search_registry",
     "install_skill",
+    "list_library",
+    "enable_asset",
+    "disable_asset",
+    "link_doctor",
+    "converge_plan",
 ];
 
 struct Session {

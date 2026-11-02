@@ -225,7 +225,40 @@ fn bootstrap() -> Value {
         "agents": agents,
         "sharedSkillsDir": resolve_home(SHARED_SKILLS_DIR, &home).unwrap_or_default(),
         "kinds": kinds_meta(),
+        "shared": shared_status(&root),
         "version": env!("CARGO_PKG_VERSION")
+    })
+}
+
+/// `bootstrap.shared` 的载荷（§9.4）：**只有 `enabled` 一个布尔**。
+///
+/// 收敛候选数（`duplicateGroups`）**不能**塞进启动路径：它要遍历整棵库与全部
+/// agent 目录，而 `bootstrap` 是同步命令、跑在窗口绘制之前。首次启动的耗时增长
+/// 必须为零，所以候选数由共享页打开时的 `converge_plan` 现算。
+///
+/// `enabled` 的判据是「库根本身可用」：默认库根（`~/.agents`）只要父目录
+/// 解析得出来就算可用 —— 库根目录还不存在是正常状态（一份资产都还没收进去），
+/// 不该被读成「共享层不可用」。
+pub fn shared_status(store_root: &str) -> Value {
+    let home = user_home();
+    let settings = core::settings::read(store_root);
+    let library = core::library::Library::resolve(&home, &settings);
+    let root = library.root().to_path_buf();
+    let explicit = !settings
+        .get("libraryRoot")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .is_empty();
+    // 显式配置的库根必须在盘上；默认库根只要求 home 解析得出来。
+    let enabled = if explicit {
+        root.is_dir() || root.parent().is_some_and(|p| p.is_dir())
+    } else {
+        !home.trim().is_empty() && root.parent().is_some()
+    };
+    json!({
+        "enabled": enabled,
+        "root": core::store::native_str(&root),
     })
 }
 

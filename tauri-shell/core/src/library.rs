@@ -331,29 +331,57 @@ pub struct Migrating {
     pub from: String,
     pub to: String,
     pub done: Vec<String>,
+    /// 已重指到新库根的链接 dst 列表。
+    ///
+    /// 顶层子项靠「磁盘事实」（源侧不在了）就能续跑，链接不行：一条链接在磁盘上
+    /// 看不出它已经被指到新库根还是旧库根 —— 旧库根本身还要等第 4 步才删，所以
+    /// 中断之后「链接还指着旧根」和「已经指对了」长得一模一样。不记下来，每次
+    /// 重跑都会把全部链接再解一次、再建一次：几百次无谓写入，而且中途任何一个
+    /// 失败窗口都可能留下一条悬空链接。
+    pub relinked: Vec<String>,
 }
 
 impl Migrating {
     fn from_json(v: &Value) -> Option<Migrating> {
-        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(|x| x.to_string());
-        let done = v
-            .get("done")
-            .and_then(|x| x.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(|x| x.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let list = |key: &str| {
+            v.get(key)
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|x| x.to_string()))
+                        .collect::<Vec<String>>()
+                })
+                .unwrap_or_default()
+        };
         Some(Migrating {
-            from: s("from")?,
-            to: s("to")?,
-            done,
+            from: v.get("from").and_then(|x| x.as_str())?.to_string(),
+            to: v.get("to").and_then(|x| x.as_str())?.to_string(),
+            done: list("done"),
+            relinked: list("relinked"),
         })
     }
 }
 
 impl Ledger {
+    /// 把台账里某个 `dst` 的 `src` 换掉，返回是否真的改了。
+    ///
+    /// 迁移用它把「这条链接现在指向新库根」写成一行台账记录 —— 否则重跑时
+    /// 只能从磁盘上「这条链接还指着哪」反推，而旧库根在中途还在，反推不出
+    /// 「已经指对了」。
+    pub fn repoint(&mut self, dst: &str, new_src: &str) -> bool {
+        let key = normalize(Path::new(dst));
+        match self.entries.iter_mut().find(|e| normalize(Path::new(&e.dst)) == key) {
+            Some(e) => {
+                if normalize(Path::new(&e.src)) == normalize(Path::new(new_src)) {
+                    return false;
+                }
+                e.src = new_src.to_string();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// 同一个 `dst` 只保留一条：链接是唯一的，重复条目会让「谁建的这一条」变成
     /// 竞猜。重新登记等于更新。
     pub fn upsert(&mut self, entry: LinkEntry) {
@@ -404,7 +432,12 @@ impl Ledger {
         if let Some(m) = &self.migrating {
             map.insert(
                 "migrating".to_string(),
-                json!({ "from": m.from, "to": m.to, "done": m.done }),
+                json!({
+                    "from": m.from,
+                    "to": m.to,
+                    "done": m.done,
+                    "relinked": m.relinked,
+                }),
             );
         }
         Value::Object(map)
@@ -666,6 +699,7 @@ mod tests {
             from: r"C:\old".to_string(),
             to: r"C:\new".to_string(),
             done: vec![r"C:\a\skills\pdf".to_string()],
+            relinked: Vec::new(),
         });
         lib.save_ledger(&l).expect("save");
         let back = lib.load_ledger().expect("reload");

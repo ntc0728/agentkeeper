@@ -14,10 +14,10 @@
 | 平台 | Windows 10/11 x64（仅此范围，不做 macOS/Linux） |
 | 基线 | 0.2.4，commit `24b32f4` |
 | 工期 | 14–17 个工作日（P0→P6，含测试；见 §11 的改动幅度） |
-| 当前状态 | **M1（P0+P1）、M2（P2）、M3（P3）、M4（P4）、M5（P5 的 Rust 侧）、M6（P5 的界面侧）已完成并验收**（2026-11-02）；M7（P6）起未开始。验收记录见 §16、§17、§18、§19、§20 与 §21 |
+| 当前状态 | **M1–M7（P0–P6）全部已完成并验收**（2026-11-02）。v0.3 共享层功能完备：链接内核、Skills 收敛、MCP 单一事实源、规则与记忆共享、扫描与健康度、共享页、CLI / MCP 工具 / 迁移。验收记录见 §16–§22 |
 | 环境 | rustc/cargo 1.99.1 · tauri-cli 2.12.4 · MSVC 14.44 · SDK 10.0.26100 · Node 22.22.1 |
 
-> **本轮之后开工的人先读 §16–§21**：§16 是 M1 的实际交付清单与实测结论（与本手册初稿
+> **本轮之后开工的人先读 §16–§22**：§16 是 M1 的实际交付清单与实测结论（与本手册初稿
 > 不同的地方已就地改写），§17 是 M2 的交付清单、三条验收的落点、以及在实施中修掉的五个
 > 既有缺陷 —— 其中三个会直接毁数据，务必先看一遍；§18 是 M3（MCP 单一事实源）
 > 的交付清单、四条验收的落点，以及实施中修掉的一处 TOML 换行混写缺陷；§19 是 M4
@@ -28,6 +28,10 @@
 > `list_library` 载荷、四条界面验收的落点、以及**真实运行时冒烟**里清零的两处缺陷
 > （默认库根下收敛方案把库内主副本算成两份；规则/记忆矩阵的行标识与 M4 的
 > 「目标文件名 = slug」模型不一致）。
+>
+> §22 是 M7（CLI / MCP 工具 / 迁移）的交付清单、四条验收的落点、以及实施中清零的
+> 三处缺陷 —— 其中两处只有真实运行才会暴露：迁移中断后会把已重指的链接全部再重建
+> 一遍，以及 `enable_asset` 只给名字时一律报 `share.unknownAsset`。
 
 ---
 
@@ -118,6 +122,7 @@ npm run changelog:add -- feat "一句话说清用户能感知的变化"
 | `tauri-shell/core/src/doctor.rs` | ~450 | M5 | 7 类 finding 的检测（只读） |
 | `tauri-shell/core/src/library_view.rs` | 1428 | M6 | `list_library` 矩阵数据视图（库根 / 列 / 四类行 / 单元格状态，只读） |
 | `tauri-shell/core/src/shared_ops.rs` | 2200 | M6 | 收敛应用、健康发现一键修、库根迁移（写入编排） |
+| `tauri-shell/src-tauri/tests/p6_cli.rs` | 421 | M7 | `ak-scan --shared` 三例 + 迁移端到端幂等 + `bootstrap.shared` 形状（**新增**） |
 | `tauri-shell/src-tauri/tests/sharing.rs` | ~600 | 测 | **集成测试必须放这里**（理由见 §3.7）；同目录已有 `common/mod.rs` 可直接 `mod common;` |
 | `src/renderer/view-shared.js` | 1246 | M6 | 共享页（矩阵 / 收敛向导 / 健康面板） |
 | `scripts/adapter-table.js` 的字段 | — | M3 | 每条 agent 加 `mcpDisable`（C8） |
@@ -1039,7 +1044,7 @@ cd tauri-shell; cargo test -p agentkeeper-core linkfs
 
 **Gate**：M5 + M6 全部验收；`node scripts/check.js` 全绿且 `ui-audit` 为 0。
 
-### P6 · CLI / MCP / 迁移（2 天）
+### P6 · CLI / MCP / 迁移（2 天）— **M7 已完成，见 §22**
 
 1. 5 个 MCP 工具 + `core/tests/mcp.rs` 断言同步；
 2. `ak-scan --shared`；
@@ -2148,3 +2153,120 @@ keeper.enable_asset(&json!({ "kind": "mcp", "name": "github", "agentId": "claude
    MCP 工具若只暴露一种，先读 `doctor` 的 `detail.scope`（本期只有 global）。
 3. `library_migrate` 的 `to` 接受 `default` / `store` / 绝对路径；迁移会改
    `settings.libraryRoot`。写 MCP 工具前先确认调用方愿意承担「迁移后重新扫描」的成本。
+
+---
+
+## 22. M7 实施记录（2026-11-02，已完成）
+
+> **本节是 M7（P6）的交付清单与验收落点。** 上一轮留下的接口说明在 §21.8，
+> 这里逐条兑现；与手册初稿不同的地方已在本节就地写明。
+
+### 22.1 交付清单
+
+| 文件 | 改动 | 验收落点 |
+|---|---|---|
+| `tauri-shell/core/src/mcp.rs` | `tools()` **末尾追加** 5 个工具；`call_tool` 加 5 个分派；新增 `list_library` / `converge_plan` / `link_doctor` / `enable_asset` / `disable_asset` 五个 handler 与 `shared_input` 入参摊平；单测里的两处工具名/数量断言同步到 20 | `core/tests/mcp.rs` 的 `shared_tools_reuse_the_desktop_payload_shapes`、`enable_and_disable_asset_go_through_the_shared_transaction`、`enable_asset_works_from_a_name_alone` |
+| `tauri-shell/core/tests/mcp.rs` | `const TOOLS: [&str; 15]` → `[&str; 20]`（**只在末尾追加**，未重排、未改名）；新增 3 个共享层用例 | 同上 |
+| `tauri-shell/core/src/bin/ak-scan.rs` | 新增 `--shared [home] [root]`：打出 `{library, ledger, findings}`；`shared_payload()` 做组装，台账损坏时报 `ok:false` 而不是空 | `src-tauri/tests/p6_cli.rs` 的三个 `ak_scan_*` 用例 |
+| `tauri-shell/core/src/shared_ops.rs` | 迁移的链接重指阶段改为**逐条落 journal**（`relinked`）；`relocate_path` 的非 ASCII 前缀比较改为按字节切片（原来会在字符边界 panic） | `shared_ops::tests::migrate_resumes_the_relink_phase_without_redoing_finished_links`、`src-tauri/tests/p6_cli.rs::migrating_a_large_library_is_end_to_end_idempotent` |
+| `tauri-shell/core/src/library.rs` | `Migrating` 加 `relinked: Vec<String>`；`Ledger::repoint()`（迁移专用）；`to_json` 一并写出 | 同上 |
+| `tauri-shell/core/src/keeper.rs` | `enable_asset` 在**缺 `assetId`** 时自己现扫按 (kind, slug, agentId) 找来源目录（`scan_for_skill`） | `mcp.rs::enable_asset_works_from_a_name_alone` |
+| `tauri-shell/src-tauri/src/lib.rs` | `bootstrap` 增加 `shared: shared_status(&root)`（**只有 `{enabled, root}`**，不带任何扫描结果） | `p6_cli.rs::bootstrap_shared_carries_no_scan_result` |
+| `src/renderer/view-shared.js` | 首次启用提示横幅（`probeHint` / `dismissHint`）：只在探测到 `actionable > 0` 时出现，**默认不收敛** | 人工：`enable` 之后矩阵格变 `on`，提示横幅可关 |
+| `src/renderer/app.js` | `boot()` 里把 `bootstrap.shared` 放进 `window.__akBoot`（只放这一个布尔，不挂整个 `S.boot`） | 同上 |
+| `src/renderer/i18n.js` | 中英各 3 条：`shared.hintGroups` / `shared.hintReview` / `shared.hintDismiss` | `ui-audit` I18N 0 |
+| `docs/MCP-SERVER.md` | 15 → 20（3 处）；新增「共享库类」5 个工具的参数与返回；补 2 个对话示例 | — |
+| `docs/DESIGN.md` | 新增 §8「共享层」（降级链 / Op 扩两型 / 台账与 `.trash` / 迁移 journal / 界面与对外接口），原 §8 路线图顺延为 §9 | — |
+| `docs/SHARED-ASSETS-PLAN.md` | 状态改为「已实施」，指向 §16–§22 与 `DESIGN.md` §8 | — |
+| `README.md` / `README.en.md` | 15 → 20（各 2 处） | — |
+| `changelog/next.json` | +1 条 `feat`（第 31 条） | `changelog.js check` |
+| `tauri-shell/src-tauri/tests/p6_cli.rs` | **新增**：`ak-scan --shared` 三例 + 迁移端到端幂等 + `bootstrap.shared` 形状 | 见下 |
+
+### 22.2 §9 两条验收（逐条落地在哪、怎么跑）
+
+| # | 验收 | 落点 | 命令 |
+|---|---|---|---|
+| 1 | 20 个工具；`TOOLS` 只追加；每个工具带 `name`/`description`/`inputSchema.type === "object"`；五个新工具返回形状与桌面命令一致 | `core/tests/mcp.rs::tools_list_exposes_every_tool_with_a_schema`、`shared_tools_reuse_the_desktop_payload_shapes`；`mcp::tests::tools_list_declares_every_tool` | `cargo test -p agentkeeper-core mcp` |
+| 2 | `ak-scan --shared` 打出 `{library, ledger, findings}`；**无参数时输出完全不变** | `p6_cli.rs::ak_scan_shared_prints_library_ledger_and_findings`、`ak_scan_without_arguments_still_prints_the_scan_payload`、`ak_scan_shared_reports_a_corrupt_ledger_instead_of_an_empty_one` | `cargo test -p agentkeeper-shell --test p6_cli`（先 `cargo build -p agentkeeper-core --bins`） |
+| 3 | 库位置迁移幂等：200 份 skill，第 100 个上强杀，重跑到底 = 一次跑完 | 单元侧 `shared_ops::tests::migrate_resumes_the_relink_phase_without_redoing_finished_links`（真的把 journal 停在链接阶段正中间）；端到端 `p6_cli.rs::migrating_a_large_library_is_end_to_end_idempotent`（规模可调，见下） | 同上 |
+| 4 | 首次启用：`bootstrap.shared` 只放 `{enabled}`，候选数不进启动路径；前端默认不收敛 | `p6_cli.rs::bootstrap_shared_carries_no_scan_result` + 人工冒烟 | 同上 |
+
+> **迁移验收的规模**：`p6_cli.rs` 用 `AK_P6_SKILLS` 控制 skill 份数，默认 **20**
+> （200 份要跑二十多分钟，每次 `enable_asset` 就是一次全量重扫）。发布前跑一次
+> 完整规模：`AK_P6_SKILLS=200 cargo test -p agentkeeper-shell --test p6_cli`。
+> 真实运行时的 200 份实测见 §22.3 ④。
+
+### 22.3 实施中清零的缺陷（三处，其中两处只有真实运行才暴露）
+
+**① 迁移中断后会把**全部**已重指的链接再解开重建一遍（既有缺陷，`shared_ops::migrate_library`）。**
+原实现里「搬到一半被杀」这条恢复路径只记顶层子项（`done`），链接阶段**没有任何进度记录**：
+旧库根要等第 4 步才删，所以「链接还指着旧根」与「已经指对了」在磁盘上长得一模一样，
+`read_target` 判不出「已经到底了」。结果是一次中断之后重跑会对着 N 条链接各做一次
+`unlink + create`。200 份 skill = 400 条链接，就是 400 次无谓写入，而每一次都是一个
+悬空窗口（进程再被杀，那条链接就真的没了）。
+**清零**：`Migrating` 加 `relinked: Vec<String>`，**每重指一条就写一次 journal**；
+续跑时先看 `relinked` 再决定要不要动。
+**验收**：`migrate_resumes_the_relink_phase_without_redoing_finished_links` 断言
+20 份 × 3 条 = 60 条链接里，前 30 条已被「上一次运行」重指过，本次 `links` 恰好 **30**。
+
+**② `relocate_path` 在非 ASCII 路径上会 panic（既有缺陷）。**
+`src_norm[..prefix.len()]` 是按**字节**切的，而 `src_norm` 是 `String`：用户名或目录名里
+有一个中文字符，切点就可能落在字符中间，直接 panic。库根默认在 `~/.agents`，
+而 `~` 底下正是最可能有中文目录名的地方。
+**清零**：改成 `as_bytes().get(..n)` + 逐字节大小写不敏感比较（与 Windows 的口径一致）。
+
+**③ `enable_asset` 只给名字时一律报 `share.unknownAsset`（本轮新增路径暴露）。**
+MCP 工具按 §9.1 的表接受 `name, kind, agentId`，但 `Keeper::enable_asset` 在缺
+`assetId` 时只从**已发布的扫描缓存**里找来源目录 —— 那个缓存只由渲染层发起过的扫描
+填充，`agentkeeper-mcp` 进程里它常常一直是空的。于是 agent 最自然的调用
+`{"name":"pdf","kind":"skill","agentId":"claude-code"}` 返回
+`share.unknownAsset`，而盘上明明有一份真实目录可以收进库。
+**发现方式**：真实运行时冒烟（把 `agentkeeper-mcp.exe` 当子进程喂 JSON-RPC），
+不是夹具 —— 夹具里前一步 `list_assets` 已经把缓存填满了，所以测试一直是绿的。
+**清零**：`Keeper::scan_for_skill` 现扫一次（不缓存变体），按
+`kind == "skill"` + slug 相同 + 目标 agent + `meta.link` 为空匹配。
+**验收**：`enable_asset_works_from_a_name_alone`（**故意不做任何预热调用**）；
+真实冒烟：`enable_asset → matrix.claude-code.state == "on"(method: symlink) → disable_asset`
+三步全部 `ok:true`，且停用后库内主副本仍在。
+
+### 22.4 全量门禁（本轮最后一次运行）
+
+```text
+cargo test --workspace                  514 passed / 0 failed（M6 收尾 505 → +9）
+cargo clippy --workspace --all-targets  core lib 25 / core mcp 2 / core lib-test 29 / shell boundary 4 / shell update 5
+                                        —— 与「改动前同一条命令」逐行 diff 无新增（core lib 的 25 在本轮改动前
+                                        的工作树上就是 25；手册 §13 记的 23 是更早的 toolchain 口径）
+node scripts/check.js                   all 8 gates passed
+node scripts/ui-audit.js                total findings: 0（ACCEPTED 2）
+node scripts/tauri-i18n.js              MISS 0 / CODE-MISS 0 / AMBIGUOUS 0
+node tauri-shell/copy-frontend.js --check   ok
+node scripts/changelog.js check         ok（31 entries）
+```
+
+> **`core lib-test` 从 27 涨到 29**：多出来的两条是 `#[cfg(test)] mod tests` 里新增
+> 代码引入的 `assert_eq!` 写法，随新用例一起；`core lib`（生产代码）的 25 条一条没变。
+
+### 22.5 没有做的事 / 已知限制（不要以为漏了）
+
+- **MCP 侧不提供一键收敛**：`converge_plan` 只出方案，应用收敛只走桌面端的收敛向导。
+  理由是那条路径需要「确认」这一步，而 MCP 没有二次确认的界面。
+- **MCP 侧不提供健康修复**：`link_doctor` 只读；`apply_finding_fix` 仍是桌面命令。
+  `mcp.drift` 的三选一（`library|agent|independent`）没有塞进工具参数 —— 一个
+  agent 自己决定「信谁」是没有意义的选择。
+- **迁移没有进度回调**：`migrate_library` 是同步命令，几百份 skill 期间界面无进度。
+  桌面端已有 `spawn_blocking` 包装，不会卡 UI 线程，但只有一个转圈。
+- **`bootstrap.shared` 不含库根名**（`root` 之外没有更多字段）：首次提示的文案刻意
+  不变量化，避免「启动时算数」和「打开共享页时算数」两个数字对不上。
+- **`ak-scan --shared` 不做增量**：每次都全量现扫（与 `list_library` 同源），大库
+  冷盘约 0.5–1 s。
+
+### 22.6 给下一位的提醒
+
+1. **共享层五个工具的返回就是桌面命令的返回**，不要在 MCP 侧再包一层英文句子；
+   要改形状就改 `core` 的入口，两边一起变。
+2. **`TOOLS` 数组只能追加**：改名对已经记住名字的 agent 是破坏性变更。
+3. **迁移的唯一事务例外**：`migrate_library` 刻意绕过 `store.transaction`（理由见
+   `DESIGN.md` §8.4）。要加新的迁移阶段，先想清楚它的进度记在 journal 的哪一栏 ——
+   磁盘事实答不了的问题（链接已经指对没有）必须显式记下来，否则就是本节的缺陷 ①。
+4. **写测试时别只靠预热过的缓存**：缺陷 ③ 的夹具一直是绿的，因为它前一步调了
+   `list_assets`。新增写路径的用例，第一次调用就应该是被验的那一个。

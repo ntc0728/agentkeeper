@@ -21,7 +21,7 @@ DOM app (`src/renderer`) with no frontend build step.
   for confirmation and lists the real paths it will touch
 - **Distribute and audit** — copy assets to other agents or projects; append-only journal and
   baseline fingerprints that report silent edits
-- **Agents manage themselves** — the same core ships as a 15-tool stdio MCP server
+- **Agents manage themselves** — the same core ships as a 20-tool stdio MCP server
 
 ## Install
 
@@ -54,7 +54,8 @@ Requires Windows 10/11 with the WebView2 runtime (bundled with Windows 11).
 }
 ```
 
-15 tools cover listing, validation, writes, distribution and bundle migration, behind the same
+20 tools cover listing, validation, writes, distribution, bundle migration and the shared library
+(one master copy in the library, linked / configured / composed into each agent), behind the same
 validation and transactional write path as the GUI. See [docs/MCP-SERVER.md](docs/MCP-SERVER.md).
 
 ## Build from source

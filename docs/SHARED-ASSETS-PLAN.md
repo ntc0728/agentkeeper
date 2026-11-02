@@ -1,10 +1,11 @@
 # 共享资产整改计划 —— 同一份 skills / MCP / 规则 / 记忆，不再逐 agent 复制
 
-> 状态：**实施中** —— M1（链接内核）与 M2（Skills 共享）已完成，见 `SHARED-ASSETS-IMPLEMENTATION.md` §16、§17
+> 状态：**已实施** —— M1–M7 全部完成并验收，见 `SHARED-ASSETS-IMPLEMENTATION.md` §16–§22；
+> 长期有效的部分已并入 `DESIGN.md` §8「共享层」。本文保留为决策依据（「为什么这么做」）
 > 目标版本：v0.3
 > 平台：Windows 10/11（与现有发布范围一致）
-> 本文只描述要做的事、为什么这样做、怎么验收。实现细节以代码与 `DESIGN.md` 为准，
-> 实施完成后本文件并入 `DESIGN.md` 的对应章节。
+> 本文只描述要做的事、为什么这样做、怎么验收。实现细节以代码与 `DESIGN.md` 为准。
+> **与实现口径不一致的地方以 `SHARED-ASSETS-IMPLEMENTATION.md` §12 为准。**
 
 ---
 

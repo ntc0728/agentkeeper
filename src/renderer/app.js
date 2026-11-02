@@ -884,6 +884,11 @@ async function boot() {
   // 60px。
   if (localStorage.getItem('ak.side') === 'collapsed') $('#app').classList.add('collapsed');
   S.boot = await window.ak.bootstrap();
+  // 共享页（view-shared.js）是独立文件，读不到这里的模块状态；它只需要
+  // bootstrap 里那一个 `shared.enabled` 布尔，所以就放在这一个窗口级只读槽里。
+  // 不把 `S.boot` 整个挂上去：那份载荷里还有 17 个适配器的解析结果，任何页面
+  // 顺手改动它都会变成一类极难排查的串扰。
+  window.__akBoot = { shared: (S.boot && S.boot.shared) || { enabled: true } };
   // 设置决定语言和主题，所以要在决定首帧之前加载 —— theme-init.js 已经处理过
   // 那个属性，这里只是同步一下。
   try { S.settings = (await window.ak.getSettings()) || {}; } catch (e) { S.settings = {}; }

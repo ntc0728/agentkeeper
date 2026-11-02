@@ -97,7 +97,7 @@ tauri-shell/target/release/agentkeeper-mcp.exe
 }
 ```
 
-重启 Claude Desktop，工具面板出现 `agentkeeper` 的 15 个工具即接入成功。
+重启 Claude Desktop，工具面板出现 `agentkeeper` 的 20 个工具即接入成功。
 
 ### 3.2 Cursor
 
@@ -122,7 +122,7 @@ tauri-shell/target/release/agentkeeper-mcp.exe
 - 传输：stdio，每行一个 JSON-RPC 2.0 消息；**不支持 batch**
 - `initialize` → `protocolVersion: "2024-11-05"`、`serverInfo.name: "agentkeeper"`、`capabilities.tools`
 - 通知（`notifications/*`、无 `id` 的请求、空行）**一律不应答**
-- `tools/list` → 15 个工具定义（含 JSON Schema 入参）
+- `tools/list` → 20 个工具定义（含 JSON Schema 入参）
 - `tools/call` → `{name, arguments}`，返回 `{content:[{type:"text", text:"<JSON 字符串>"}]}`；
   工具执行失败时信封上带 `result.isError: true`，payload 里是 `{ok:false, error}`
 - 协议错误码：非法 JSON `-32700`（`id: null`）、未知方法 `-32601`、未知工具 `-32602`
@@ -133,7 +133,7 @@ tauri-shell/target/release/agentkeeper-mcp.exe
 
 ---
 
-## 4. 工具 API（15 个）
+## 4. 工具 API（20 个）
 
 ### 查询类
 
@@ -221,6 +221,49 @@ tauri-shell/target/release/agentkeeper-mcp.exe
 来源 repo 记入审计日志。
 未知 `agentId` 在拉起 git 之前就报错。
 
+### 共享库类
+
+这一组与桌面应用「共享」页**读的是同一批 core 函数**（`library_view::list_library`、
+`shared_ops::converge_plan` / `doctor_report`、`Keeper::enable_asset` / `disable_asset`），
+所以返回载荷与界面看到的完全一致 —— 不存在「MCP 版本」的第二套形状。
+五个工具追加在列表末尾，之前的 15 个名字、描述与入参一个字节都没变。
+
+#### `list_library`
+无参。→ `{ok, root, cap, agents[], skills[], mcp[], rules[], memory[]}`。
+矩阵的唯一数据源：`agents` 是列，四类是行，每个单元格的 `state` 取
+`on` / `off` / `copy` / `partial` / `diverged` / `na` / `error` 之一（词表见 `M6-CONTRACT` §2.1）。
+**不缓存**：每次调用都按盘上的当前事实现算。
+
+#### `enable_asset`
+```json
+{ "name": "code-review", "kind": "skill", "agentId": "codex", "scope": "global" }
+```
+* `kind` 取 `skill`（默认）/ `mcp` / `rule` / `memory`；
+* `name` + `agentId` 必填；`assetId` 可代替 `name`，但**不是必填** ——
+  只给名字时服务端会现扫一次、按 (kind, slug, agentId) 找到盘上那份真实副本
+  （agent 手里通常没有 assetId，这是最常见的调用方式）；
+* `kind: "mcp"` 时库里还没有这条记录，就再给 `config`（`command` / `args` / `env` / `url`），
+  它会先被写进库、再物化到该 agent 的配置里；
+* `scope: "project"` 时补 `projectId`（`mcp` 则给 `file`，即那个 agent 的项目配置文件）。
+
+→ `{ok, written[], skipped[], keeper}`；已经是链接时是**空操作**（`ok:true` + `skipped: already linked`），
+不是错误。一次事务，失败按快照整笔还原。
+
+#### `disable_asset`
+入参同上（不需要 `config`）→ `{ok, written[], skipped[]}`。
+只删该 agent 侧的那一条：skill 删链接（库内主副本不动）、`mcp` 从配置里删条目
+（或按 `mcpDisable: "flag"` 置 `enabled:false`）、`rule`/`memory` 只剥掉我们放进去的区块。
+链接已经不在了返回 `ok:false` + `share.notLinked`（**不是**成功的空操作）。
+
+#### `link_doctor`
+无参。→ `{ok, findings[], counts}`。七类只读发现（`link.dangling` / `link.hijacked` /
+`link.unmanaged` / `link.fragile` / `asset.duplicated` / `mcp.drift` / `link.ledgerDrift`），
+每条带 `code` / `path` / 人可读解释。**零写入**：修复在桌面应用里做。
+
+#### `converge_plan`
+无参。→ `{ok, groups[], savedBytes, actionable}`。**只出方案，零写入**；
+`actionable` 是「能一键收敛」的组数（排除内容不一致的组）。应用收敛在桌面应用的收敛向导里。
+
 ---
 
 ## 5. 典型对话示例
@@ -243,6 +286,18 @@ Agent 调 `baseline_diff` —— 相对上次锚点的变更/新增/消失清单
 > 「这个叫 xxx 的 MCP 服务器安全吗？」
 
 Agent 调 `read_asset`，安全发现里会列出匹配到的模式与证据片段。
+
+> 「code-review 这个技能现在到底装在哪些 Agent 上？缺的那个帮我接上」
+
+Agent 调 `list_library` 看矩阵单元格，再调 `enable_asset`
+（`{"name":"code-review","kind":"skill","agentId":"cursor"}`）
+把 cursor 那份换成指向库内主副本的链接 —— 只动这一个位置，库内主副本与其他 Agent 不受影响。
+
+> 「有没有重复的技能白占磁盘？先别动我的东西」
+
+Agent 调 `converge_plan`（零写入）报出组数、可释放字节数与 `actionable`；
+要真收敛就请人到桌面应用的「共享」页点向导 —— MCP 侧刻意不提供一键应用，
+因为那会把「确认」这一步整个省掉。
 
 ---
 

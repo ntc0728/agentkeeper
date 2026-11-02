@@ -503,15 +503,91 @@ PowerShell 进程默认 **DPI-unaware**：Windows 常见 150% 缩放（144 DPI�
 
 ---
 
-## 8. 路线图
+## 8. 共享层（v0.3）
+
+同一份 skills / MCP / 规则 / 记忆不再逐 agent 复制，而是**库内一份主副本 + 各处指向它**。
+计划与决策依据见 `SHARED-ASSETS-PLAN.md`，逐阶段的实施记录与验收落点见
+`SHARED-ASSETS-IMPLEMENTATION.md`（§16–§22）。这里只留长期有效的那部分。
+
+### 8.1 链接降级链
+
+`linkfs.rs` 在目标机上**实测**能力，而不是从 PowerShell 的结果外推
+（`New-Item -ItemType SymbolicLink` 被拒的会话里，Rust 的 `symlink_dir` 照样成功）：
+
+| 用途 | 顺序 | 说明 |
+|---|---|---|
+| 目录 | `symlink → junction → Err` | junction 要自己发 `FSCTL_SET_REPARSE_POINT`（std 没有 junction API） |
+| 单文件 | `symlink → hardlink → Err` | 硬链接只同卷、且断开后内容各自独立（doctor 的 `link.fragile` 管这个） |
+
+`copy` **不由 linkfs 产生**：它是 `Op::copy_dir` 的语义，由调用方显式选择。全链路只在
+「本机连链接都建不出来」时退化成受管副本，界面上以 `copyOnly` 横幅说明。
+
+`file_type().is_symlink()` **认不出 junction**，所以捕获链接一律走 `linkfs::entry_link_kind`。
+快照里若把 junction 当成普通目录，会顺着链接把整个库内容包一遍、还原时写成真实副本
+—— 静默、昂贵、不可察觉。
+
+### 8.2 事务扩两型
+
+`store::OpKind` 增加 `LinkDir` / `LinkFile`（`Op::link_dir` / `Op::link_file`），与既有的
+写/拷贝/删除同走 `store.transaction()`：写前快照、失败整笔还原、行 `audit.jsonl`。
+快照侧 `DirSnap::Link` / `Snapshot::Link` 记下链接的**种类**，还原时按种类重建
+（junction 还原成 junction，硬链接还原成硬链接）—— 否则一次失败的事务会把用户的
+junction 悄悄换成 symlink。
+
+「卸链接」与「建链接」必须在**同一个事务**里：目标已存在时 `linkDir` 会直接拒绝，
+所以真实目录必须先删；只有同一事务才可能一起回滚。
+
+### 8.3 台账与 `.trash`
+
+`<library>/links.json` 是链接的**单一事实源**（`Kind` / `name` / `src` / `dst` / `method` /
+`mode` / `owner` / 时间戳）。损坏时**不当作空**：读台账返回 `Err`，调用方报
+`link.ledgerDrift` —— 把损坏读成「没有链接」会让 doctor 以为库是干净的。
+
+库内资产删除进 `<store>/.trash`，`settings::ensure_store` 在启动时清掉超过 `trashDays`
+（默认 30 天）的条目。与「启动即删 `backups/`」同一条规矩：尽力而为、绝不阻塞启动。
+
+### 8.4 库位置迁移
+
+在 `~/.agents`（共享约定）与 `<store>/library`（私有）之间切换。迁移是**唯一**允许绕过
+`store.transaction` 的共享写路径：它要搬的是整棵库，一次事务要么撑爆撤销预算，要么把几百
+次重命名绑成一个做不完的原子操作。取而代之的是 journal：
+
+1. 台账里写 `migrating { from, to, done, relinked }`；
+2. 逐个搬顶层子项（`rename`，跨卷退回 `copy + rm`），每搬一项刷一次 `done`；
+3. 逐条重指链接，**每重指一条就写一次 `relinked`**；
+4. 清 journal，把台账写到新库根、删旧台账，最后改 `settings.libraryRoot`。
+
+`relinked` 不是冗余：顶层子项搬没搬，磁盘自己会答（源侧不在了）；**链接指没指对，磁盘答不了**
+—— 旧库根要等第 4 步才删，所以「还指着旧根」与「已经指对了」在盘上长得一样。少了这一栏，
+中断后每次重跑都会把全部链接解开重建一遍，几百次无谓写入，而每一次都是一个悬空窗口。
+
+### 8.5 界面与对外接口
+
+8 个桌面命令（`list_library` / `converge_plan` / `apply_converge` / `shared_doctor` /
+`apply_finding_fix` / `enable_asset` / `disable_asset` / `library_migrate`）+ 5 个 MCP 工具
+（`list_library` / `enable_asset` / `disable_asset` / `link_doctor` / `converge_plan`）
+**读的是同一批 core 函数**，载荷形状完全一致，不存在第二套。
+
+`bootstrap` 只回 `shared: { enabled }`：收敛候选数要遍历整棵库与全部 agent 目录，
+而 `bootstrap` 是同步命令、跑在窗口绘制之前 —— 把它塞进启动路径等于给每次启动加一次
+全盘扫描。候选数在共享页打开时由 `converge_plan` 现算，且**默认不收敛**，点进向导才写盘。
+
+`ak-scan --shared` 把 `{ library, ledger, findings }` 打成一份文档，供 shell 里逐字段 diff；
+无参数时的输出一个字都没变（CI 依赖它）。
+
+---
+
+## 9. 路线图
 
 **v0.2 — 当前版本**
 - Rust core 承担全部业务逻辑，扫描 990 资产 0.5 s
 - 安装包 3.86 MiB / currentUser / 无管理员权限
-- 15 个工具的 stdio MCP server 随包分发
+- 15 个工具的 stdio MCP server 随包分发（v0.3 起 20 个，见 §8）
 
-**v0.3 — CLI 通道**
-- `ak scan --json`、`ak apply`、`ak doctor`（`ak-scan` 已是雏形）
+**v0.3 — 共享层（已完成，见 §8）**
+- 同一份 skills / MCP / 规则 / 记忆不再逐 agent 复制：库内一份主副本 + 各处链接
+- 20 个工具的 stdio MCP server（新增 5 个共享库工具）
+- `ak-scan --shared`、库位置迁移（可中断续跑）
 - 错误码体系在 Rust 侧补齐
 
 **v0.4 — 团队**
@@ -532,6 +608,7 @@ agentkeeper/
 │   ├── core/                       ★ agentkeeper-core：业务核心，零 Tauri 依赖
 │   │   ├── src/lib.rs              core 模块树 + JS trim 兼容层
 │   │   ├── src/*.rs                scan · assets · registry · store · keeper · mcp · security
+│   │   │                            · linkfs · library · compose · sharing · doctor · library_view · shared_ops
 │   │   ├── src/bin/                agentkeeper-mcp（stdio MCP server）· ak-scan（无头扫描）
 │   │   ├── tests/                  mcp 协议回归
 │   │   └── Cargo.toml              只有非 Tauri 依赖（serde · toml · ureq · windows-sys …）
