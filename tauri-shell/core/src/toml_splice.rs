@@ -198,7 +198,7 @@ fn find_region(lines: &[String], server: &str) -> Option<Region> {
     let head = header_re(server);
     let start = lines.iter().position(|l| head.is_match(l))?;
     let any = any_header_re();
-    let base = clean_key(&any.captures(&lines[start])?.get(1)?.as_str());
+    let base = clean_key(any.captures(lines[start].as_str())?.get(1)?.as_str());
     let mut end = lines.len();
     for (i, line) in lines.iter().enumerate().skip(start + 1) {
         let Some(caps) = any.captures(line) else {

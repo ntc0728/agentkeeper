@@ -231,7 +231,8 @@ tauri-shell/target/release/agentkeeper-mcp.exe
 #### `list_library`
 无参。→ `{ok, root, cap, agents[], skills[], mcp[], rules[], memory[]}`。
 矩阵的唯一数据源：`agents` 是列，四类是行，每个单元格的 `state` 取
-`on` / `off` / `copy` / `partial` / `diverged` / `na` / `error` 之一（词表见 `M6-CONTRACT` §2.1）。
+`on` / `off` / `copy` / `foreign`（被顶掉） / `drift`（MCP 漂移） / `unsupported`（附 `reason`） / `error` 之一
+（词表以 `library_view.rs` 与 `view-shared.js` 的实现为准）。
 **不缓存**：每次调用都按盘上的当前事实现算。
 
 #### `enable_asset`

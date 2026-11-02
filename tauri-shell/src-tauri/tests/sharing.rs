@@ -567,3 +567,64 @@ fn enabling_an_unsupported_kind_reports_a_code() {
     assert_eq!(r["ok"], json!(false));
     assert_eq!(r["code"], json!("share.unsupportedKind"));
 }
+
+/// 审核发现（M7）：`enable_asset` 在「目标已是链接」时只看 `owns_target` 就返回
+/// `already linked`，于是**指错了地方**的链接——比如库迁移后仍指着旧库根、或被别的
+/// 资产占位——永远没人修，调用方（尤其经 MCP 进来的 agent，它没有「重指」入口）
+/// 拿到的却是一次「成功」。
+///
+/// 现在必须比对到**本资产的库内主副本**才算空操作；不一致就走同一事务里的
+/// 删 + 重指。
+#[test]
+fn enabling_repoints_a_link_that_points_at_the_wrong_master_copy() {
+    let _lock = common::serial();
+    let fx = Fixture::new("sharing-repoint");
+    if !links_available(&fx) {
+        eprintln!("skipping: this machine cannot create directory links");
+        return;
+    }
+    fx.seed_skill("claude-code", "pdf", "# PDF\n\nExtract text.\n");
+    // 库里先有两份主副本：pdf 与别的（notes），以及一份 pdf 的真身。
+    fx.keeper().enable_asset(&json!({
+        "assetId": fx.scan()["assets"].as_array().unwrap().iter()
+            .find(|a| a["kind"] == json!("skill") && a["name"] == json!("pdf") && a["agentId"] == json!("claude-code"))
+            .unwrap()["id"],
+        "agentId": "claude-code",
+        "scope": "global",
+    }));
+
+    // 把 agent 侧那条链接**改指到别的资产**（模拟迁移残留 / 被别处接走）：
+    // 先撤掉真链接，再手建一条指向库内 notes 的链接。
+    let dst = fx.agent_skill("claude-code", "pdf");
+    let dst_path = std::path::Path::new(&dst);
+    assert!(linkfs::is_link(dst_path), "fixture must start from a linked state");
+    linkfs::unlink(dst_path).expect("unlink fixture link");
+    std::fs::create_dir_all(&fx.library_skill("notes")).expect("notes master");
+    std::fs::write(join(&fx.library_skill("notes"), &["SKILL.md"]), "# notes\n").expect("write notes");
+    linkfs::create_dir_link(
+        std::path::Path::new(&fx.library_skill("notes")),
+        dst_path,
+        None,
+    )
+    .expect("plant a wrong-target link");
+
+    // 现在 enable：它不能再报 already linked，而要把链接重指回 pdf 的主副本。
+    let r = fx.keeper().enable_asset(&json!({
+        "name": "pdf",
+        "kind": "skill",
+        "agentId": "claude-code",
+        "scope": "global",
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert!(
+        r["written"].as_array().is_some_and(|w| !w.is_empty()),
+        "a wrong-target link must be repointed, not skipped: {r}"
+    );
+    let target = linkfs::read_target(dst_path).unwrap_or_default();
+    assert!(
+        linkfs::same_target(&target, std::path::Path::new(&fx.library_skill("pdf"))),
+        "link must now point at pdf's own master: {:?} -> {}",
+        target,
+        fx.library_skill("pdf")
+    );
+}

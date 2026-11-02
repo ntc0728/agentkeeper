@@ -146,25 +146,33 @@ const AREAS = [
   {
     name: 'doctor',
     // 健康检查只读，但它的验收走完整扫描 + 真实事务，所以 core 单测与
-    // `--test doctor` 都要跑；`sharing.rs` 的漂移是 M3 的，这里不重复。
+    // `--test doctor` 都要跑；`contract.rs` 断言了 `sameInode` 与扫描载荷，
+    // doctor/scan 的改动会牵动它。
     match: (f) => /tauri-shell\/core\/src\/doctor\.rs$/.test(f),
     tests: [
       { pkg: 'agentkeeper-core', args: ['--lib'] },
       { pkg: 'agentkeeper-shell', args: ['--test', 'doctor'] },
+      { pkg: 'agentkeeper-shell', args: ['--test', 'contract'] },
     ],
   },
   {
     name: 'shared',
-    // M6 的共享页：矩阵数据视图 + 写入编排 + 8 个命令与桥接。
-    // `lib.rs` 的改动同时命中 `shell` 区域，两边是叠加的（都跑不亏）。
+    // M6/M7 的共享层：矩阵数据视图 + 写入编排 + 收敛/区块的纯函数 + 8 个命令
+    // 与桥接。`sharing.rs` / `compose.rs` 是收敛与规则共享的主实现，M6 登记
+    // 时漏了它们，改了却一条测试都不跑。`lib.rs` 的改动同时命中 `shell` 区域，
+    // 两边是叠加的（都跑不亏）。
     match: (f) =>
-      /tauri-shell\/core\/src\/(library_view|shared_ops)\.rs$/.test(f) ||
+      /tauri-shell\/core\/src\/(library_view|shared_ops|sharing|compose|library)\.rs$/.test(f) ||
       /tauri-shell\/src-tauri\/src\/lib\.rs$/.test(f) ||
-      /tauri-shell\/src-tauri\/tests\/shared_ui\.rs$/.test(f) ||
+      /tauri-shell\/src-tauri\/tests\/(shared_ui|sharing|rule_sharing|mcp_sharing|p6_cli)\.rs$/.test(f) ||
       /src\/renderer\/(view-shared|engine-zh)\.js$/.test(f),
     tests: [
       { pkg: 'agentkeeper-core', args: ['--lib'] },
       { pkg: 'agentkeeper-shell', args: ['--test', 'shared_ui'] },
+      { pkg: 'agentkeeper-shell', args: ['--test', 'sharing'] },
+      { pkg: 'agentkeeper-shell', args: ['--test', 'rule_sharing'] },
+      { pkg: 'agentkeeper-shell', args: ['--test', 'mcp_sharing'] },
+      { pkg: 'agentkeeper-shell', args: ['--test', 'p6_cli'] },
       { pkg: 'agentkeeper-shell', args: ['--lib'] },
       { pkg: 'agentkeeper-shell', args: ['--test', 'contract'] },
     ],

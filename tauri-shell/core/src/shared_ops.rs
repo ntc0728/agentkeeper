@@ -1326,7 +1326,17 @@ pub fn migrate_library(keeper: &Keeper, input: &Value) -> Value {
             continue;
         }
         // 已经重指过：上一次运行把这条链接改到新库根并写进了 journal。
-        if relinked.iter().any(|d| paths_equal(d, &dst)) || paths_equal(&old_src, &new_src) {
+        //
+        // journal 只是进度记录，**磁盘才是事实**：重指之后这条链接可能被外部改指
+        // 到别处，那样直接跳过会把台账写成 `new_src` 而盘上指的还是旧目标 ——
+        // 之后只有 doctor 报一条「台账与盘不一致」，重跑本应把它修回来。所以
+        // journal 命中还要读一次盘确认（每条一次 `read_target`，迁移本来就在
+        // 逐条走）。
+        let journal_done = relinked.iter().any(|d| paths_equal(d, &dst));
+        let link_ok_now = journal_done
+            && linkfs::read_target(dst_path)
+                .is_some_and(|t| linkfs::same_target(&t, Path::new(&new_src)));
+        if link_ok_now || paths_equal(&old_src, &new_src) {
             ledger.entries[i].src = new_src;
             continue;
         }

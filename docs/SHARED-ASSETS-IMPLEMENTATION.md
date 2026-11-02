@@ -971,7 +971,8 @@ const TOOLS: [&str; 15] = [ /* … */ ];
 ### 9.4 首次启用
 
 `bootstrap()`（`lib.rs:212`，**同步** `fn`）返回的 payload 增加
-`shared: { enabled }`。收敛候选数（`duplicateGroups`）在打开共享页时由
+`shared: { enabled, root }`（实现比本节初稿多一个只读的 `root`，见 §22.1）。
+收敛候选数（`duplicateGroups`）在打开共享页时由
 `plan_converge` 现算，**不要**塞进启动路径（§9.4 下方的说明）。
 前端在 `enabled && duplicateGroups > 0` 时提示一次，**默认不收敛**，点进去才进向导。
 
@@ -1210,7 +1211,7 @@ cargo tauri build                         # 安装包能出（可选，CI 跑）
 |---|---|
 | `docs/DESIGN.md` | 新增「§X 共享层」：linkfs 降级链、Op 扩两型、台账语义、`.trash`、矩阵交互（现有 9 章，插在 §8 路线图之前） |
 | `docs/MCP-SERVER.md` | 15 → 20 个工具：`:100`、`:125`、`:136`（标题「工具 API（15 个）」）三处 |
-| `docs/SHARED-ASSETS-PLAN.md` | 文首加一行：`> 已实施，见 docs/SHARED-ASSETS-DESIGN.md`；并按 §12 修正 7 处口径 |
+| `docs/SHARED-ASSETS-PLAN.md` | 文首状态改为「已实施」，指向 `SHARED-ASSETS-IMPLEMENTATION.md` §16–§22 与 `DESIGN.md` §8；并按 §12 修正 7 处口径（本表原写的是指向一个不存在的 `SHARED-ASSETS-DESIGN.md`，已修正） |
 | `README.md` / `README.en.md` | 「15 工具」→「20 工具」（各有 2 处：功能列表 + MCP 服务段） |
 | `changelog/next.json` | 每阶段一条 `feat`（**M1 已记**：`共享资产 M1：链接内核…`） |
 | `docs/RUST-ENV.md` | 若 P0 的探测结论与本文 §3.1 不符，以实测定论并更新 |
@@ -2192,9 +2193,13 @@ keeper.enable_asset(&json!({ "kind": "mcp", "name": "github", "agentId": "claude
 | 4 | 首次启用：`bootstrap.shared` 只放 `{enabled}`，候选数不进启动路径；前端默认不收敛 | `p6_cli.rs::bootstrap_shared_carries_no_scan_result` + 人工冒烟 | 同上 |
 
 > **迁移验收的规模**：`p6_cli.rs` 用 `AK_P6_SKILLS` 控制 skill 份数，默认 **20**
-> （200 份要跑二十多分钟，每次 `enable_asset` 就是一次全量重扫）。发布前跑一次
-> 完整规模：`AK_P6_SKILLS=200 cargo test -p agentkeeper-shell --test p6_cli`。
-> 真实运行时的 200 份实测见 §22.3 ④。
+> （200 份要跑二十多分钟，每次 `enable_asset` 就是一次全量重扫）。
+>
+> **完整规模已实测通过（2026-11-02）**：
+> `AK_P6_SKILLS=200 cargo test -p agentkeeper-shell --test p6_cli migrating_a_large_library`
+> → `1 passed / 0 failed`，耗时 **261.13 s**。200 份 skill × 2 个 agent = **400 条链接**，
+> 全部重指到新库根、全部读得回 `SKILL.md`；`total=1`（顶层只有 `skills` 一类）、
+> `links=400`；重跑一次 `moved=0`、`links=0`、两棵树指纹逐字节相同。
 
 ### 22.3 实施中清零的缺陷（三处，其中两处只有真实运行才暴露）
 
@@ -2270,3 +2275,59 @@ node scripts/changelog.js check         ok（31 entries）
    磁盘事实答不了的问题（链接已经指对没有）必须显式记下来，否则就是本节的缺陷 ①。
 4. **写测试时别只靠预热过的缓存**：缺陷 ③ 的夹具一直是绿的，因为它前一步调了
    `list_assets`。新增写路径的用例，第一次调用就应该是被验的那一个。
+
+---
+
+## 23. 五路代码审核与清零记录（2026-11-02，M1–M7 全量复审）
+
+> M1–M7 全部实施完成后，开 4 个子代理按阶段并行复审（M1/M2、M3/M4、M5/M6、M7+一致性；
+> 第 5 个「跨阶段硬约束」代理两次中途失败未出报告，其职责由其余四份与本轮门禁覆盖）。
+> 本节记录：**哪些发现成立并已清零、哪些经实证不成立、哪些是有意为之的既有契约**。
+
+### 23.1 成立并已清零（7 处）
+
+| # | 严重度 | 位置 | 问题 | 清零方式 |
+|---|---|---|---|---|
+| 1 | 高 | `toml_splice.rs`（splice_server / remove_server） | 整份文件用一个 eol 拼回去：混着 CRLF 与 LF 的用户配置只要动一条服务器，**全文行尾被统一**，diff 全文变红；删最后一节留下尾随空行，「开一次、关一次」不再逐字节还原（§5.5 验收 1/2 被违反） | 按行保留各自换行（`split_keep_eol`）；被替换段落沿用**它自己**原来的换行；追加段落用文件第一次出现的换行（`dominant_eol`）；删除收敛为恰好一个结尾换行。区域语义边界（注释归属上一节）**刻意不动**——那是参考实现的既有契约，有用例钉死。+2 条逐字节回归 |
+| 2 | 高 | `compose.rs::eol_of` | 「出现过 CRLF 就算 CRLF」：存量 LF 文件里用户手打一行 CRLF，区块整段写成 CRLF，`next != raw` 永远成立，同步不再幂等（§11.9） | 同一口径改为「第一次出现的换行」。+1 条混写幂等回归（含「用户的 CRLF 行一个字节不动」） |
+| 3 | 中 | `keeper.rs::remove_from_library` 跨卷分支 | `copy_dir` 没有返回值，部分失败时目标里是不完整副本，随后 `rmrf(源)` = 主副本没了而回收站只有一半 —— 数据丢失 | 拷完用 `sharing::digest_dir`（收敛/doctor 同一款摘要）核对两边，不一致就放弃整次删除并报 `library.trashFailed`（新 code，已进 CODE_ZH） |
+| 4 | 中 | `keeper.rs::enable_asset` 「already linked」分支 | 只判 `owns_target`（指向库内即放行）：指错主副本的链接（迁移残留/被别处接走）被报成成功且永远没人修 —— 尤其经 MCP 进来的 agent 没有「重指」入口 | 收紧为 `same_target(read_target(dst), keeper)`；不一致走同一事务的删+重指。+1 条回归（指错→被重指回本资产主副本） |
+| 5 | 中 | `shared_ops.rs` 迁移重指循环 | `relinked` journal 命中即跳过：重指后链接被外部改指的，重跑会把台账写成 `new_src` 而盘上指旧目标 | journal 只是进度，**磁盘才是事实**：命中后读一次 `read_target` 确认，不一致就落到重指路径 |
+| 6 | 中 | `keeper.rs` 三道闸（disable_asset / disable_rule / remove_from_library） | 硬链接没有可读目标，`owns_target` 认不出库内主副本的硬链接 → `share.foreignLink`，停用/删库永远失败。file 链接的降级链（symlink→hardlink）在 symlink 不可用的机器上正好产出这种链接 | 归属由台账作证（`ledger_backed_link`：owner=library 且 src 在库内）；删硬链接目录项只少一个名字，主副本字节不动，安全。+2 条回归（受管的可停用、外来的照旧拒绝） |
+| 7 | 低 | `adapters.rs` 测试 + `test-affected.js` | ①C8 的 `mcpDisable` 断言只在生成器脚本里，Rust 侧没有——改 adapter-table.js 不重冻结时测试仍绿；②`test-affected` 的 shared 区域漏了 `sharing.rs`/`compose.rs`/`library.rs` 与四个共享测试文件，doctor 区域漏了 `contract` | ①在 `the_declared_table_…field_for_field` 里补逐条断言；②补齐区域映射（shared 命中 4 个共享测试文件 + p6_cli） |
+
+另顺手修：`enable_asset` 的 `Op::mkdir` 从 agent **家目录**改为 skills 目录本身（旧写法把整棵家目录树拉进事务快照，白占撤销预算）。
+
+### 23.2 经实证不成立（2 处）
+
+| 审核主张 | 证伪方式 |
+|---|---|
+| M3/M4-1「compose 替换路径吞掉区块后的换行，末行无换行时用户内容消失」 | 用**真实标记格式**探针复现失败：区块后有换行、无换行两种场景，tail 都逐字节保留。审核员的探针用了伪造的标记（`begin ak slug=…` 而非 `agentkeeper:begin`），构造出的不是可解析区块 |
+| M5/M6-1「`compute_effective` 重写遮蔽时把 `sameInode` 覆盖成 false 只补回 true 那批」 | 代码在两次重写**之后**还有一轮 `mark_same_inode`（`scan.rs:1586`，注释写明「重写之后再把 sameInode 补回去」）；同物理对也不进 `shadows` 列表（`!same_physical` 过滤）。所称触发路径依赖「scan_for_skill 选中库内主副本」，该路径本轮已在来源侧排除（23.1 之外的加固） |
+
+### 23.3 有意为之 / 既有契约（记录，不改）
+
+- **TOML 区块边界**：夹在两表之间的注释属于**上一节**（参考实现语义，`remove_drops_the_region…` 用例钉死）。§5.3「注释逐字节保留」指的是**不被触碰的行**逐字节保留；删某节时随节走的注释是契约的一部分。
+- **`plan_drift` 只比第一个含该名字的配置文件**：多配置 agent 的语义待定，先按第一份即可（§5.4 待补一句说明）。
+- **非 stdio MCP 静默丢弃 `args`/`env`**：§18.4-1「按 transport 挑字段」的既有行为，未补 `skipped` 反馈。
+- **`link.methodUnavailable` / `converge.partial`**：§7.3 预留的 code 从未在代码里发出（无链接能力走 `copyOnly` 横幅，diverged 用 `converge.diverged`），tauri-i18n 因此 0 MISS。按 §20.2 的实现口径为准。
+- **跨进程台账并发**：`save_ledger` 是读-改-写且无锁，GUI 与 `agentkeeper-mcp` 同 store_root 并发启用可能丢台账条目 —— §15「宁可失败」未覆盖的已知缺口，留待单独评审。
+- **`ui-audit` 批量/分页探针改为全渲染脚本并集**（M6 既有取舍）：共享页本身无分页，探针对它形同虚设；改探针会引入新的误报，维持现状。
+- **`ui-baseline` 不含 shared**：§21.7 已声明可选，未做。
+
+### 23.4 文档同步（本轮一并修正）
+
+- `DESIGN.md` 目录索引 §9 撞号 → §10。
+- 本手册 §14 指向不存在的 `SHARED-ASSETS-DESIGN.md` → 改为实际落点。
+- `MCP-SERVER.md` 的单元格词表写错（`partial/diverged/na` 不存在）→ 按实现改为 `on/off/copy/foreign/drift/unsupported/error`。
+- §9.4 与 `DESIGN.md` §8.5 的 `shared: { enabled }` → `{ enabled, root }`（与实现一致）。
+
+### 23.5 本轮门禁（清零完成后的最后一次全量）
+
+```text
+cargo test --workspace        520 passed / 0 failed（M7 收尾 514 → +6：toml 2、repoint 1、硬链接 2、compose 混写 1）
+node scripts/check.js         all 8 gates passed
+node scripts/tauri-i18n.js    MISS 0 / CODE-MISS 0（library.trashFailed 已进 CODE_ZH）
+node scripts/test-affected.js 连跑 3 次全绿（此前一次失败为 §11.2 已知的 update::manager 并发噪声）
+完整规模迁移验收              AK_P6_SKILLS=200 → 1 passed（261.13 s，400 条链接全部重指、重跑零写入）
+```

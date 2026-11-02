@@ -217,6 +217,10 @@ impl Keeper {
     fn scan_for_skill(&self, slug_name: &str, agent_id: &str) -> Option<(String, String)> {
         let projects = scan::read_projects(self.store.root_str());
         let (payload, _) = scan::scan_payload_uncached(&self.user_home, &projects);
+        // 库内主副本不能当来源：默认库根同时是伪 agent `shared` 的 skills 目录，
+        // 让它命中会把库内目录拷到「库内同名位置」——那是自我覆盖。真实路径上的
+        // 判断（`already in the library`）有第二道闸，这里在选来源时就排除掉。
+        let lib = self.library();
         payload
             .get("assets")
             .and_then(Value::as_array)?
@@ -224,6 +228,7 @@ impl Keeper {
             .filter(|a| prop(a, "kind") == "skill")
             .filter(|a| slug(&prop(a, "name")) == slug_name)
             .filter(|a| agent_id.is_empty() || prop(a, "agentId") == agent_id)
+            .filter(|a| prop(a, "agentId") != "shared")
             .filter(|a| {
                 a.get("meta")
                     .and_then(|m| m.get("link"))
@@ -233,7 +238,9 @@ impl Keeper {
             })
             .find_map(|a| {
                 let dir = a.get("dir").and_then(Value::as_str)?;
-                if dir.is_empty() {
+                if dir.is_empty()
+                    || library::is_under(Path::new(dir), lib.root())
+                {
                     return None;
                 }
                 Some((
@@ -1443,8 +1450,17 @@ impl Keeper {
         let dst = join(&dir, &[&slug_name]);
         let dst_path = Path::new(&dst);
 
-        // 已经是指向库内主副本的链接：什么都不做，而不是删了重建。
-        if linkfs::is_link(dst_path) && lib.owns_target(dst_path) {
+        // 已经是指向**这一份资产**的库内主副本的链接：什么都不做，而不是删了重建。
+        //
+        // 「指向库内」不算数：一条指着别的资产的链接、或库迁移后仍指着旧库根的链接，
+        // 都必须走下面「删 + 重指」的同一事务。早先这里只判 `owns_target` 就返回
+        // `already linked`，调用方（尤其是经 MCP 进来的 agent，它没有「重指」这个
+        // 入口）拿到的是成功，而盘上那条永远指错的链接没人修。
+        if linkfs::is_link(dst_path)
+            && lib.owns_target(dst_path)
+            && linkfs::read_target(dst_path)
+                .is_some_and(|t| linkfs::same_target(&t, Path::new(&keeper)))
+        {
             return json!({
                 "ok": true,
                 "written": [],
@@ -1464,9 +1480,11 @@ impl Keeper {
 
         let mut ops: Vec<Op> = Vec::new();
         let mut written: Vec<Value> = Vec::new();
-        if let Some(parent) = Path::new(&dir).parent() {
-            ops.push(Op::mkdir(&store::native_str(parent)));
-        }
+        // mkdir 的是 skills 目录本身（链接 dst 的父目录），不是它的上一级 ——
+        // 上一级是 agent 的家目录，把它放进事务意味着整棵家目录树都要进快照
+        //（包括全部 skills），既慢又占用撤销预算；而 `linkDir` 的执行分支自己
+        // 会 `create_dir_all` 父链，这里只需保证 skills 这一层在快照里有位置。
+        ops.push(Op::mkdir(&store::native_str(Path::new(&dir))));
         // 顺序：**先把内容搬进库，再删旧位置，最后建链接**。
         //
         // 不能先删：`copyDir` 的来源就是 agent 侧那个目录 —— 先删掉它，拷贝就没源
@@ -1698,7 +1716,8 @@ impl Keeper {
 
         if linkfs::is_link(file_path) {
             // 与 skill 同一条安全闸：指向库外就拒绝，删它会动到用户自己的文件。
-            if !lib.owns_target(file_path) {
+            // 硬链接的归属由台账作证（见 `ledger_backed_link` 的说明）。
+            if !lib.owns_target(file_path) && !self.ledger_backed_link(lib, &file) {
                 return unsatisfied_with("share.foreignLink", json!({ "path": file }));
             }
             let mut tx = self.store.transaction(
@@ -1898,6 +1917,23 @@ impl Keeper {
     /// 三道闸缺一不可（§4.2）：不是链接就拒绝（`share.notLinked`）；指向库外就拒绝
     /// （`share.foreignLink`，删它会动到用户自己的目录）；库内主副本永不删除 ——
     /// 本函数里没有任何一条 op 指向库内路径。
+    ///
+    /// ## 硬链接的归属凭什么认定
+    ///
+    /// `owns_target` 靠 `read_target` 读指向，而**硬链接没有可读的目标**（它不是
+    /// 重解析点，只是同一份内容的另一个名字），于是指向库内主副本的硬链接会被
+    /// 误判成 `share.foreignLink` —— 用户没法停用它。归属在台账里写得很清楚
+    /// （`owner: "library"`、`src` 在库内），所以第二条闸对硬链接改由台账作证：
+    /// 删掉那一个目录项只少一个名字，主副本的字节一个都不会动，这是安全的。
+    pub fn ledger_backed_link(&self, lib: &library::Library, dst: &str) -> bool {
+        match lib.load_ledger() {
+            Ok(l) => l.find(dst).is_some_and(|e| {
+                e.owner == "library" && library::is_under(Path::new(&e.src), lib.root())
+            }),
+            Err(_) => false,
+        }
+    }
+
     pub fn disable_asset(&self, input: &Value) -> Value {
         let lib = self.library();
         let kind = non_empty(input, "kind").unwrap_or_else(|| "skill".to_string());
@@ -1948,7 +1984,7 @@ impl Keeper {
         if !linkfs::is_link(dst_path) {
             return unsatisfied_with("share.notLinked", json!({ "path": dst }));
         }
-        if !lib.owns_target(dst_path) {
+        if !lib.owns_target(dst_path) && !self.ledger_backed_link(&lib, &dst) {
             return unsatisfied_with("share.foreignLink", json!({ "path": dst }));
         }
 
@@ -2024,9 +2060,30 @@ impl Keeper {
             Ok(()) => {}
             Err(_) => {
                 // 跨卷（库在某些机器上会在另一个盘上）：先拷过去再删原处。
+                //
+                // **拷贝没成功就绝不删原处**：`copy_dir` 没有返回值，部分失败时
+                // 目标里是一份不完整的副本，此时 `rmrf(源)` 等于把用户的主副本
+                // 删掉而回收站里只有一半 —— 那是比「删除失败」严重得多的结果。
+                // 所以拷完必须核对两边，对不上就放弃整次删除，磁盘保持原样。
                 store::copy_dir(Path::new(&src), &trash);
+                if !same_tree(Path::new(&src), &trash) {
+                    let _ = std::fs::remove_dir_all(&trash);
+                    return json!({
+                        "ok": false,
+                        "code": "library.trashFailed",
+                        "detail": { "src": src, "trash": trash_str }
+                    });
+                }
                 store::rmrf(Path::new(&src));
             }
+        }
+        // 两边内容一致的判据：用 `sharing::digest_dir` —— 它就是收敛与 doctor 用来
+        // 回答「这两棵树是不是同一份内容」的那一个函数，逐文件流式 SHA-256，
+        // 相对路径与种类都参与摘要。`unreadable > 0` 一律算不一致（读不出来就不能
+        // 说「一样」，宁可放弃这次删除）。
+        fn same_tree(a: &Path, b: &Path) -> bool {
+            let (da, db) = (sharing::digest_dir(a), sharing::digest_dir(b));
+            da.unreadable == 0 && db.unreadable == 0 && da.digest == db.digest
         }
         settings::audit(
             self.store.root_str(),
@@ -2046,7 +2103,10 @@ impl Keeper {
             let result = if !linkfs::is_link(p) {
                 // 已经换成真实目录/文件：这不是我们的链接，绝不删。
                 Err("this path is no longer a link".to_string())
-            } else if !lib.owns_target(p) {
+            } else if !lib.owns_target(p) && !self.ledger_backed_link(&lib, dst) {
+                // 硬链接没有可读目标，`owns_target` 认不出它；台账里那条
+                // owner=library 且 src 在库内的记录就是归属证明（见
+                // `ledger_backed_link`）。台账没记的照旧拒绝。
                 Err("this link points outside the library".to_string())
             } else {
                 linkfs::unlink(p).map_err(|e| e.to_string())

@@ -75,15 +75,20 @@ pub fn is_valid_slug(slug: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// 目标文件用的换行风格：出现 `\r\n` 就算 CRLF，否则 LF。
+/// 目标文件用的换行风格：文件里**第一次出现**的换行；一个换行都没有时是 LF。
 ///
-/// 判据与 `toml_splice.rs::splice_server` 完全一致（照抄，不另写一份）：Windows
-/// 上用户文件常是 CRLF，混写会让用户的 diff 显示整份文件都变了。
+/// 为什么不用「出现过 CRLF 就算 CRLF」：一份存量 LF 的规则文件里只要有一行是
+/// CRLF（任何 Windows 编辑器都会手打出来），旧判据就会把整个区块写成 CRLF。
+/// 而区块内容每次都按 `eol_of` 归一，于是 `next != raw` 永远成立 —— 每次同步都
+/// 写一次盘，幂等性没了（§11.9 点名的就是混写）。取「第一个换行」对纯 LF 与
+/// 纯 CRLF 两种文件的结果与旧行为一致，只把混写这一种拉回中性。
+///
+/// 判据与 `toml_splice.rs::dominant_eol` 同一口径。
 pub fn eol_of(target: &str) -> &'static str {
-    if target.contains("\r\n") {
-        "\r\n"
-    } else {
-        "\n"
+    match target.as_bytes().iter().position(|b| *b == b'\n') {
+        Some(i) if i > 0 && target.as_bytes()[i - 1] == b'\r' => "\r\n",
+        Some(_) => "\n",
+        None => "\n",
     }
 }
 
@@ -432,6 +437,28 @@ mod tests {
         let out = upsert_block("# t\n", SLUG, "a\r\nb\r\n");
         assert!(!out.contains('\r'), "{:?}", out);
         assert_eq!(find_block(&out, SLUG).unwrap().body, "a\nb\n");
+    }
+
+    /// 存量 LF 文件里用户手打了一行 CRLF（任何 Windows 编辑器都会）→ 区块仍写 LF。
+    ///
+    /// 旧判据「出现过 CRLF 就算 CRLF」会把这个文件的新区块整段写成 CRLF，于是
+    /// 每次同步 `next != raw`：rev 随换行漂移、盘上每次都有写入，幂等没了。
+    #[test]
+    fn one_stray_crlf_line_does_not_flip_the_whole_block() {
+        let mixed = "line1\nline2\r\nline3\n";
+        let out = upsert_block(mixed, SLUG, "x");
+        assert!(out.contains("<!-- agentkeeper:begin"), "{:?}", out);
+        // 区块两行标记都以 LF 结尾（不是 CRLF）。
+        for line in out
+            .split_inclusive('\n')
+            .filter(|l| l.trim_start().starts_with("<!-- agentkeeper:"))
+        {
+            assert!(line.ends_with("-->\n"), "mark line must end with LF: {line:?}");
+        }
+        // 用户自己写的那一行 CRLF 一个字节没动。
+        assert!(out.contains("line2\r\n"), "{:?}", out);
+        // 再 upsert 一次必须完全不动（幂等）。
+        assert_eq!(upsert_block(&out, SLUG, "x"), out, "not idempotent");
     }
 
     /// 空内容也能写出一个合法区块（只有两行标记）。

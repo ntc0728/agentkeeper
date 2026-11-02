@@ -568,7 +568,7 @@ junction 悄悄换成 symlink。
 （`list_library` / `enable_asset` / `disable_asset` / `link_doctor` / `converge_plan`）
 **读的是同一批 core 函数**，载荷形状完全一致，不存在第二套。
 
-`bootstrap` 只回 `shared: { enabled }`：收敛候选数要遍历整棵库与全部 agent 目录，
+`bootstrap` 只回 `shared: { enabled, root }`（两个不需要遍历库的只读字段）：收敛候选数要遍历整棵库与全部 agent 目录，
 而 `bootstrap` 是同步命令、跑在窗口绘制之前 —— 把它塞进启动路径等于给每次启动加一次
 全盘扫描。候选数在共享页打开时由 `converge_plan` 现算，且**默认不收敛**，点进向导才写盘。
 
@@ -596,7 +596,7 @@ junction 悄悄换成 symlink。
 
 ---
 
-## 9. 目录索引
+## 10. 目录索引
 
 ```
 agentkeeper/

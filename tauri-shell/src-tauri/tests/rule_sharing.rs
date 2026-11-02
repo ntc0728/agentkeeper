@@ -417,3 +417,83 @@ fn a_scanned_rule_asset_can_be_shared_by_its_id() {
     assert_eq!(wrong["ok"], json!(false), "{}", wrong);
     assert_eq!(wrong["code"], json!("share.unsupportedKind"), "{}", wrong);
 }
+
+/// 审核发现（M1/M2）：硬链接没有可读的目标（`read_target` 返回 None），
+/// `owns_target` 因此认不出「库内主副本的硬链接」，停用一条**我们自己建的**
+/// 硬链接会被误报 `share.foreignLink` —— 而 file 链接的降级链恰好在
+/// symlink 不可用的机器上产出硬链接（§3.4 的 file 链）。
+///
+/// 现在归属由台账作证：`owner=library` 且 `src` 在库内的记录就是我们的链接；
+/// 删掉那一个目录项只少一个名字，主副本的字节一个都不会动。
+#[test]
+fn a_managed_hardlink_can_be_disabled_and_unlinked() {
+    let _lock = common::serial();
+    let fx = Fixture::new("rule-hardlink");
+    // 库内主副本
+    write(&fx.library_rule("shared-rules"), "# shared rules\n\nbody\n");
+    // agent 侧硬链接（同卷，std::fs::hard_link 不需要特权）
+    let dst = join(&fx.home, &[".codex", "AGENTS.md"]);
+    std::fs::create_dir_all(join(&fx.home, &[".codex"])).expect("agent dir");
+    std::fs::hard_link(fx.library_rule("shared-rules"), &dst)
+        .expect("hard link within the same temp volume");
+    let dst_path = std::path::Path::new(&dst);
+    assert!(
+        linkfs::link_kind(dst_path) == Some(linkfs::LinkMethod::Hardlink),
+        "fixture must be a hardlink"
+    );
+
+    // 台账里登记这条硬链接（owner=library、src 在库内）—— enable 在真实链路上
+    // 会写这条记录，这里直接落台账以覆盖闸口本身。
+    let lib = library::Library::at(fx.library_root());
+    let mut ledger = fx.ledger();
+    lib.record(
+        &mut ledger,
+        library::LinkEntry::new(
+            "rule",
+            "shared-rules",
+            &fx.library_rule("shared-rules"),
+            &dst,
+            linkfs::LinkMethod::Hardlink,
+        ),
+    );
+    lib.save_ledger(&ledger).expect("save ledger");
+
+    // 停用：必须是成功的一次事务（旧实现在这里报 share.foreignLink）。
+    let r = fx.keeper().disable_asset(&json!({
+        "name": "shared-rules",
+        "kind": "rule",
+        "agentId": "codex",
+        "scope": "global",
+        "file": &dst,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    // 目录项没了，库内主副本原封不动。
+    assert!(!dst_path.exists(), "the hardlink name must be gone");
+    assert!(
+        std::path::Path::new(&fx.library_rule("shared-rules")).is_file(),
+        "the library master copy must stay"
+    );
+    // 台账里那条也清掉了。
+    assert!(fx.ledger().find(&dst).is_none(), "ledger entry must be removed");
+}
+
+/// 反向不变式：台账里没有记录的外来硬链接，照旧拒绝（foreignLink）。
+#[test]
+fn a_foreign_hardlink_is_still_refused() {
+    let _lock = common::serial();
+    let fx = Fixture::new("rule-hardlink-foreign");
+    write(&fx.library_rule("theirs"), "# theirs\n");
+    let dst = join(&fx.home, &[".codex", "AGENTS.md"]);
+    std::fs::create_dir_all(join(&fx.home, &[".codex"])).expect("agent dir");
+    std::fs::hard_link(fx.library_rule("theirs"), &dst).expect("hard link");
+    let r = fx.keeper().disable_asset(&json!({
+        "name": "theirs",
+        "kind": "rule",
+        "agentId": "codex",
+        "scope": "global",
+        "file": &dst,
+    }));
+    assert_eq!(r["ok"], json!(false), "{r}");
+    assert_eq!(r["code"], json!("share.foreignLink"), "{r}");
+    assert!(std::path::Path::new(&dst).exists(), "nothing must be deleted");
+}

@@ -1524,6 +1524,16 @@ mod tests {
                 id
             );
             assert_eq!(list(r.globals.mcp), strs(&g["mcp"]), "{}: globals.mcp", id);
+            // C8 的机械守卫：`mcpDisable` 两边必须逐条一致（顶层字段，与 id/label
+            // 平级）。之前这条只在生成器脚本里有，改 adapter-table.js 不重冻结快照
+            // 时本测试仍然绿 —— 漂移要在这里被抓到（§18.1 说「Rust 侧断言逐条比对」，
+            // 它之前并不存在）。
+            assert_eq!(
+                r.mcp_disable.as_str(),
+                j["mcpDisable"].as_str().unwrap_or("remove"),
+                "{}: mcpDisable",
+                id
+            );
 
             let p = &j["projects"];
             assert_eq!(

@@ -487,6 +487,8 @@ const CODE_ZH = {
   // `migrating` 标记，重跑从断点继续 —— 两种结局的后续动作不同，所以分两条。
   'library.migrateTarget': '迁移目标不可用：需要绝对路径，且不能与当前库根互相嵌套；若有另一条未完成的迁移也不会被覆盖',
   'library.migrateFailed': '共享库迁移中断了：已搬完的部分不会重复搬，修复问题后重跑同一目标即可从断点继续',
+  // 删库内资产时主副本进回收站没成功（跨卷拷贝不完整）：整次删除放弃，磁盘原样。
+  'library.trashFailed': '移入回收站失败：内容没有完整拷进回收站，所以原位置一个字没动',
   'project.duplicate': '项目已注册',
   'project.notDirectory': '所选路径不是文件夹',
   'project.directoryNotFound': '文件夹不存在',
