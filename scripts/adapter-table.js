@@ -20,7 +20,7 @@
  *   在同一次改动里重新运行 `npm run tauri:adapters`
  *   （scripts/gen-adapters-snapshots.js）。Rust 快照是 adapters.rs 中 `AGENTS`
  *   表的一致性判据——新增/删除/重命名 agent、`home` 模板有变化，
- *   或 skills/rules/memory/mcp/plugins 列表有任何改动，都会让快照过期；
+ *   或 skills/rules/memory/mcp/plugins 列表、`mcpDisable` 有任何改动，都会让快照过期；
  *   而过期的快照断言的是旧表，而不是本文件所说的内容。
  *
  * 不属于这张表的内容
@@ -31,6 +31,21 @@
  */
 
 const os = require('os');
+
+/**
+ * `mcpDisable`：把这个 agent 上的一个 MCP 服务器「关掉」时怎么做。
+ *
+ *   'remove'  从配置里删掉该条目（默认值，17 个 agent 里 16 个都是这样）
+ *   'flag'    保留条目，只把 agent 自己的开关置为关闭态
+ *
+ * 只有一条判据可以给它标 `flag`：**这个 agent 的官方文档写着「置某个字段为关闭
+ * 即可停用，不必删条目」**。凭「看起来应该支持」去猜，会让关闭动作在一个不认这个
+ * 字段的 agent 上**静默无效** —— 配置里留着一条 enabled:false 的服务器，agent 照旧
+ * 连上去。所以没核实过的一律保持 `remove`。
+ *
+ * 本期核实到的是 `opencode`：官方 MCP 文档明确写着「把 enabled 置为 false 即可停用
+ * 一个服务器，不必从配置里删掉它」。
+ */
 
 const AGENTS = [
   {
@@ -151,7 +166,8 @@ const AGENTS = [
       rules: ['AGENTS.md'],
       memory: ['.opencode/AGENTS.md'],
       mcp: ['.opencode/opencode.json']
-    }
+    },
+    mcpDisable: 'flag'
   },
   {
     id: 'gemini-cli',

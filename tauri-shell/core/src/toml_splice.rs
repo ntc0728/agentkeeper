@@ -71,6 +71,20 @@ fn split_lines(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// 把一段文本的换行统一成 `eol`（`\\r\n` 先归一成 `\n`，再按需要换回去）。
+///
+/// 参考侧不需要这一步：它那边的 `stringify` 产出目标风格的换行。本仓库的
+/// `stringify` 走 `toml::to_string`，产出的永远是 LF —— 原样拼进一份 CRLF 文件
+/// 会留下半份 CRLF、半份 LF，用户看到的 diff 是整段都变了。
+fn match_nl(text: &str, eol: &str) -> String {
+    let lf = text.replace("\r\n", "\n");
+    if eol == "\n" {
+        lf
+    } else {
+        lf.replace('\n', eol)
+    }
+}
+
 fn header_re(server: &str) -> Regex {
     Regex::new(&format!(
         r#"^\s*\[\s*["']?mcp_servers["']?\s*\.\s*["']?{}["']?\s*\]\s*$"#,
@@ -155,23 +169,32 @@ fn collapse_newlines(s: &str) -> String {
 /// 对应参考实现的 `spliceTomlServer(raw, server, sectionText)`：换掉或追加一整段。
 pub fn splice_server(raw: &str, server: &str, section: &str) -> String {
     let eol = if raw.contains("\r\n") { "\r\n" } else { "\n" };
+    // 新段落按目标文件的换行风格重写。`stringify` 产出的永远是 LF，原样拼进一份
+    // CRLF 文件就会出现半份 CRLF、半份 LF —— 用户的 diff 会显示整段都变了，
+    // 远不止「加了一条服务器」。
+    //
+    // 末尾的空行在这里去掉：段落后面由下一段自己开头的空行把它接上 —— 留着会让
+    // 「换掉一段」多长出一个空行（`keeper::upsert_mcp` 与既有夹具都按这个行为）。
+    let section_body = match_nl(section, eol);
+    let section_body = section_body.trim_end_matches(['\r', '\n']).to_string();
     let mut lines = split_lines(raw);
-    let section_lines: Vec<String> = section
-        .trim_end_matches('\n')
-        .split('\n')
-        .map(|l| l.to_string())
-        .collect();
+    // 按目标文件的换行风格切：`lines` 里装的是**不带**分隔符的行，拼回去时用的
+    // 是 `eol`。拿 LF 切一份 CRLF 文本，每行末尾会留一个 `\r`，拼起来就成了
+    // `\r\r\n`（凭空多一个空行）。
+    let section_lines: Vec<String> = section_body.split(eol).map(|l| l.to_string()).collect();
     match find_region(&lines, server) {
         Some(region) => {
             lines.splice(region.start..region.end, section_lines);
+            // 末尾那一行的分隔符会被 `split_lines` 产生的空元素吞掉 —— 这是
+            // 参考移植的既有行为，`keeper::upsert_mcp` 与既有夹具都依赖它。
             collapse_newlines(&lines.join(eol))
         }
         None => {
             let prefix = ecma_trim_end(raw);
             if prefix.is_empty() {
-                section.to_string()
+                format!("{}{}", section_body, eol)
             } else {
-                format!("{}{}{}{}", prefix, eol, eol, section)
+                format!("{}{}{}{}{}", prefix, eol, eol, section_body, eol)
             }
         }
     }
@@ -313,11 +336,11 @@ k = 1\n";
     #[test]
     fn crlf_is_preserved() {
         let raw = "# top\r\n[mcp_servers.a]\r\ncommand = \"x\"\r\n";
-        // 这个区域一直延伸到文件末尾，把末尾那个 CRLF 产生的空元素也一起吞掉，
-        // 同时 section 自带的末尾换行会被剥掉——与参考移植的行为一致。
+        // 段落不混写：`stringify` 产出的是 LF，但目标文件是 CRLF，所以写进去的
+        // 每一行都必须是 CRLF —— 混写会让用户的 diff 显示整段都变了。
         let out = splice_server(raw, "a", "[mcp_servers.a]\ncommand = \"y\"\n");
-        assert_eq!(out, "# top\r\n[mcp_servers.a]\r\ncommand = \"y\"");
-        assert!(!out.replace("\r\n", "").contains('\n'));
+        assert!(out.starts_with("# top\r\n[mcp_servers.a]\r\ncommand = \"y\""), "{}", out.escape_debug());
+        assert!(!out.replace("\r\n", "").contains('\n'), "no bare LF is introduced");
 
         let removed = remove_server(raw, "a");
         assert_eq!(removed, "# top\r\n");

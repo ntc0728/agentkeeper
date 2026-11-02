@@ -86,7 +86,10 @@ for (const a of AGENTS) {
       memory: a.projects.memory || [],
       mcp: a.projects.mcp || [],
       plugins: a.projects.plugins || null
-    }
+    },
+    // 关闭一个 MCP 服务器的方式。缺省即 'remove'，与 Rust 侧的
+    // `DisableStyle::default()` 同一口径，所以只有标了 `flag` 的才会出现在快照里。
+    mcpDisable: a.mcpDisable || 'remove'
   });
   resolved[a.id] = { home, globalPaths, projectPaths };
 }
@@ -242,6 +245,17 @@ mod tests {
                     id
                 ),
             }
+
+            // 「怎么关掉这个 agent 上的一个 MCP 服务器」。两侧都不许默认成
+            // 「反正差不多」：标错一边（比如该 Remove 的写成 Flag），关闭动作
+            // 会在那个 agent 上静默无效 —— 配置里留一条 enabled:false 的条目，
+            // agent 照旧连上去，而台账记着「已关闭」。
+            assert_eq!(
+                r.mcp_disable.as_str(),
+                j["mcpDisable"].as_str().unwrap_or("remove"),
+                "{}: mcpDisable",
+                id
+            );
         }
     }
 

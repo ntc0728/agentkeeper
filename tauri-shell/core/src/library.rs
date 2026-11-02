@@ -162,6 +162,41 @@ impl Library {
         l.upsert(entry);
     }
 
+    /// 库内全部 MCP 规范形态记录（`<root>/mcp/servers/*.json`），按文件名排序。
+    ///
+    /// **只读**：目录不存在 = 空列表（还没有任何 MCP 进库，是正常状态，不是错）。
+    /// 一条读不懂的记录**跳过但不猜** —— 它不参与物化与漂移判定；把读不懂的记录
+    /// 当成空记录去写，等于把用户库里那条内容抹掉。
+    ///
+    /// 排序是稳定输出的一部分：漂移列表与物化顺序都跟着它，界面上同一份磁盘
+    /// 状态每次打开看到的顺序必须一样，否则「刚才那条呢」会成为一个问题。
+    pub fn mcp_records(&self) -> Vec<Value> {
+        let dir = self.dir_for("mcp").join("servers");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut files: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .filter(|p| p.extension().map(|e| e.eq_ignore_ascii_case("json")).unwrap_or(false))
+            .collect();
+        files.sort();
+        let mut out = Vec::new();
+        for f in files {
+            let Ok(raw) = std::fs::read_to_string(&f) else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+                continue;
+            };
+            if v.is_object() {
+                out.push(v);
+            }
+        }
+        out
+    }
+
     /// `p`（或其目标）是否位于库内。
     ///
     /// `disable_asset` 的安全闸与 `link.unmanaged` 的判定共用这一个函数：一个链接
@@ -189,6 +224,12 @@ impl Library {
         let cache = Path::new(store_root).join("linkcap.txt");
         linkfs::capability(&probe_root, Some(&cache))
     }
+}
+
+/// 库内全部 MCP 规范形态记录。与 [`Library::mcp_records`] 同一份实现，给「手上只有
+/// `&Library`、不需要方法调用风格」的调用方（`sharing::plan_drift`）用。
+pub fn mcp_records(library: &Library) -> Vec<Value> {
+    library.mcp_records()
 }
 
 fn join_home(user_home: &str, rel: &str) -> PathBuf {

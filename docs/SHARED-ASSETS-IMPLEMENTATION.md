@@ -14,12 +14,13 @@
 | 平台 | Windows 10/11 x64（仅此范围，不做 macOS/Linux） |
 | 基线 | 0.2.4，commit `24b32f4` |
 | 工期 | 14–17 个工作日（P0→P6，含测试；见 §11 的改动幅度） |
-| 当前状态 | **M1（P0+P1）、M2（P2）已完成并验收**（2026-11-02）；M3 起未开始。验收记录见 §16 与 §17 |
+| 当前状态 | **M1（P0+P1）、M2（P2）、M3（P3）已完成并验收**（2026-11-02）；M4 起未开始。验收记录见 §16、§17 与 §18 |
 | 环境 | rustc/cargo 1.99.1 · tauri-cli 2.12.4 · MSVC 14.44 · SDK 10.0.26100 · Node 22.22.1 |
 
-> **本轮之后开工的人先读 §16 与 §17**：§16 是 M1 的实际交付清单与实测结论（与本手册初稿
+> **本轮之后开工的人先读 §16、§17 与 §18**：§16 是 M1 的实际交付清单与实测结论（与本手册初稿
 > 不同的地方已就地改写），§17 是 M2 的交付清单、三条验收的落点、以及在实施中修掉的五个
-> 既有缺陷 —— 其中三个会直接毁数据，M3 起的人务必先看一遍。
+> 既有缺陷 —— 其中三个会直接毁数据，M4 起的人务必先看一遍；§18 是 M3（MCP 单一事实源）
+> 的交付清单、四条验收的落点，以及实施中修掉的一处 TOML 换行混写缺陷。
 
 ---
 
@@ -1481,3 +1482,130 @@ store::Op::link_file_with(&dst, &src, Some(LinkMethod::Symlink));
    确认哪些链接指向这条主副本。别把它改成「尽力而为」，那会留下悬空链接。
 3. `.trash` 的目录名是 `<slug>-<YYYYMMDDTHHMMSS>`，排序即时间序；`trashDays` 的清理
    在 `settings::ensure_store` 里，启动时尽力而为、不阻塞。
+
+---
+
+## 18. M3 实施记录（2026-11-02，已完成）
+
+M3 = §5（MCP 单一事实源）+ §10 的 P3。**只做 M3**：规则/记忆共享（M4）、doctor 其余 6 类
+finding（M5）、界面（M6）、CLI 与迁移（M7）一概没碰。下面每一步都能用命令复现。
+
+### 18.1 交付清单
+
+| 文件 | 改动 | 说明 |
+|---|---|---|
+| `scripts/adapter-table.js` | +≈20 | 首个字段说明块（`mcpDisable` 的判据）；`opencode` 标 `'flag'`，其余 16 个保持缺省 `'remove'` |
+| `scripts/gen-adapters-snapshots.js` | +≈14 | 快照 `agents[]` 增 `mcpDisable`（缺省写成 `'remove'`）；Rust 侧断言逐条比对它 |
+| `tauri-shell/core/src/adapters.rs` | +≈90 / 机械 +17 | 新增 `enum DisableStyle { Remove, Flag }`（`as_str` / `parse` / `Default = Remove`）与 `mcp_disable(agent_id)`；`Agent` 增字段 `mcp_disable`；17 条字面量逐条补齐；快照常量重新冻结（**仍是 17 个 agent / 187 条路径模板**） |
+| `tauri-shell/core/src/sharing.rs` | +≈700（含 21 条单测） | `McpMaterial` / `materialize_entry` / `mcp_config_candidates` / `config_format` / `open_ops` / `close_ops` / `read_entry` / `server_names` / `validate_record`、`McpPlan` / `materialize_mcp`、`McpDrift` / `plan_drift` / `drift_report`；`MCP_SCHEMA` |
+| `tauri-shell/core/src/library.rs` | +≈40 | `Library::mcp_records()`（读 `<root>/mcp/servers/*.json`）与模块级 `mcp_records(&Library)` |
+| `tauri-shell/core/src/toml_splice.rs` | +≈20 / −8 | `splice_server` 与 `remove_server` 的段落按目标文件换行风格重写（见 §18.2）；新增 `match_nl`；`crlf_is_preserved` 夹具改成断言正确行为 |
+| `tauri-shell/src-tauri/tests/mcp_sharing.rs` | **新增 ~430 行** | 8 条集成用例，覆盖 §5.5 四条验收 + `Flag` 风格 + YAML 拒绝 + 记录形状校验 |
+| `src/renderer/engine-zh.js` | +≈15 | `CODE_ZH` 增 `mcp.shareUnsupported` / `mcp.noRecordInLibrary` / `mcp.notMaterialisable` / `mcp.drift`；`PATTERNS` 增 `^already open$` / `^already closed$` |
+| `tauri-shell/dist/engine-zh.js` | 重新生成 | 由 `node tauri-shell/copy-frontend.js` 生成，**没有手改** |
+| `changelog/next.json` | +1 条 | `feat：共享资产 M3：MCP 单一事实源…`（26 → 27 条） |
+
+**没有做的事**（留给后面的阶段，不要以为漏了）：这 8 条 `shared.*` / `list_library` 等 Tauri
+命令与桥接（M6/P5）、`doctor` 的 7 类 finding 汇总（M5）——M3 只提供
+`sharing::plan_drift` / `drift_report` 这两份只读数据，**没有**接入 `doctor.rs`（它还不存在）；
+5 个 MCP 工具（M7/P6）、`ak-scan --shared`（P6）、`library_migrate`（P6）、共享页视图（M6）。
+
+### 18.2 实施中发现并清零的一处既有缺陷：TOML 段落换行混写
+
+`toml_splice::splice_server` 把 `stringify` 产出的**一段**拼回目标文件，而
+`toml::to_string` 永远输出 LF。于是往一份 **CRLF** 配置里写一条服务器时，文件会变成
+「前半 CRLF、后半 LF」——用户的 diff 显示整段都变了，正是 §11.9 点名的那个坑，只不过
+它藏在移植过来的拼接函数里，`craft` 侧目前没有 CRLF 的 TOML 夹具，所以一直没暴露。
+
+修法（不改变既有夹具断言的任何形状）：段落先归一成目标文件的 `eol`，再用 `eol` 切行 ——
+拿 LF 切一份 CRLF 文本会在每行末尾留一个 `\r`，拼回去就成了 `\r\r\n`（凭空多一个空行）。
+`keeper::upsert_mcp` 走的是同一个函数，所以这条修复顺带把它也修好了。
+
+`crlf_is_preserved` 原来断言的是**缺陷本身**（结果里没有末尾换行、且允许混写），
+现在断言正确行为：段落里每一行都是 CRLF、不出现裸 LF。
+
+### 18.3 §5.5 四条验收（逐条落地在哪、怎么跑）
+
+```powershell
+cd tauri-shell
+cargo test -p agentkeeper-core --lib sharing          # 25 passed（M2 的 9 条 + M3 的 16 条）
+cargo test -p agentkeeper-core --lib toml_splice      # 11 passed
+cargo test -p agentkeeper-core --lib adapters         #  5 passed（含 mcpDisable 逐条比对）
+cargo test -p agentkeeper-shell --test mcp_sharing    #  8 passed
+```
+
+| # | §5.5 验收 | 测试 | 结果 |
+|---|---|---|---|
+| 1 | Codex（TOML）+ Claude Code（JSON）同开一个 server：TOML 注释与小节顺序完全不变；JSON 兄弟 server 与键序保留 | `mcp_sharing::opening_and_closing_keeps_every_other_byte_in_both_formats`(+ `sharing::tests::open_ops_keeps_toml_comments_and_section_order`、`open_ops_inserts_one_server_and_keeps_the_siblings`) | ✅ 新段落之前的部分与原文逐字节相同、段落顺序 `alpha → other → fetch`；JSON 顶层键序 `mcpServers, zeta` 与桶内顺序 `keep, fetch` 保留 |
+| 2 | 关闭后两个文件除该条外与开启前逐字节相同 | 同上（同一用例的后半段） | ✅ 两份文件都**整体**等于开启前，`assert_eq!(read(file), before)` |
+| 3 | `~/.claude/.mcp.json` 里手写库里没有的 server → 零报告、零写入 | `mcp_sharing::a_server_that_is_not_in_the_library_is_reported_nowhere_and_touched_never`(+ `sharing::tests::drift_ignores_servers_that_are_not_in_the_library`) | ✅ `plan_drift` 空、文件逐字节不变；显式请求物化给 `mcp.noRecordInLibrary` 且不写 |
+| 4 | 同一 server 两处参数不同 → `DoctorFinding { code: "mcp.drift" }`，无任何写入 | `mcp_sharing::a_diverged_server_is_reported_once_and_nothing_is_written`(+ `sharing::tests::drift_never_writes`，它对整棵树做 路径+字节数+内容 的前后比对) | ✅ 恰好 1 条 `McpDrift{field:"command"}`；两份配置与库内记录逐字节不变。**注意**：`doctor.rs` 到 M5 才存在，所以本期交付的是 `sharing::drift_report()` 里那条 `mcp.drift` 语义的数据，没有 `DoctorFinding` 结构体 |
+| + | `opencode` 走 `enabled: false`，其余 agent 删条目 | `mcp_sharing::opencode_closes_by_flag_and_keeps_the_entry` | ✅ 条目留着、`enabled: false`、其余字段不动；`mcp_disable("claude-code") == Remove` |
+| + | YAML 配置拒绝而不是尽力而为 | `mcp_sharing::a_yaml_config_is_refused_instead_of_rewritten` | ✅ `mcp.shareUnsupported`，文件不变；`continue` 的候选列表里根本没有 `.yaml` |
+| + | 记录缺传输方式 / 名字不合法 → 写之前就拦住 | `mcp_sharing::a_record_without_a_transport_is_refused_with_a_code` | ✅ `mcp.notMaterialisable`（名字带 `]` 会把 TOML 表头破开） |
+
+### 18.4 规范形态与物化口径（实现细节）
+
+1. **规范化只做三件事**：按 `transport` 挑字段、去掉空的 `args`/`env`、把显式写过的
+   `timeout`/`enabled` 原样带上。**不补默认值** —— 记录里没有的字段不会凭空出现在 agent
+   的配置里。`allOf` 是记账，不进 agent 的配置。
+2. **候选文件是列表不是单值**：`continue` 声明的是 `config.yaml`，「只动一条」在 YAML 上
+   做不到（重新序列化会丢注释）。所以 `mcp_config_candidates` 一次给出全部**能只动一条**的
+   候选（排除 `approvals` / `tool-list` 这类记账文件与 YAML），调用方取第一份。
+3. **桶名与 `keeper::mcp_bucket_for` 同一份规则**：`copilot` → `servers`，其余 → `mcpServers`。
+4. **幂等**：同一条记录物化两遍，第二遍返回 `Ok(None)` = 零写入、零撤销快照。这是
+   「全部打开一次」可以反复点而不产生垃圾事务的前提。
+5. **漂移的比较面**：只比 `transport / command / args / env / url / headers / enabled` 这七个
+   字段，且把「缺省的 `transport`」与「显式 stdio」视为等价（`implied_transport`）。
+   agent 自己多写的 `timeout` / `cwd` / `type` / `oauth` **不算漂移** —— 覆盖它等于删掉用户
+   写的东西。`allOf` 里标 `false` 的 agent 直接跳过。
+6. **`DisableStyle` 只给核实过的 agent 标 `flag`**。本期只有一个：`opencode`，依据是它的
+   官方 MCP 文档写明「把 `enabled` 置为 `false` 即可停用，不必删条目」。17 个 agent 里
+   其余 16 个都是 `remove`；`pi` 的条目里其实已有 `enabled` 字段，但**没有文档**证明它会
+   被读，所以按 §5.1「不要凭猜给所有 agent 加字段」保持 `remove`。
+
+### 18.5 全量门禁（本轮最后一次运行）
+
+```text
+cargo test --workspace                  404 passed / 0 failed   （基线 380 → +24：core +16、mcp_sharing +8）
+cargo clippy --workspace --all-targets  无新增 warning（25 / 2 / 29 / 4 / 5，与基线逐 target 相同）
+node scripts/check.js                   all 8 gates passed
+node scripts/ui-audit.js                total findings: 0
+node scripts/tauri-i18n.js              MISS 0 / CODE-MISS 0 / AMBIGUOUS 0
+node scripts/test-affected.js           all selected targets passed
+node scripts/comment-lang.js            英文注释 13 行（与基线相同，新文件 0 行），中文覆盖率 99.8%
+node scripts/changelog.js check         ok（27 entries）
+```
+
+### 18.6 M4 可以直接接手的接口
+
+```rust
+// 1) 库内规范形态（只读）
+for rec in core::library::mcp_records(&lib) { /* { name, transport, command, … } */ }
+
+// 2) 物化一条（开 / 关）—— 得到 op 列表，由调用方放进事务
+let plan = core::sharing::materialize_plan(&lib, &home, None, &json!({
+    "name": "fetch", "agentId": "codex", "scope": "global", "on": true
+}));   // Ok(Ok(Some(McpPlan { file, server, style, ops })))
+store.transaction(&plan.ops, &json!({ "kind": "mcp" }));
+
+// 3) 漂移（只读，零写入）
+let drifts = core::sharing::plan_drift(&lib, &home, project_dir, "global");
+core::sharing::drift_report(&lib, &home, None, "global");   // { ok, drift[], count }
+
+// 4) 更低一层的原语（做「以库为准覆盖 / 以该 agent 为准回写」时用）
+core::sharing::read_entry(&file, "claude-code", "fetch");        // agent 自己的写法
+core::sharing::server_names(&file, "claude-code");               // 文件里的服务器名
+core::sharing::open_ops(&file, "codex", &record);                // Option<Vec<Op>>
+core::sharing::close_ops(&file, "opencode", "fetch", DisableStyle::Flag);
+```
+
+**给 M4 的三条提醒**：
+
+1. `materialize_mcp` 的「关」只处理**已经在库里**的服务器；库外的（用户手写的）一律不报告、
+   不触碰 —— `case 3` 的验收就是这条。
+2. 「以库为准覆盖」= `open_ops`；「以该 agent 为准回写库」= 把 `read_entry` 的结果按规范形态
+   归一后写进 `<root>/mcp/servers/<name>.json`（**那是 M6 的动作，本期没有实现**）；
+   「标记为独立」= 在 `allOf` 里补一个 `false`。
+3. `toml_splice::splice_server` 现在会按目标文件换行风格重写段落（§18.2）。规则共享（M4）
+   若也要拼 TOML，走同一个函数，不要另写一份。

@@ -39,6 +39,61 @@ pub struct Agent {
     pub notes: Option<&'static str>,
     pub globals: Paths,
     pub projects: ProjectPaths,
+    /// 在这个 agent 上关掉一个 MCP 服务器时怎么做。
+    ///
+    /// 它不参与路径解析，所以不影响 `installed` 与任何一条路径模板；但它是
+    /// **写盘语义**的一部分：标错一边，关闭动作会在这个 agent 上静默无效
+    /// （配置里留一条 `enabled:false` 的服务器，agent 照旧连上去，台账却记着
+    /// 「已关闭」）。快照测试逐条比对它与 `scripts/adapter-table.js` 的
+    /// `mcpDisable`，所以两边不会走偏。
+    pub mcp_disable: DisableStyle,
+}
+
+/// 关掉一个 MCP 服务器的方式。
+///
+/// 两者的区别不是风格问题，而是「用户看得到什么」：`Remove` 之后配置里没有
+/// 这条服务器了；`Flag` 之后它还在，只是被 agent 的开关关掉。选错一方的直接
+/// 后果是**静默无效**（agent 不认这个字段）或**用户找不到自己的配置**。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DisableStyle {
+    /// 从配置里删掉该条目。
+    Remove,
+    /// 保留条目，只把 agent 自己的开关置为关闭态（`enabled: false`）。
+    Flag,
+}
+
+impl DisableStyle {
+    /// 写进快照与接口的字符串，**改它就是改数据格式**。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DisableStyle::Remove => "remove",
+            DisableStyle::Flag => "flag",
+        }
+    }
+
+    /// 严格匹配，未知值返回 `None` —— 与 `LinkMethod::parse` 同一立场：
+    /// 猜一个默认值会让一次写盘用错语义，而用错的语义是看不见的。
+    pub fn parse(s: &str) -> Option<DisableStyle> {
+        match s {
+            "remove" => Some(DisableStyle::Remove),
+            "flag" => Some(DisableStyle::Flag),
+            _ => None,
+        }
+    }
+}
+
+impl Default for DisableStyle {
+    /// 缺省即 `Remove`：多数 agent 的配置里没有「关闭但保留」这回事，
+    /// 而 `Remove` 在任何 agent 上都生效。
+    fn default() -> Self {
+        DisableStyle::Remove
+    }
+}
+
+/// 关掉这个 agent 上的一个 MCP 服务器的方式。未知 id 按 `Remove` 处理 ——
+/// 调用方在此之前必须先 `by_id` 解析出 agent，走不到这里。
+pub fn mcp_disable(agent_id: &str) -> DisableStyle {
+    by_id(agent_id).map(|a| a.mcp_disable).unwrap_or_default()
 }
 
 const NONE: &[&str] = &[];
@@ -66,6 +121,7 @@ pub static AGENTS: &[Agent] = &[
             mcp: &[".workbuddy/mcp.json"],
             plugins: Some(&[".workbuddy/plugins"]),
         },
+        mcp_disable: DisableStyle::Remove,
     },
     Agent {
         id: "claude-code",
@@ -89,6 +145,7 @@ pub static AGENTS: &[Agent] = &[
             mcp: &[".mcp.json", ".claude/settings.json"],
             plugins: Some(&[".claude/plugins"]),
         },
+        mcp_disable: DisableStyle::Remove,
     },
     Agent {
         id: "codex",
@@ -112,6 +169,7 @@ pub static AGENTS: &[Agent] = &[
             mcp: &[".codex/config.toml", ".codex/mcp.json"],
             plugins: None,
         },
+        mcp_disable: DisableStyle::Remove,
     },
     Agent {
         id: "cursor",
@@ -135,6 +193,7 @@ pub static AGENTS: &[Agent] = &[
             mcp: &[".cursor/mcp.json"],
             plugins: None,
         },
+        mcp_disable: DisableStyle::Remove,
     },
     Agent {
         id: "opencode",
@@ -158,6 +217,8 @@ pub static AGENTS: &[Agent] = &[
             mcp: &[".opencode/opencode.json"],
             plugins: None,
         },
+        // opencode 官方文档：「disable a server by setting `enabled` to `false`」。
+        mcp_disable: DisableStyle::Flag,
     },
     Agent {
         id: "gemini-cli",
@@ -181,6 +242,7 @@ pub static AGENTS: &[Agent] = &[
             mcp: &[".gemini/settings.json", ".gemini/mcp.json"],
             plugins: Some(&[".gemini/extensions"]),
         },
+        mcp_disable: DisableStyle::Remove,
     },
     Agent {
         id: "copilot",
@@ -204,6 +266,7 @@ pub static AGENTS: &[Agent] = &[
             mcp: &[".vscode/mcp.json"],
             plugins: None,
         },
+        mcp_disable: DisableStyle::Remove,
     },
     Agent {
         id: "windsurf",
@@ -227,6 +290,7 @@ pub static AGENTS: &[Agent] = &[
             mcp: &[".windsurf/mcp.json"],
             plugins: None,
         },
+        mcp_disable: DisableStyle::Remove,
     },
     Agent {
         id: "cline",
@@ -250,6 +314,7 @@ pub static AGENTS: &[Agent] = &[
             mcp: &[".cline/mcp.json"],
             plugins: None,
         },
+        mcp_disable: DisableStyle::Remove,
     },
     Agent {
         id: "amp",
@@ -273,6 +338,7 @@ pub static AGENTS: &[Agent] = &[
             mcp: &[".vscode/mcp.json"],
             plugins: None,
         },
+        mcp_disable: DisableStyle::Remove,
     },
     Agent {
         id: "continue",
@@ -296,6 +362,7 @@ pub static AGENTS: &[Agent] = &[
             mcp: &[".continue/config.yaml"],
             plugins: None,
         },
+        mcp_disable: DisableStyle::Remove,
     },
     Agent {
         id: "roo",
@@ -319,6 +386,7 @@ pub static AGENTS: &[Agent] = &[
             mcp: &[".roo/mcp.json"],
             plugins: None,
         },
+        mcp_disable: DisableStyle::Remove,
     },
     Agent {
         id: "goose",
@@ -342,6 +410,7 @@ pub static AGENTS: &[Agent] = &[
             mcp: &[".goose/config.yaml"],
             plugins: None,
         },
+        mcp_disable: DisableStyle::Remove,
     },
     Agent {
         id: "zed",
@@ -365,6 +434,7 @@ pub static AGENTS: &[Agent] = &[
             mcp: &[".zed/settings.json"],
             plugins: None,
         },
+        mcp_disable: DisableStyle::Remove,
     },
     Agent {
         id: "warp",
@@ -388,6 +458,7 @@ pub static AGENTS: &[Agent] = &[
             mcp: &[".warp/mcp.json"],
             plugins: None,
         },
+        mcp_disable: DisableStyle::Remove,
     },
     Agent {
         id: "pi",
@@ -411,6 +482,7 @@ pub static AGENTS: &[Agent] = &[
             mcp: &[".pi/mcp.json"],
             plugins: None,
         },
+        mcp_disable: DisableStyle::Remove,
     },
     Agent {
         id: "dsh",
@@ -434,6 +506,7 @@ pub static AGENTS: &[Agent] = &[
             mcp: &[".dsh/mcp.json"],
             plugins: None,
         },
+        mcp_disable: DisableStyle::Remove,
     },
 ];
 
@@ -592,7 +665,8 @@ mod tests {
     "plugins": [
      ".workbuddy/plugins"
     ]
-   }
+   },
+   "mcpDisable": "remove"
   },
   {
    "id": "claude-code",
@@ -643,7 +717,8 @@ mod tests {
     "plugins": [
      ".claude/plugins"
     ]
-   }
+   },
+   "mcpDisable": "remove"
   },
   {
    "id": "codex",
@@ -691,7 +766,8 @@ mod tests {
      ".codex/mcp.json"
     ],
     "plugins": null
-   }
+   },
+   "mcpDisable": "remove"
   },
   {
    "id": "cursor",
@@ -736,7 +812,8 @@ mod tests {
      ".cursor/mcp.json"
     ],
     "plugins": null
-   }
+   },
+   "mcpDisable": "remove"
   },
   {
    "id": "opencode",
@@ -780,7 +857,8 @@ mod tests {
      ".opencode/opencode.json"
     ],
     "plugins": null
-   }
+   },
+   "mcpDisable": "flag"
   },
   {
    "id": "gemini-cli",
@@ -830,7 +908,8 @@ mod tests {
     "plugins": [
      ".gemini/extensions"
     ]
-   }
+   },
+   "mcpDisable": "remove"
   },
   {
    "id": "copilot",
@@ -873,7 +952,8 @@ mod tests {
      ".vscode/mcp.json"
     ],
     "plugins": null
-   }
+   },
+   "mcpDisable": "remove"
   },
   {
    "id": "windsurf",
@@ -916,7 +996,8 @@ mod tests {
      ".windsurf/mcp.json"
     ],
     "plugins": null
-   }
+   },
+   "mcpDisable": "remove"
   },
   {
    "id": "cline",
@@ -957,7 +1038,8 @@ mod tests {
      ".cline/mcp.json"
     ],
     "plugins": null
-   }
+   },
+   "mcpDisable": "remove"
   },
   {
    "id": "amp",
@@ -999,7 +1081,8 @@ mod tests {
      ".vscode/mcp.json"
     ],
     "plugins": null
-   }
+   },
+   "mcpDisable": "remove"
   },
   {
    "id": "continue",
@@ -1040,7 +1123,8 @@ mod tests {
      ".continue/config.yaml"
     ],
     "plugins": null
-   }
+   },
+   "mcpDisable": "remove"
   },
   {
    "id": "roo",
@@ -1083,7 +1167,8 @@ mod tests {
      ".roo/mcp.json"
     ],
     "plugins": null
-   }
+   },
+   "mcpDisable": "remove"
   },
   {
    "id": "goose",
@@ -1125,7 +1210,8 @@ mod tests {
      ".goose/config.yaml"
     ],
     "plugins": null
-   }
+   },
+   "mcpDisable": "remove"
   },
   {
    "id": "zed",
@@ -1166,7 +1252,8 @@ mod tests {
      ".zed/settings.json"
     ],
     "plugins": null
-   }
+   },
+   "mcpDisable": "remove"
   },
   {
    "id": "warp",
@@ -1200,7 +1287,8 @@ mod tests {
      ".warp/mcp.json"
     ],
     "plugins": null
-   }
+   },
+   "mcpDisable": "remove"
   },
   {
    "id": "pi",
@@ -1240,7 +1328,8 @@ mod tests {
      ".pi/mcp.json"
     ],
     "plugins": null
-   }
+   },
+   "mcpDisable": "remove"
   },
   {
    "id": "dsh",
@@ -1280,7 +1369,8 @@ mod tests {
      ".dsh/mcp.json"
     ],
     "plugins": null
-   }
+   },
+   "mcpDisable": "remove"
   }
  ]
 }"##;

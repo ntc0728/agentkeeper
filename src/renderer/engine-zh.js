@@ -239,6 +239,10 @@ const PATTERNS = [
   // 共享层（M2）：启用/停用时「这次什么都没做」的两种正常状态，以及两条逐条失败原因。
   ['^already linked$', '该位置已是指向共享库的链接'],
   ['^already in the library$', '该位置就是共享库内的主副本，无需建立链接'],
+  // 共享层（M3）：MCP 已经是目标状态时的两种「什么都没做」——两次点击之间
+  // 状态没变，是成功，不是失败。
+  ['^already open$', '该 agent 的配置里这条 MCP 服务器已经是开启状态'],
+  ['^already closed$', '该 agent 的配置里这条 MCP 服务器已经是关闭状态'],
   ['^this path is no longer a link$', '该位置已不再是链接'],
   ['^this link points outside the library$', '该链接指向共享库之外'],
   ['^op[§1] is missing an "op" field$', 'op[§1] 缺少 "op" 字段'],
@@ -441,6 +445,15 @@ const CODE_ZH = {
   'mcp.jsonOnly': '只有 JSON 格式的 MCP 配置文件才能安全地就地编辑',
   'mcp.configNotObject': '配置必须是对象',
   'mcp.noConfigFile': '§1（§2）没有声明 MCP 配置文件',
+  // 共享层（M3）：MCP 物化与漂移。四种拒绝各有一句单独的话，因为修法不同：
+  //   shareUnsupported  —— 这份配置是 YAML，整份重写会丢注释，宁可不做
+  //   noRecordInLibrary —— 库里没有这份规范形态，无从物化
+  //   notMaterialisable —— 记录缺必要字段（既无 command 也无 url）
+  //   drift             —— 是同一条服务器，但两边的参数不一样；没有自动改动
+  'mcp.shareUnsupported': '这个 agent 的 MCP 配置是 YAML，整份重写会丢掉你写的注释；为免毁掉它们，这次操作没有执行',
+  'mcp.noRecordInLibrary': '共享库里没有这条 MCP 服务器的规范形态，无法写入 agent（可能只有名字，或缺了必要字段）',
+  'mcp.notMaterialisable': '这条 MCP 服务器缺少必要字段（命令行服务器要有 command，远程服务器要有 url），已拒绝写入',
+  'mcp.drift': '共享库与这个 agent 的配置里，这条 MCP 服务器的参数不一致；没有自动改动任何一方',
   'project.duplicate': '项目已注册',
   'project.notDirectory': '所选路径不是文件夹',
   'project.directoryNotFound': '文件夹不存在',
