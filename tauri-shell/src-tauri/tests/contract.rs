@@ -89,9 +89,14 @@ fn get_settings_is_a_flat_defaults_object() {
         keys,
         vec![
             "lang",
+            // 共享资产（v0.3）的三个键。它们必须在 `defaults()` 里，
+            // 否则 `save` 会静默丢弃设置页写进来的值。
+            "libraryRoot",
+            "linkMethod",
             "notifications",
             "showLocalStats",
             "theme",
+            "trashDays",
             "updateApiBase",
             "updateAssetKeyword",
             "updateBeta",

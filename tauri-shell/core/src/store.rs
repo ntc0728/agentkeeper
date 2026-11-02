@@ -107,6 +107,23 @@ pub fn native_str(p: &Path) -> String {
     }
 }
 
+/// `target` 相对 `base` 的路径（都用 `native_str` 的分隔符）；不在 `base` 之下时
+/// 返回 `None`。大小写不敏感比较 —— Windows 路径就是这样。
+fn pathdiff(target: &Path, base: &Path) -> Option<String> {
+    // `normalize_path` 只做词法归一（`..` / `.`），保留大小写；所以这里另外小写化，
+    // 并且要从**规范化后**的字符串上切，两边口径才一致。
+    let t = native_str(&Path::new(&normalize_path(&native_str(target))).to_path_buf());
+    let b = native_str(&Path::new(&normalize_path(&native_str(base))).to_path_buf());
+    let t = t.to_lowercase();
+    let b = b.to_lowercase();
+    let prefix = if b.ends_with('\\') {
+        b.clone()
+    } else {
+        format!("{}\\", b)
+    };
+    t.strip_prefix(&prefix).map(|s| s.to_string())
+}
+
 /* ------------------------------------------------------------------ */
 /* JSON 辅助函数                                                        */
 /* ------------------------------------------------------------------ */
@@ -252,6 +269,12 @@ pub fn rmrf(p: &Path) {
     let Ok(st) = std::fs::symlink_metadata(p) else {
         return;
     };
+    // junction 在枚举层是「目录」，`remove_dir` 会**跟着重解析点进库内**把内容
+    // 删掉。凡是链接，一律走 `linkfs::unlink`（它只删目录项、不跟随）。
+    if crate::linkfs::is_link(p) {
+        let _ = crate::linkfs::unlink(p);
+        return;
+    }
     if st.is_dir() {
         if let Ok(entries) = std::fs::read_dir(p) {
             for entry in entries.flatten() {
@@ -346,17 +369,69 @@ fn collect_dir_seen(
         };
         let from = entry.path();
         let Ok(ft) = entry.file_type() else { continue };
-        if ft.is_symlink() {
-            let target = std::fs::read_link(&from)
+        // 链接判定必须走 `linkfs`，不能只看 `entry.file_type().is_symlink()`：
+        // junction 在目录枚举层是一条「带重解析点的目录」，`is_dir()` 也是 false。
+        // 只看 symlink 的话它会掉进下面的 `is_dir` 分支之外、被当成**文件**读，
+        // 更糟的是被当成普通目录递归进去 —— 那会把整个库复制进内存快照。
+        if let Some(kind) = crate::linkfs::entry_link_kind(&from) {
+            if kind == crate::linkfs::LinkMethod::Hardlink {
+                // 硬链接没有目标可读，所以**内容**必须单独记一份，否则还原时
+                // 只剩下「这曾经是个硬链接」，字节回不来。
+                let content = std::fs::read(&from).map_err(|e| {
+                    TxError::plain(format!(
+                        "the file could not be read into the undo snapshot ({})",
+                        e
+                    ))
+                })?;
+                if content.len() > *budget {
+                    return Err(TxError::snapshot(over_budget_message(&rel, content.len())));
+                }
+                *budget -= content.len();
+                // **记成什么种类**：还原阶段会再按内容去同目录里找对端，所以这里
+                // 只决定「重建时走哪条路」。
+                // * 目录里还有同内容的另一个名字（donor）→ 记 Hardlink，还原时
+                //   优先恢复「共享同一份字节」这个结构；
+                // * 没有 → 记成一条指向「内容载体」的 symlink，也就是它自己。
+                //   独一份的硬链接最需要保证的是内容还在，而 `target` 留空会让还原
+                //   直接报失败、条目消失。
+                //
+                // donor 必须与这一条**不同**：同一份硬链接的两个名字同 inode，正常
+                // 情况按 inode 已经排除，这里是第二道闸。
+                let donor_rel = hardlink_donor_for(&from)
+                    .filter(|d| !crate::linkfs::same_target(d, &from))
+                    .and_then(|d| pathdiff(&d, dir));
+                // **记成什么种类**：有 donor 才记 Hardlink；否则把它记成一条
+                // 指向「内容载体」的 symlink。
+
+                match donor_rel {
+                    Some(_) => out.push(DirSnap::Link {
+                        rel: rel.clone(),
+                        target: String::new(),
+                        is_dir: false,
+                        kind: crate::linkfs::LinkMethod::Hardlink,
+                    }),
+                    None => out.push(DirSnap::Link {
+                        rel: rel.clone(),
+                        target: native_str(&from),
+                        is_dir: false,
+                        kind: crate::linkfs::LinkMethod::Symlink,
+                    }),
+                }
+                out.push(DirSnap::File(rel, content));
+                continue;
+            }
+            let target = crate::linkfs::read_target(&from)
                 .map(|t| native_str(&t))
                 .unwrap_or_default();
-            out.push(DirSnap::Link(
+            let is_dir = std::fs::metadata(&from)
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
+            out.push(DirSnap::Link {
                 rel,
                 target,
-                std::fs::metadata(&from)
-                    .map(|m| m.is_dir())
-                    .unwrap_or(false),
-            ));
+                is_dir,
+                kind,
+            });
         } else if ft.is_dir() {
             out.push(DirSnap::Dir(rel.clone()));
             collect_dir_seen(&from, &rel, budget, out, seen)?;
@@ -450,35 +525,197 @@ fn restore_dir(dir: &Path, entries: &[DirSnap]) -> Vec<RestoreFailure> {
                     ));
                 }
             }
-            DirSnap::Link(_, target, is_dir) => {
-                let created = if *is_dir {
-                    symlink_dir(Path::new(target), &to)
-                } else {
-                    symlink_file(Path::new(target), &to)
-                };
-                if let Err(e) = created {
-                    // 没有特权的 Windows 进程无法创建链接，而未链接的目标也没有
-                    // 字节可以退回。目录树的其余部分仍然被恢复了，而该条目会带着
-                    // 用户需要做什么一起被报告 —— 悄悄缺失一个条目，正是这里
-                    // 绝不能产出的"恢复了一半"的目录树。
-                    out.push(RestoreFailure::new(
-                        &native_str(&to),
-                        RESTORE_SYMLINK_FAILED,
-                        format!(
-                            "the link was not recreated ({}); the other files in this directory are back, but this one is missing, because creating a symbolic link on Windows needs administrator rights or developer mode — run the app as administrator, or recreate the link by hand",
-                            e
-                        ),
-                    ));
+            DirSnap::Link {
+                target,
+                is_dir,
+                kind,
+                ..
+            } => {
+                if let Err(f) = recreate_link(target, &to, *is_dir, *kind) {
+                    // 链接没能重建，而未链接的目标也没有字节可以退回。目录树的其余
+                    // 部分仍然被恢复了，而该条目会带着用户需要做什么一起被报告 ——
+                    // 悄悄缺失一个条目，正是这里绝不能产出的"恢复了一半"的目录树。
+                    out.push(f);
                 }
             }
         }
     }
     out
 }
+// 一个硬链接**没有「目标」可读**：它的两个名字指向同一份内容，`read_target` 永远
+// 是空。所以「按链接还原」这一条对硬链接只能靠**内容**来表达：
+//
+// * 记成 `DirSnap::Link`（`kind = Hardlink`、`target` 为空），保留「它曾经是链接」
+//   这个事实，`doctor` 与审计都靠它；
+// * 同时把这个名字的**内容**记进一个 `DirSnap::File`（同样的 `rel`），这样还原时
+//   字节一定会回来；
+// * 还原阶段按内容在**同目录**里重新找一个对端（`linkfs::restore_hardlink`），
+//   而不是记住快照时的 donor 路径 —— 还原会先清空整棵树，记下的路径那时候早就
+//   不在了；而"同目录里内容相同的另一个文件"是可重算的事实。
+//
+// 找不到对端（这份内容在目录里是独一份）时保留一个内容正确的普通文件：比一个
+// 「缺失的条目」或一条指向自身的死链接都好。
+
+/// 同目录里与 `p` 共享同一份内容（同卷、同文件 id）的另一个名字。
+///
+/// 判定用 `GetFileInformationByHandle` 的卷序列号 + 文件索引，**不用** canonicalize：
+/// 硬链接的两条路径 canonicalize 出来各不相同（它们本来就是两个目录项），所以拿
+/// 规范化路径比较永远不相等，donor 也就永远找不到。
+fn hardlink_donor_for(p: &Path) -> Option<PathBuf> {
+    let parent = p.parent()?;
+    let mine = file_identity(p)?;
+    let self_low = normalize_for_identity(p);
+    for entry in std::fs::read_dir(parent).ok()?.flatten() {
+        let q = entry.path();
+        if normalize_for_identity(&q) == self_low {
+            continue;
+        }
+        if file_identity(&q) == Some(mine) {
+            return Some(q);
+        }
+    }
+    None
+}
+
+fn normalize_for_identity(p: &Path) -> String {
+    native_str(p).to_lowercase()
+}
+
+/// `(卷序列号, 文件索引)` —— 同卷上唯一的 inode 标识。
+fn file_identity(p: &Path) -> Option<(u64, u64)> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use std::os::windows::ffi::OsStrExt;
+    let w: Vec<u16> = p.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    // 不带 `FILE_FLAG_OPEN_REPARSE_POINT`：我们要的是**跟随后**的实体身份。
+    let h = unsafe {
+        CreateFileW(
+            w.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            0,
+        )
+    };
+    if h == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(h, &mut info) };
+    unsafe { CloseHandle(h) };
+    if ok == 0 {
+        return None;
+    }
+    let index = ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64;
+    Some((info.dwVolumeSerialNumber as u64, index))
+}
+
+/// 按原来的**种类**重建一条链接。返回的失败已经带好 path 与 code。
+///
+/// junction 必须重建为 junction：它不需要任何特权，而 symlink 需要
+/// （开发者模式或管理员）。两者互换会让「这棵目录树和写入前一模一样」不成立，
+/// 也会让下一次 `doctor` 把一条我们自己造成的降级报成用户的问题。
+///
+/// **hardlink 例外**：它没有「目标」可读，`target` 为空是常态。快照已经把内容记在
+/// 调用方那边的 `File` 条目里（并且先被写了回去），这里的 job 只是把「共享同一份
+/// 字节」这个结构补上 —— 对端按内容在同目录里现找，见 `linkfs::restore_hardlink`。
+fn recreate_link(
+    target: &str,
+    to: &Path,
+    is_dir: bool,
+    kind: crate::linkfs::LinkMethod,
+) -> Result<(), RestoreFailure> {
+    use crate::linkfs::LinkMethod;
+    // `LinkMethod::Copy` 不是链接：在快照里出现就是数据坏了。
+    if kind == LinkMethod::Copy {
+        return Err(RestoreFailure::new(
+            &native_str(to),
+            RESTORE_PATH_FAILED,
+            "the snapshot recorded a managed copy where a link was expected".to_string(),
+        ));
+    }
+    if kind == LinkMethod::Hardlink {
+        // 内容应当已经由调用方写回（快照把硬链接的内容按文件另记了一条）。
+        // 这里只补「共享 inode」这一属性：donor 取同目录里内容相同的那个条目。
+        //
+        // **不用快照时记下的 donor**：还原会先 `rmrf` 整棵树，等轮到这一条时原来的
+        // donor 多半已经不在了；就算还在，它也可能刚被写成一个**新**文件（inode
+        // 变了）。按内容在同目录里重新找对端，比记住一个绝对路径可靠得多。
+        //
+        // 找不到对端（这份内容在目录里是独一份）时什么都不做：保留内容正确的普通
+        // 文件，是唯一安全的答案 —— 造一条指向自身的链接会得到 FilesystemLoop。
+        if !to.exists() {
+            return Ok(());
+        }
+        let Ok(content) = std::fs::read(to) else {
+            return Ok(());
+        };
+        let _ = crate::linkfs::restore_hardlink(to, &content);
+        return Ok(());
+    }
+    if target.is_empty() {
+        return Err(RestoreFailure::new(
+            &native_str(to),
+            RESTORE_PATH_FAILED,
+            "the link target could not be read when this write started, so there is nothing to point at; recreate the link by hand".to_string(),
+        ));
+    }
+    let src = Path::new(target);
+    // 统一成 `Result<LinkMethod, String>`：`symlink_dir` 返回的是 `io::Result<()>`。
+    let made: Result<LinkMethod, String> = match kind {
+        LinkMethod::Junction => crate::linkfs::create_dir_link(src, to, Some(LinkMethod::Junction)),
+        LinkMethod::Symlink => {
+            // symlink 的大小写（目录 / 文件）由 `is_dir` 决定；这里不能直接用
+            // `linkfs::create_*`，因为它们会按能力顺序回退到别的方式。
+            let r = if is_dir {
+                symlink_dir(src, to)
+            } else {
+                symlink_file(src, to)
+            };
+            r.map(|()| LinkMethod::Symlink).map_err(|e| e.to_string())
+        }
+        LinkMethod::Hardlink | LinkMethod::Copy => unreachable!(),
+    };
+    match made {
+        Ok(m) => {
+            let actual = crate::linkfs::link_kind(to);
+            if actual != Some(m) {
+                // 建出来了但读回的不是同一种：宁可报失败，也不要留下一棵
+                // 「看起来恢复了、其实语义变了」的目录树。
+                return Err(RestoreFailure::new(
+                    &native_str(to),
+                    RESTORE_SYMLINK_FAILED,
+                    format!(
+                        "the link was recreated as {} instead of {}",
+                        actual.map(|a| a.as_str()).unwrap_or("an unknown kind"),
+                        m.as_str()
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        Err(e) => Err(RestoreFailure::new(
+            &native_str(to),
+            RESTORE_SYMLINK_FAILED,
+            format!(
+                "the {} link was not recreated ({}); the other files in this directory are back, but this one is missing — recreate it by hand",
+                kind.as_str(),
+                e
+            ),
+        )),
+    }
+}
 
 fn entry_name(entry: &DirSnap) -> String {
     match entry {
-        DirSnap::Dir(name) | DirSnap::File(name, _) | DirSnap::Link(name, _, _) => name.clone(),
+        DirSnap::Dir(name) | DirSnap::File(name, _) => name.clone(),
+        DirSnap::Link { rel, .. } => rel.clone(),
     }
 }
 
@@ -615,6 +852,33 @@ pub const STORE_SNAPSHOT_TOO_LARGE: &str = "store.snapshotTooLarge";
 /// `errorCode`。文件都在、链接不在，而只有带特权的运行才能修复它。
 pub const RESTORE_SYMLINK_FAILED: &str = "store.symlinkRestoreFailed";
 
+/// 「建链接失败」的 `errorCode`（`linkDir` / `linkFile` 两种 op 共用）。
+///
+/// 单独一个 code 的理由：这条失败在用户那里最常见的成因不是权限，而是**目标已被
+/// 占用**（agent 自己写过一份副本）或**来源已被删**。`store.restorePathFailed` 会
+/// 把这些都说成「路径写不进去」，而用户据此会去改权限 —— 改错了地方。
+pub const STORE_LINK_FAILED: &str = "store.linkFailed";
+
+/// 链接方式偏好（设置里的 `linkMethod`）。
+///
+/// `auto` 交给 `linkfs::create_*` 自己按能力顺序挑；其余值只用来**收窄** ——
+/// 一个建不出来的偏好会让事务失败（`store.linkFailed`），而不是悄悄换成别的方式：
+/// 「我选的 junction 变成了 symlink」是用户无法察觉的语义变化。
+///
+/// 偏好只从环境变量 `AK_LINK_METHOD`（`symlink` | `junction` | `hardlink`）读，
+/// 不读设置文件：`core` 不知道 store 根在哪，把写入路径绑到一份可被外部改写的
+/// JSON 上不是这里该做的事。M2 打开共享页之后，偏好由 UI 随 `enable_asset` 的
+/// input 传入，落到 `linkfs::create_dir_link` 的 `prefer` 实参上。
+fn preferred_link_method() -> Option<crate::linkfs::LinkMethod> {
+    use crate::linkfs::LinkMethod;
+    match std::env::var("AK_LINK_METHOD").ok().as_deref() {
+        Some("symlink") => Some(LinkMethod::Symlink),
+        Some("junction") => Some(LinkMethod::Junction),
+        Some("hardlink") => Some(LinkMethod::Hardlink),
+        _ => None,
+    }
+}
+
 /// 因上述 code 没有涵盖的原因而失败的恢复：该路径根本写不回去（权限变了、路径被
 /// 锁住、恢复途中卷被写满）。
 const RESTORE_PATH_FAILED: &str = "store.restorePathFailed";
@@ -698,6 +962,15 @@ impl TxError {
         }
     }
 
+    /// 一个自带 code 的失败。code 在原因*已知*的地方挂上去，因为渲染层的措辞就是
+    /// 以 code 为依据的（[`STORE_LINK_FAILED`] 的条目在 `engine-zh.js` 里）。
+    fn coded(code: &'static str, message: impl Into<String>) -> TxError {
+        TxError {
+            message: message.into(),
+            code,
+        }
+    }
+
     /// 补上事务即将触及的路径。
     ///
     /// 只有操作错误会带上 `write failed for <path>: …` 这个前缀骨架。该模式是作为
@@ -748,6 +1021,10 @@ pub enum OpKind {
     Json,
     Delete,
     Mkdir,
+    /// 在 `path` 建一个指向 `from` 的目录链接（symlink → junction）。
+    LinkDir,
+    /// 在 `path` 建一个指向 `from` 的文件链接（symlink → hardlink）。
+    LinkFile,
 }
 
 impl OpKind {
@@ -758,6 +1035,8 @@ impl OpKind {
             OpKind::Json => "json",
             OpKind::Delete => "delete",
             OpKind::Mkdir => "mkdir",
+            OpKind::LinkDir => "linkDir",
+            OpKind::LinkFile => "linkFile",
         }
     }
 }
@@ -822,6 +1101,21 @@ impl Op {
     pub fn mkdir(path: &str) -> Op {
         Op::new(OpKind::Mkdir, path)
     }
+
+    /// 在 `dst` 建一个指向 `src` 的目录链接。`dst` 必须不存在 —— 已有的真实目录要先
+    /// 用 `Op::delete` 删掉（在同一个事务里），否则这里会拒绝而不是覆盖。
+    pub fn link_dir(dst: &str, src: &str) -> Op {
+        let mut op = Op::new(OpKind::LinkDir, dst);
+        op.from = Some(src.to_string());
+        op
+    }
+
+    /// 在 `dst` 建一个指向 `src` 的文件链接。
+    pub fn link_file(dst: &str, src: &str) -> Op {
+        let mut op = Op::new(OpKind::LinkFile, dst);
+        op.from = Some(src.to_string());
+        op
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -835,9 +1129,17 @@ enum DirSnap {
     /// 目录是一种真实状态，丢掉它会在 agent 的目录树里留下一个幻影文件夹。
     Dir(String),
     File(String, Vec<u8>),
-    /// `target` 加上"目标是一个目录"，正是这一点告诉恢复过程该调用 `symlink_dir`
-    /// 而不是 `symlink_file`。
-    Link(String, String, bool),
+    /// 一条链接。`target` 是链接目标，`is_dir` 决定它是目录链接还是文件链接，
+    /// `kind` 决定恢复时用哪一种原语重建（junction 必须还是 junction）。
+    ///
+    /// 用命名字段而不是元组：这个变体有两个同类 `String` 和一个 `bool`，
+    /// 位置参数一旦写反（`target` 与 `rel` 对调）编译完全通得过。
+    Link {
+        rel: String,
+        target: String,
+        is_dir: bool,
+        kind: crate::linkfs::LinkMethod,
+    },
 }
 
 /// 一个事务触及了什么，以便失败时能把它放回去。
@@ -859,13 +1161,17 @@ enum Snapshot {
         path: String,
         entries: Vec<DirSnap>,
     },
-    /// 一个符号链接，或一个悬空的符号链接：目标字符串加上目标是否为目录，正是它
-    /// 决定恢复时选 `symlink_dir` 还是 `symlink_file`。链接不是文件 —— 把它当
-    /// 文件重建，会把 `a -> b` 换成一个过期的 `b` 副本。
+    /// 一条链接（符号链接 / junction / 硬链接）：目标字符串、目标是否为目录，以及
+    /// **它是用哪种原语建的**。
+    ///
+    /// `kind` 是这里最重要的一个字段：没有它，一个 junction 在恢复时会被换成
+    /// symlink（`symlink_dir`），链接的语义悄悄变了；而 P0 实测又表明 junction 与
+    /// symlink 在 `file_type()` 上几乎不可区分，事后补认是不可能的。
     Link {
         path: String,
         target: String,
         is_dir: bool,
+        kind: crate::linkfs::LinkMethod,
     },
 }
 
@@ -938,10 +1244,12 @@ impl Store {
             }
         };
 
-        if meta.is_symlink() {
+        // 同 `collect_dir_seen`：junction 不是 `is_symlink()`，漏掉它就会在下面
+        // 被当成普通目录 `collect_dir` 进去，把库内整棵树读进内存快照。
+        if let Some(kind) = crate::linkfs::entry_link_kind(path) {
             // 悬空链接不是错误，而是磁盘上已经存在的一种状态；此时 `metadata`
             // 会失败，于是该链接被记录为指向一个非目录，这是唯一能知道的事。
-            let target = std::fs::read_link(path)
+            let target = crate::linkfs::read_target(path)
                 .map(|t| native_str(&t))
                 .unwrap_or_default();
             let is_dir = std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false);
@@ -949,6 +1257,7 @@ impl Store {
                 path: original.to_string(),
                 target,
                 is_dir,
+                kind,
             });
         }
 
@@ -992,7 +1301,11 @@ impl Store {
     /// [`Store::restore`]，它只在失败路径上运行。
     pub fn transaction(&self, ops: &[Op], meta: &Value) -> Value {
         for (i, op) in ops.iter().enumerate() {
-            if matches!(op.kind, OpKind::CopyDir) && op.from.is_none() {
+            if matches!(
+                op.kind,
+                OpKind::CopyDir | OpKind::LinkDir | OpKind::LinkFile
+            ) && op.from.is_none()
+            {
                 return json!({
                     "ok": false,
                     "error": format!("op[{}] ({}) is missing a \"from\"", i, op.kind.name()),
@@ -1087,6 +1400,50 @@ impl Store {
                         log.push(json!({ "op": "copyDir", "path": real, "from": src }));
                     }
 
+                    OpKind::LinkDir | OpKind::LinkFile => {
+                        let src = op.from.clone().unwrap_or_default();
+                        let is_dir = op.kind == OpKind::LinkDir;
+                        // 两条前置条件都要在**动盘之前**判，且都要给出可读的理由：
+                        // 「来源被删了」与「目标被占了」的修法完全不同。
+                        if is_dir && !Path::new(&src).is_dir() {
+                            return Err(TxError::plain(format!(
+                                "link source is not a directory: {}",
+                                src
+                            )));
+                        }
+                        if !is_dir && !Path::new(&src).is_file() {
+                            return Err(TxError::plain(format!(
+                                "link source is not a file: {}",
+                                src
+                            )));
+                        }
+                        // `is_link` 是必需的：`exists()` 会跟随链接，一条悬空的
+                        // junction 在它眼里「不存在」，于是这里会放行，然后
+                        // `CreateDirectoryW` 以 ERROR_ALREADY_EXISTS 失败。
+                        if Path::new(&real).exists() || crate::linkfs::is_link(Path::new(&real)) {
+                            return Err(TxError::coded(
+                                STORE_LINK_FAILED,
+                                format!("link target already exists: {}", real),
+                            ));
+                        }
+                        if let Some(parent) = Path::new(&real).parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let prefer = preferred_link_method();
+                        let created = if is_dir {
+                            crate::linkfs::create_dir_link(Path::new(&src), Path::new(&real), prefer)
+                        } else {
+                            crate::linkfs::create_file_link(Path::new(&src), Path::new(&real), prefer)
+                        };
+                        let method = created.map_err(|e| TxError::coded(STORE_LINK_FAILED, e))?;
+                        log.push(json!({
+                            "op": op.kind.name(),
+                            "path": real,
+                            "from": src,
+                            "method": method.as_str(),
+                        }));
+                    }
+
                     OpKind::Json => {
                         if let Some(parent) = Path::new(&real).parent() {
                             let _ = std::fs::create_dir_all(parent);
@@ -1133,14 +1490,21 @@ impl Store {
 
                     OpKind::Delete => {
                         let p = Path::new(&real);
-                        if p.exists() {
+                        // `exists()` 会跟随链接：一条悬空的 junction / symlink 在它眼里
+                        // 「不存在」，于是删除会被静默跳过，事务"成功"但链接还在。
+                        if p.exists() || crate::linkfs::is_link(p) {
                             if std::fs::symlink_metadata(p)
                                 .map(|m| m.is_dir())
                                 .unwrap_or(false)
                             {
                                 rmrf(p);
-                            } else {
-                                let _ = std::fs::remove_file(p);
+                            } else if let Err(e) = std::fs::remove_file(p) {
+                                // 删不掉要说出来：一个「成功」的事务留下一个还在的条目，
+                                // 是用户最难查的那类问题。
+                                return Err(TxError::plain(format!(
+                                    "delete failed for {}: {}",
+                                    real, e
+                                )));
                             }
                         }
                         log.push(json!({ "op": "delete", "path": real }));
@@ -1287,29 +1651,23 @@ impl Store {
                 Snapshot::Link {
                     target: link_to,
                     is_dir,
+                    kind,
                     ..
                 } => {
                     // 该操作可能在链接该在的位置留下了文件或目录：Windows 上的
                     // `symlink_file` 会以 `ERROR_ALREADY_EXISTS` 失败而不是替换它，
                     // 所以撤销必须自己清掉这条路径，否则它会为一棵其实本可以恢复
                     // 的目录树报告失败。
+                    //
+                    // `rmrf` 在这里是安全的：`target` 是**链接这一侧**的路径，
+                    // 而 `rmrf` 对重解析点只解除链接、不跟随（`store::rmrf` 的约定）。
                     if std::fs::symlink_metadata(target).is_ok() {
                         rmrf(target);
                     }
-                    let created = if *is_dir {
-                        symlink_dir(Path::new(link_to), target)
-                    } else {
-                        symlink_file(Path::new(link_to), target)
-                    };
-                    created.map_err(|e| {
-                        RestoreFailure::new(
-                            s.path(),
-                            RESTORE_SYMLINK_FAILED,
-                            format!(
-                                "the link was not recreated ({}); a symbolic link on Windows needs administrator rights or developer mode — run the app as administrator, or recreate the link by hand",
-                                e
-                            ),
-                        )
+                    recreate_link(link_to, target, *is_dir, *kind).map_err(|f| {
+                        // 这一条要按**被触及的那个路径**来报，而不是恢复函数内部的
+                        // 子路径；否则用户拿到的路径和他的资产列表对不上。
+                        RestoreFailure::new(s.path(), f.code(), f.detail().to_string())
                     })
                 }
             };

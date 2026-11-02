@@ -57,4 +57,24 @@ ureq = { version = "2", features = ["json", "native-certs"] }
 # 更新令牌的 `enc1:` 信封（DPAPI 密文的 base64），以及生成它所需的 Win32 调用。
 # 令牌用 DPAPI 以用户作用域、无附加熵封装，所以同一用户的密文可以互换使用。
 base64 = "0.22"
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+# Win32 调用分两组用途：
+#
+#   Security_Cryptography  —— 上面那条 DPAPI 信封（既有）
+#   Security               —— 权限探测（OpenProcessToken + GetTokenInformation）
+#   Storage_FileSystem     —— CreateDirectoryW / CreateFileW / CreateSymbolicLinkW /
+#                             GetFinalPathNameByHandleW，以及 FILE_FLAG_OPEN_REPARSE_POINT 等
+#   System_IO              —— DeviceIoControl
+#   System_Ioctl           —— FSCTL_SET_REPARSE_POINT / FSCTL_GET_REPARSE_POINT /
+#                             IO_REPARSE_TAG_MOUNT_POINT
+#
+# 最后这三项是共享资产（linkfs）建/读 junction 的全部家当：std 没有 junction，只能
+# 自己发重解析点。另外那个常数**不在** FileSystem 模块里 —— 它在 System_Ioctl，
+# 漏开这一项的表现是 `FSCTL_SET_REPARSE_POINT` 未定义。
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+] }

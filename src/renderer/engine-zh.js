@@ -309,14 +309,43 @@ const PATTERNS = [
   // 建议（拆分写入 / 去掉不属于该资产的文件）本身就是
   // 句子的一部分，出于与上面相同的原因，它需要自己的句干。
   ['^undo snapshot limit reached: .*$', '撤销快照已达上限：所需数据超过单次写入可持有的额度（8 MB），因此未写入任何内容。请将该资产拆分为多次写入，或移除其中不必要的文件（依赖目录与构建产物会自动跳过）'],
-  // 两句符号链接还原文案（store.rs:480 对应目录内的条目，
-  // store.rs:1337 对应路径本身就是链接的情况）。两句都陈述了
-  // 用户必须去满足的权限要求，所以都整句翻译，
-  // 而不是把英文的 §2 留在中国文前缀后面。
-  ['^the link was not recreated \(§1\); the other files in this directory are back, but this one is missing, because creating a symbolic link on Windows needs administrator rights or developer mode — run the app as administrator, or recreate the link by hand$',
-    '未能重建链接（§1）；该目录内其余文件均已还原，仅缺这一个，因为在 Windows 上创建符号链接需要管理员权限或开发者模式——请以管理员身份运行，或手工重建该链接'],
-  ['^the link was not recreated \(§1\); a symbolic link on Windows needs administrator rights or developer mode — run the app as administrator, or recreate the link by hand$',
-    '未能重建链接（§1）；在 Windows 上创建符号链接需要管理员权限或开发者模式——请以管理员身份运行，或手工重建该链接'],
+  // 链接还原的三句（store.rs 的 `recreate_link`）。它们都陈述了
+  // 用户必须去做什么，所以整句翻译，而不是把英文的 §2 留在中国文前缀后面。
+  ['^the §1 link was not recreated \(§2\); the other files in this directory are back, but this one is missing — recreate it by hand$',
+    '未能重建 §1 链接（§2）；该目录内其余文件均已还原，仅缺这一个——请手工重建该链接'],
+  ['^the link was recreated as §1 instead of §2$', '重建出来的链接是 §1，而不是原来的 §2'],
+  ['^the link target could not be read when this write started, so there is nothing to point at; recreate the link by hand$',
+    '写入开始时读不到这条链接的目标，因此没有可指向的位置；请手工重建该链接'],
+  ['^the snapshot recorded a managed copy where a link was expected$', '撤销快照在该位置记录的是一份副本，而不是链接'],
+
+  /*
+   * linkfs.rs —— 链接原语。这些串既会经由 `store.linkFailed` 的 detail 进界面，
+   * 也会被 `library.rs` 的台账错误直接显示，所以全都整句翻译。
+   */
+  ['^link source is not a directory: §1$', '链接来源不是目录：§1'],
+  ['^link source is not a file: §1$', '链接来源不是文件：§1'],
+  ['^link target already exists: §1$', '链接目标已存在：§1'],
+  ['^the parent directory could not be created \(§1\): §2$', '无法创建父目录（§1）：§2'],
+  ['^no link could be created at §1 \(§2\)$', '无法在 §1 建立链接（§2）'],
+  ['^links need absolute paths, got src §1 and dst §2$', '链接需要绝对路径，实际来源为 §1、目标为 §2'],
+  ['^links need absolute paths, got dst §1$', '链接需要绝对路径，实际目标为 §1'],
+  ['^delete failed for §1: §2$', '删除失败（§1）：§2'],
+  ['^a hard link must be a file: §1$', '硬链接只能用于文件：§1'],
+  ['^not a link: §1$', '不是链接：§1'],
+  ['^a junction needs an absolute target$', '目录联接（junction）需要绝对目标路径'],
+  ['^an unknown kind$', '未知的链接类型'],
+
+  /*
+   * library.rs —— 台账（links.json）。台账损坏是一条必须解释清楚的拒绝：
+   * 它的修法是「以磁盘为准重建」，而不是「重试」。
+   */
+  ['^the link ledger could not be read \(§1\): §2$', '无法读取链接台账（§1）：§2'],
+  ['^the link ledger is not valid JSON, so it was left untouched \(§1\): §2$', '链接台账不是合法 JSON，已原样保留未做改动（§1）：§2'],
+  ['^the link ledger has no "entries" array, so it was left untouched \(§1\)$', '链接台账缺少 entries 数组，已原样保留未做改动（§1）'],
+  ['^the link ledger entry #§1 is malformed, so it was left untouched \(§2\)$', '链接台账第 §1 条记录格式损坏，已原样保留未做改动（§2）'],
+  ['^the library directory could not be created \(§1\): §2$', '无法创建库目录（§1）：§2'],
+  ['^the link ledger could not be serialised: §1$', '无法序列化链接台账：§1'],
+  ['^the link ledger could not be written \(§1\): §2$', '无法写入链接台账（§1）：§2'],
 
   /*
    * core/http.rs + core/update/*.rs —— 见上面的 EXACT 块：每条中文
@@ -377,6 +406,11 @@ const CODE_ZH = {
   'store.restoreIncomplete': '写入中断，已自动还原大部分内容，但部分路径未能还原，请检查下方列出的路径',
   'store.symlinkRestoreFailed': '文件已还原，但符号链接未能重建。请以管理员身份运行，或开启开发者模式后手工重建该链接',
   'store.restorePathFailed': '该路径未能还原',
+  // 建链接失败（linkDir / linkFile）。单列一个 code 的理由：这条失败最常见的成因
+  // 不是权限，而是目标位置已被占用（agent 自己写过一份副本）或来源已被删 ——
+  // 前者要用户先停用/删掉那份副本，后者要先恢复库内主副本，两者都不该被说成
+  // 「路径写不进去」。§1 由 `zhCode` 的第二个参数（路径）填充。
+  'store.linkFailed': '未能建立链接（§1）。目标位置可能已被真实文件或目录占用，或来源已被删除；请先停用该位置上的副本后重试',
   'store.corruptTransaction': '事务记录已损坏',
   'store.opFieldMissing': '第 §1 项操作缺少 op 字段',
   'store.opPathMissing': '第 §1 项操作（§2）缺少 path 字段',

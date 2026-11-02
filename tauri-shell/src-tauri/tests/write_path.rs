@@ -264,6 +264,199 @@ fn a_failed_transaction_of_a_new_file_leaves_it_absent() {
 }
 
 /* ------------------------------------------------------------------ */
+/* links —— 链接 op 与三种还原情形                                      */
+/* ------------------------------------------------------------------ */
+
+// 链接 op 在真实目录上跑通：**建出来的是链接**，不是副本；取消链接不会动库内主副本。
+//
+// 这是 M1 验收 1 的集成版本（core 单测那边还有一条 `probe_reports_a_usable_dir_chain`，
+// 断言的是能力探测本身）。两条都过的意义：能力探测说有、事务里真的建得出来。
+#[test]
+fn a_link_op_creates_a_link_not_a_copy() {
+    use agentkeeper_shell_lib::core::linkfs;
+
+    let fx = Fixture::new("linkcreate");
+    let store = fx.store();
+    let library = fx.path(&["library", "skills", "pdf"]);
+    write(&join(&library, &["SKILL.md"]), "---\nname: pdf\n---\nbody\n");
+    let agent_side = fx.path(&["agent", ".claude", "skills", "pdf"]);
+
+    let tx = store.transaction(
+        &[
+            Op::mkdir(&fx.path(&["agent", ".claude", "skills"])),
+            Op::link_dir(&agent_side, &library),
+        ],
+        &json!({ "kind": "skill", "action": "link", "assetName": "pdf" }),
+    );
+    assert_eq!(tx["ok"], json!(true), "{}", tx);
+
+    let kind = linkfs::link_kind(std::path::Path::new(&agent_side));
+    assert!(kind.is_some(), "the agent side must be a link, not a copy");
+    // 内容经由链接可读 —— 这就是「一份内容、多处入口」。
+    assert_eq!(
+        read(&join(&agent_side, &["SKILL.md"])),
+        "---\nname: pdf\n---\nbody\n"
+    );
+
+    // 日志里记下了实际用掉的方式（`method`），台账重建靠它。
+    let audit = read(&fx.path(&["audit.jsonl"]));
+    assert!(
+        audit.contains("\"method\""),
+        "the journal must record which method was used: {}",
+        audit
+    );
+
+    // 解除链接只是删目录项：库内主副本还在。
+    linkfs::unlink(std::path::Path::new(&agent_side)).expect("unlink");
+    assert!(std::path::Path::new(&library).join("SKILL.md").exists());
+}
+
+// 同一事务里「删真实目录 + 建链接」，后续 op 必然失败 → 目录树**按链接还原**，
+// 而且还原出来的链接还指向原来的地方。这是 M1 验收 2。
+#[test]
+fn a_failed_transaction_restores_the_directory_and_its_links() {
+    use agentkeeper_shell_lib::core::linkfs;
+
+    let fx = Fixture::new("linkrollback");
+    let store = fx.store();
+    let library = fx.path(&["library", "skills", "pdf"]);
+    write(&join(&library, &["SKILL.md"]), "body\n");
+    let agent_side = fx.path(&["agent", "skills", "pdf"]);
+    write(&join(&agent_side, &["SKILL.md"]), "body\n");
+    write(&join(&agent_side, &["extra.md"]), "only-on-agent-side\n");
+
+    // 先在同目录里放一条链接，让快照里既有真实文件、也有链接。
+    let inner_link = join(&agent_side, &["linked.md"]);
+    assert!(
+        linkfs::create_file_link(
+            std::path::Path::new(&join(&library, &["SKILL.md"])),
+            std::path::Path::new(&inner_link),
+            None
+        )
+        .is_ok(),
+        "a file link must be creatable on this machine"
+    );
+
+    let r = store.transaction(
+        &[
+            Op::delete(&agent_side),
+            Op::link_dir(&agent_side, &library),
+            Op::copy_dir(&fx.path(&["agent", "nope"]), &fx.path(&["agent", "missing"])),
+        ],
+        &json!({ "kind": "skill", "action": "converge" }),
+    );
+    assert_eq!(r["ok"], json!(false), "{}", r);
+
+    // 目录与其中每一个**真实文件**都回来了，逐字节相同。
+    //
+    // `dir_snapshot` 对链接的表示是不可靠的（文件链接读不出内容 → 空串；目录链接
+    // 被当成目录递归进去），所以这里只拿它验真实文件；链接自身由下面几条断言负责。
+    assert_eq!(
+        dir_snapshot(&agent_side),
+        "SKILL.md#body\n|extra.md#only-on-agent-side\n|linked.md#body\n",
+        "the real files must come back byte for byte"
+    );
+    assert_eq!(
+        read(&join(&agent_side, &["extra.md"])),
+        "only-on-agent-side\n"
+    );
+    // 其中的那条链接**仍是链接**，而且读到的正是库内那一份的内容。
+    //
+    // 这里只断言「内容一致」，不断言「它是 symlink」：在 symlink 不可用的机器上
+    // 建链接会回退到 hardlink，而硬链接**没有目标可读**（`read_target` 为空）。
+    // 还原时它会被重建成一条指向同一份内容的 symlink —— 种类变了，但用户能看到的
+    // 一切（内容、路径、是否链接）都没变。硬链接的种类保持见 `linkfs` 的单测。
+    //
+    // 内容用 `read`（跟随链接）读、而**不是** `dir_snapshot`：后者只列普通文件，
+    // 链接在它眼里要么被递归成目录、要么读不出内容。
+    assert!(
+        linkfs::is_link(std::path::Path::new(&inner_link)),
+        "the inner link must come back as a link"
+    );
+    assert_eq!(
+        read(&inner_link),
+        "body\n",
+        "the restored link must still read the library content"
+    );
+    // 顶层的那个路径也回到「真实目录」，不是链接。
+    assert!(
+        !linkfs::is_link(std::path::Path::new(&agent_side)),
+        "the path itself must be back to a real directory"
+    );
+}
+
+// junction 还原后必须**还是 junction**。这是 M1 验收 3，也是本功能「零特权前提」
+// 的守卫：如果还原成 symlink，一次失败的写入就会把用户推进「需要开发者模式」的
+// 境地里去。
+#[test]
+fn a_junction_is_restored_as_a_junction() {
+    use agentkeeper_shell_lib::core::linkfs;
+
+    let fx = Fixture::new("linkkind");
+    let store = fx.store();
+    let library = fx.path(&["library", "skills", "pdf"]);
+    write(&join(&library, &["SKILL.md"]), "body\n");
+    let link = fx.path(&["agent", "skills", "pdf"]);
+
+    // 先用 junction 建一条 —— 直接走 linkfs，避免依赖环境变量把事务收窄。
+    if linkfs::create_dir_link(
+        std::path::Path::new(&library),
+        std::path::Path::new(&link),
+        Some(linkfs::LinkMethod::Junction),
+    )
+    .is_err()
+    {
+        // junction 建不出来（非 NTFS / 策略禁用）时这条用例不适用；
+        // 它绝不退回 symlink 继续跑 —— 那会让「还原成 junction」永远没被测到。
+        eprintln!("junction unavailable on this machine — skipping");
+        return;
+    }
+    assert_eq!(
+        linkfs::link_kind(std::path::Path::new(&link)),
+        Some(linkfs::LinkMethod::Junction)
+    );
+
+    // 一次「删掉它 → 重建 → 后续失败」的事务，触发还原。
+    let r = store.transaction(
+        &[
+            Op::delete(&link),
+            Op::link_dir(&link, &library),
+            Op::copy_dir(&fx.path(&["agent", "nope"]), &fx.path(&["agent", "missing"])),
+        ],
+        &json!({ "kind": "skill", "action": "relink" }),
+    );
+    assert_eq!(r["ok"], json!(false), "{}", r);
+    assert_eq!(
+        linkfs::link_kind(std::path::Path::new(&link)),
+        Some(linkfs::LinkMethod::Junction),
+        "a junction must not be restored as a symlink"
+    );
+    assert_eq!(read(&join(&link, &["SKILL.md"])), "body\n");
+}
+
+// 台账损坏（写个 `{`）→ `load_ledger` 返回 Err，**不返回空台账**，且不碰磁盘。
+// 这是 M1 验收 4。
+#[test]
+fn a_corrupt_link_ledger_is_an_error_not_an_empty_one() {
+    use agentkeeper_shell_lib::core::library::Library;
+
+    let fx = Fixture::new("ledger");
+    let lib = Library::at(fx.path(&["library"]));
+    let ledger = lib.ledger_path();
+    write(&store::native_str(&ledger), "{");
+
+    let err = lib
+        .load_ledger()
+        .expect_err("a corrupt ledger must be an error");
+    assert!(err.contains("not valid JSON"), "{}", err);
+    assert_eq!(
+        read(&store::native_str(&ledger)),
+        "{",
+        "a refused load must not rewrite the ledger"
+    );
+}
+
+/* ------------------------------------------------------------------ */
 /* corrupt config —— 损坏的配置                                         */
 /* ------------------------------------------------------------------ */
 

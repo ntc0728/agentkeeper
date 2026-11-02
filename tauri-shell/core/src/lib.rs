@@ -14,6 +14,8 @@ pub mod frontmatter;
 pub mod http;
 pub mod jsonc;
 pub mod keeper;
+pub mod library;
+pub mod linkfs;
 pub mod mcp;
 pub mod model;
 pub mod registry;
@@ -123,3 +125,4 @@ mod trim_tests {
         assert_eq!(ecma_trim_end("x\u{85}"), "x\u{85}");
     }
 }
+

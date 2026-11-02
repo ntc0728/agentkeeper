@@ -36,7 +36,16 @@ pub fn defaults() -> Value {
         "updateAssetKeyword": "AgentKeeper",
         "updateInstallSilent": true,
         "notifications": true,
-        "showLocalStats": true
+        "showLocalStats": true,
+        // --- 共享资产（v0.3）---------------------------------------------
+        // 链接方式的偏好：`auto` 由 `linkfs::capability` 的顺序决定（symlink →
+        // junction / hardlink），其余值只用来**收窄**到某一种，绝不越过能力探测。
+        "linkMethod": "auto",
+        // 库根。空串 = 跟随默认（`~/.agents`，也就是扫描里那个 `shared` 伪 agent
+        // 的父目录）。填了绝对路径就用它。
+        "libraryRoot": "",
+        // `.trash/` 的保留天数：从库里删掉的资产先放这里，超期由 `ensure_store` 清掉。
+        "trashDays": 30
     })
 }
 
@@ -84,6 +93,8 @@ fn same_type(a: &Value, b: &Value) -> bool {
 /// 留着它意味着一个看起来像功能、实际不是的陈旧副本目录。
 /// 删除范围限定在 `<root>/backups` —— 一个这个应用自己创建、且归它所有的目录
 /// —— 并且是尽力而为的：一个被其它进程锁住的文件绝不该阻止应用启动。
+///
+/// `.trash/` 的清理由 [`remove_expired_trash`] 负责，判据是 `trashDays`。
 pub fn ensure_store(root: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(root)?;
     let audit = audit_path(root);
@@ -100,7 +111,58 @@ pub fn ensure_store(root: &str) -> std::io::Result<()> {
         std::fs::write(&meta, body)?;
     }
     remove_legacy_backups(root);
+    remove_expired_trash(root, trash_days(root));
     Ok(())
+}
+
+/// `.trash/` 的保留天数。设置里读不到（或被改成非法值）时用 30 天：
+/// 这是一个安全边界，宁可多留几天，也不要因为一个坏设置把用户的删除变成不可逆。
+fn trash_days(root: &str) -> u64 {
+    read(root)
+        .get("trashDays")
+        .and_then(|v| v.as_u64())
+        .map(|d| d.clamp(1, 3650))
+        .unwrap_or(30)
+}
+
+/// 清掉 `<root>/.trash/<kind>/<slug>-<ts>/` 里超过保留期的条目。
+///
+/// 与 `remove_legacy_backups` 同一立场：**尽力而为，绝不阻塞启动**。判断依据是
+/// 条目的修改时间（删除是 `rename` 进来的，所以修改时间就是删除时间），而不是
+/// 目录名里的时间戳 —— 目录名可以被用户改，文件系统时间不会。
+fn remove_expired_trash(root: &str, days: u64) {
+    let trash = Path::new(root).join(".trash");
+    let Ok(kinds) = std::fs::read_dir(&trash) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(days.saturating_mul(86_400)));
+    let Some(cutoff) = cutoff else { return };
+    for kind in kinds.flatten() {
+        let Ok(entries) = std::fs::read_dir(kind.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            // 用 `symlink_metadata`：一个被放在这里的链接要被解除，而不是被
+            // 跟随进它指向的地方。
+            let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
+            if modified >= cutoff {
+                continue;
+            }
+            if meta.is_dir() {
+                let _ = std::fs::remove_dir_all(entry.path());
+            } else {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        // 空的类别目录顺手删掉，免得 `.trash/skills` 永远留着。
+        let _ = std::fs::remove_dir(kind.path());
+    }
 }
 
 /// 丢弃退役的 `<root>/backups` 目录树，忽略其中的一切失败。

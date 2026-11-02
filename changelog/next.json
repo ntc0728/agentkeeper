@@ -96,6 +96,10 @@
     {
       "kind": "opt",
       "text": "项目页表格占满可用高度，空状态居中显示"
+    },
+    {
+      "kind": "feat",
+      "text": "共享资产 M1：链接内核（linkfs / library 台账 / 事务新增 linkDir·linkFile 两种操作，失败还原保持链接种类）"
     }
   ]
 }

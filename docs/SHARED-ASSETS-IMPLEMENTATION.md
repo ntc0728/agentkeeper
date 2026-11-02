@@ -1,0 +1,1312 @@
+# 共享资产实施手册（Shared Assets Implementation Handbook）
+
+**本文是实施文档，不是计划文档。** 计划与决策依据见 `SHARED-ASSETS-PLAN.md`；
+本文只回答一个问题：**现在打开一个空窗口，第 1 步敲什么、第 N 步验收什么。**
+
+> **第 0 节起的所有数字都来自对本仓库 0.2.4（commit `24b32f4`）源码与门禁脚本的逐行核对，
+> 以及在本机跑出的基线。** 凡与 `SHARED-ASSETS-PLAN.md` 或本轮之前口径不同的地方，以本文为准；
+> §12 列了 7 处冲突。标注「待 P0 实测」的，是必须用 `link-probe` 在本机定论、不能从文档外推的。
+
+| 项 | 值 |
+|---|---|
+| 仓库 | `F:\demo\tools\agentkeeper` |
+| 目标版本 | v0.3 |
+| 平台 | Windows 10/11 x64（仅此范围，不做 macOS/Linux） |
+| 基线 | 0.2.4，commit `24b32f4` |
+| 工期 | 14–17 个工作日（P0→P6，含测试；见 §11 的改动幅度） |
+| 当前状态 | **M1（P0+P1）已完成并验收**（2026-11-02）；M2 起未开始。验收记录见 §16 |
+| 环境 | rustc/cargo 1.99.1 · tauri-cli 2.12.4 · MSVC 14.44 · SDK 10.0.26100 · Node 22.22.1 |
+
+> **本轮之后开工的人先读 §16**：那里有 M1 的实际交付清单、实测结论（与本手册初稿不同的
+> 地方已就地改写）、以及 M2 可以直接接手的三条接口。
+
+---
+
+## 0. 开工前的 3 分钟清单
+
+新窗口第一件事，按顺序执行，不要跳：
+
+```powershell
+# 1. 接线工具链（每个新终端都要；PATH 里没有 cargo 是设计如此，详见 docs/RUST-ENV.md）
+cd F:\demo\tools\agentkeeper
+. .\scripts\rust-env.ps1
+#    期望输出五行：cargo / rustc / cargo-tauri / MSVC 14.44 / Win SDK 10.0.26100
+
+# 2. cargo 必须在工作区根上跑（仓库根没有 Cargo.toml，在仓库根跑 cargo 会报错）
+cd tauri-shell
+
+# 3. 基线自检（4 项全绿才开始改代码）
+cargo test --workspace              # 期望 333 passed, 0 failed
+cd ..; node scripts/check.js        # 期望 all 8 gates passed
+node scripts/test-affected.js       # 期望 exit 0
+node scripts/ui-audit.js            # 期望 total findings: 0（它永远 exit 0，看数字）
+```
+
+**实测基线（2026-11-02 本机，干净工作树）**：
+
+| 命令 | 实测结果 | 备注 |
+|---|---|---|
+| `cargo test --workspace` | **333 passed / 0 failed** | 分布：core 单测 197、core `mcp` 7、shell 单测 2 + 10、`contract` 52、`update` 46、`boundary` 0、`write_path` 19 |
+| `node scripts/check.js` | **all 8 gates passed** | 关口：`residue` `bridge` `tree` `renderer` `ui` `i18n` `dist` `untracked` |
+| `node scripts/ui-audit.js` | **total findings: 0**（I18N/INTERACTION/THEME/UX 全 0，ACCEPTED 2） | 发现项非 0 时它**仍然 exit 0**（§11.1），不能只靠 `check.js` 的 ui 关口 |
+| `node scripts/test-affected.js` | exit 0（只报「哪些测试受改动影响」） | 没有改动时输出 `no Rust test covers the changed files` |
+| `node scripts/tauri-i18n.js` | MISS 0 / CODE-MISS 0 / AMBIGUOUS 0；EXACT 109 + PATTERNS 73 | `CODE-INTERNAL` 4 条不计失败（不可达渲染层） |
+
+**已知基线噪声（不是你的 bug，别去修，除非任务点名）**：
+`cargo test -p agentkeeper-core` 里 `update::manager::tests` 两个并发测试
+（`concurrent_checks_share_one_request`、`status_reports_checking_while_a_check_is_in_flight`）
+在某些调度下会失败，压测失败率分别约 1.5% / 0%，复跑即过。根因已定位（见 §12.2），
+属既有缺陷，与本功能无关。本轮全量跑一次未复现。
+
+### 0.1 每次提交前的门禁（缺一不可）
+
+```powershell
+cd tauri-shell; cargo test --workspace; cd ..
+node scripts/check.js            # residue / bridge / tree / renderer / ui / i18n / dist / untracked
+node scripts/ui-audit.js         # 看 total findings 是否仍为 0（它不看退出码）
+node scripts/test-affected.js    # 只跑受影响的
+npm run changelog:add -- feat "一句话说清用户能感知的变化"
+```
+
+提交标题必须用 `新增: ` / `修复: ` / `优化: ` 前缀（`.githooks/commit-msg` 会拒绝其他形式）。
+装钩子：`npm run hooks:install`。
+
+> 实测：`node scripts/changelog.js add feat "…"` 与
+> `npm run changelog:add -- feat "…"` 等价，两者都会把条目追加到
+> `changelog/next.json`（当前 24 条）。**开新阶段前先确认记录是干净的**
+> （`npm run changelog:check`），别把本轮探测写的测试条目带上。
+
+---
+
+## 1. 硬约束（写代码前先记住，违反其一就返工）
+
+| # | 约束 | 违反的后果 | 怎么被抓到 |
+|---|---|---|---|
+| C1 | **`core::` 不许碰 Tauri 类型** | 编译期直接断（这是设计） | 拆 crate 保证 |
+| C2 | **所有写入必须走 `store.transaction()`** | 快照/还原/journal 全部失效 | `src-tauri/tests/write_path.rs` |
+| C3 | **Rust 侧只发英文 sentence 或 code，中文一律渲染层翻** | `tauri-i18n.js` exit 1 | `check.js` 的 i18n 关口 |
+| C4 | **新 code 必须同时进 `engine-zh.js` 的 `CODE_ZH`** | CODE-MISS 红灯 | `tauri-i18n.js`（扫 `core/src` 与 `src-tauri/src` 全部 `.rs`） |
+| C5 | **每个新 `#[tauri::command]` 必须在 `tauri-bridge.js` 有形状匹配的 `call(...)`** | bridge 关口红灯 | `check.js`（比对参数形状，`Option<T>` 算可选） |
+| C6 | **不许破坏 TOML 注释**（只许 `toml_splice` 按区段手术） | 用户配置被抹 | 人工评审 + 测试夹具 |
+| C7 | **不引入镜像树/暂存层**，写入直落真实路径 | UI 显示与实际不一致 | 代码评审 |
+| C8 | **`adapters.rs::AGENTS` 与 `scripts/adapter-table.js` 必须同步**，改完跑 `npm run tauri:adapters` | 适配器快照测试红 | `adapters.rs` 内置快照（17 个 agent / 187 条路径模板） |
+| C9 | **禁止把 `tauri-shell/dist/` 手改**，只由 `node tauri-shell/copy-frontend.js` 生成 | dist 一致性红灯 | `check.js` 的 dist 关口（`--check`） |
+| C10 | 注释用中文；新代码零英文注释（`//!`、`///` 模块文档也算） | `npm run comments:lang` 进度倒退 | 人工 |
+| C11 | **新增前端脚本文件要在 7 处登记**（§11.1），否则某些检查会静默漏掉它 | 打包后空白页，本地却全绿 | 只有 `checkGlobalCollisions` 会间接抓到一部分 |
+
+---
+
+## 2. 交付物总览
+
+### 2.1 新增文件
+
+| 文件 | 行数估计 | 模块 | 职责 |
+|---|---|---|---|
+| `tauri-shell/core/src/linkfs.rs` | ~420 | M1 | 链接原语 + 能力探测（junction 需 FSCTL） |
+| `tauri-shell/core/src/library.rs` | ~700 | M1 | 库根、`links.json` 台账、add/remove/retarget/resync |
+| `tauri-shell/core/src/compose.rs` | ~260 | M4 | 规则区块标记的插入/替换/剥离（纯函数） |
+| `tauri-shell/core/src/sharing.rs` | ~900 | M2/M3/M4 | 收敛探测、MCP 物化、规则共享的事务编排 |
+| `tauri-shell/core/src/doctor.rs` | ~450 | M5 | 7 类 finding 的检测（只读） |
+| `tauri-shell/src-tauri/tests/sharing.rs` | ~600 | 测 | **集成测试必须放这里**（理由见 §3.7）；同目录已有 `common/mod.rs` 可直接 `mod common;` |
+| `src/renderer/view-shared.js` | ~1100 | M6 | 共享页（矩阵 / 收敛向导 / 预览） |
+| `scripts/adapter-table.js` 的字段 | — | M3 | 每条 agent 加 `mcpDisable`（C8） |
+
+> `src/renderer/` 现在是 6 个文件：`theme-init.js` `engine-zh.js` `i18n.js` `app.js`
+> `styles.css` `index.html`。`app.js` 实测 **4287 行 / 204,826 字节**（不是 4300 行那么
+> 精确），共享页单独成文件后约 5400 行的顾虑仍然成立，**建议拆**。
+> 拆的代价是 §11.1 的 7 处登记，漏一处就会出现「本地全绿、打包空白」。
+
+### 2.2 改动文件
+
+| 文件 | 改动性质 |
+|---|---|
+| `tauri-shell/core/src/lib.rs` | `pub mod` 增加 5 个模块（**按字母序插入**：`compose` 在 `assets` 之后、`discover` 之前；`doctor`/`library`/`linkfs`/`sharing` 同理） |
+| `tauri-shell/core/Cargo.toml` | `windows-sys` 的 features **必须补** `Win32_Storage_FileSystem`、`Win32_System_IO`、`Win32_System_Ioctl`、`Win32_Security`（见 §3.3） |
+| `tauri-shell/core/src/store.rs` | `OpKind` +2、`Op` +2 构造器、`DirSnap::Link` 加 `kind`、`Snapshot::Link` 加 `kind`、`restore()`/`restore_dir()` 按类型还原、`STORE_LINK_FAILED` |
+| `tauri-shell/core/src/scan.rs` | 资产打 `meta.link` 标；`compute_effective` 增加 `sameInode` |
+| `tauri-shell/core/src/keeper.rs` | 新增 `enable_asset`/`disable_asset`/`converge_plan`/`library_*`；`distribute` 保留 copy 分支并加 link 分支 |
+| `tauri-shell/core/src/settings.rs` | `defaults()` 增 `linkMethod`、`libraryRoot`、`trashDays`；`ensure_store` 增 `.trash` 清理 |
+| `tauri-shell/core/src/adapters.rs` + `scripts/adapter-table.js` | `Agent` 增 `mcp_disable: DisableStyle`（改完 `npm run tauri:adapters`） |
+| `tauri-shell/core/src/mcp.rs` | `tools()` +5、`call_tool` 分发 +5 |
+| `tauri-shell/core/src/bin/ak-scan.rs` | `--shared` 参数 |
+| `tauri-shell/core/tests/mcp.rs` | `const TOOLS: [&str; 15]` → `[&str; 20]`（追加、不重排） |
+| `tauri-shell/src-tauri/src/lib.rs` | +8 个命令 + `generate_handler!` 列表 |
+| `tauri-shell/tauri-bridge.js` | +8 个 `window.ak.*` |
+| `src/renderer/index.html` | 导航项 + script 标签 |
+| `src/renderer/app.js` | `VIEWS` 注册 `shared`、`applyLanguage` 的导航标签、`render()` 的 `acts` |
+| `src/renderer/i18n.js` | 中英各约 60 条新文案（两侧各 462 条 → 各约 522 条） |
+| `src/renderer/engine-zh.js` | `CODE_ZH` 新增约 14 个 code（现有 84 条） |
+| `src/renderer/styles.css` | 矩阵/横幅/向导样式（**不许出现裸 hex 色值**，`ui-audit` 会报 hardcoded color） |
+| `scripts/copy-frontend.js` | `PLAIN` 白名单加 `view-shared.js` |
+| `scripts/lint-renderer.js` | 4 处硬编码 `app.js` 改成「全部 renderer 脚本」（§11.1 第 3/4 行） |
+| `scripts/ui-audit.js` | 改成读全部 renderer 脚本；并核对「批量/分页」探针（§11.1 第 5/6 行） |
+| `scripts/test-affected.js` | 新增 `shared` 区域映射（否则改了新文件一条测试都不跑） |
+| `scripts/ui-baseline.js` | （可选）`VIEWS` 加 `shared` 并重新 capture |
+| `docs/DESIGN.md` | 新增「共享层」章节，并入本文的可长期保留部分 |
+| `docs/MCP-SERVER.md` | 20 个工具表（现有 15 个，`MCP-SERVER.md:136` 的标题「工具 API（15 个）」要改） |
+| `README.md` / `README.en.md` | 「15 工具」→「20 工具」（各有 2 处） |
+| `changelog/next.json` | 每阶段一条 `feat` |
+
+---
+
+## 3. M1 · 链接内核（一切的基础，先做完再碰别的）
+
+### 3.1 先做实测，不要先写抽象
+
+**在动手写 `linkfs.rs` 之前**，先建一个临时 bin 把这些问题测出来，结果写进 `linkfs.rs` 的模块注释：
+
+```rust
+// tauri-shell/core/src/bin/link-probe.rs（临时，测完删除，结论写进 linkfs.rs 注释）
+// 要回答的问题：
+// 1) std::os::windows::fs::symlink_dir 在【当前会话】是否成功？is_symlink/read_link 行为？
+// 2) FSCTL 建出来的 junction，std::fs::read_link 能否读回？symlink_metadata().file_type().is_symlink() 是什么？
+// 3) 用 junction 替换一个已存在的目录后，std::fs::remove_dir 是否只删链接不删内容？
+// 4) 通过 junction 打开文件句柄时，不带 FILE_FLAG_OPEN_REPARSE_POINT 的
+//    GetFinalPathNameByHandleW 返回库内路径（前缀 \\?\）还是链接路径？← 决定 §3.5 的同一性判定
+// 5) std::fs::hard_link 在同一卷/跨卷分别返回什么？
+```
+
+**已知部分结论**（上一轮已实测，可直接用，但要在目标机复测）：
+- Rust 的 `symlink_dir` 在**普通用户会话**下创建**成功**（`is_symlink=true`、`read_link` 可读、可透过链接读文件）。
+- PowerShell 的 `New-Item -ItemType SymbolicLink` 在同一会话被拒。
+- **结论：不能从 PowerShell 的结果外推 Rust 的能力。** 降级链以 `linkfs` 自己的实测为准。
+- 本次核对到的一个**与直觉相反**的事实：仓库里**没有任何 `linkfs` / 链接能力探测的现成代码**，
+  `store.rs` 只有在快照/还原里用 `std::fs::symlink_dir/symlink_file`（`store.rs:455`）。
+  所以 P0 是**从零**开始，不是「接上已有实现」。
+
+### 3.2 `linkfs.rs` 对外 API（照抄签名）
+
+```rust
+//! 链接原语与能力探测。
+//!
+//! ## 为什么不用 std 建 junction
+//! std 没有 junction API，只有 symlink。junction 必须自己发 FSCTL_SET_REPARSE_POINT，
+//! 否则「symlink 被拒时的回退」这一层根本不存在。
+
+use std::path::{Path, PathBuf};
+
+/// 一条链接实际是用什么建的。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LinkMethod {
+    Symlink,   // std::os::windows::fs::symlink_dir / symlink_file
+    Junction,  // FSCTL_SET_REPARSE_POINT + IO_REPARSE_TAG_MOUNT_POINT
+    Hardlink,  // std::fs::hard_link，仅文件
+    Copy,      // 不是链接，是受管副本（"降级到复制"）
+}
+
+impl LinkMethod {
+    /// 写进 links.json 与审计日志的字符串，**改它就是改数据格式**。
+    pub fn as_str(self) -> &'static str { /* "symlink" | "junction" | "hardlink" | "copy" */ }
+    pub fn parse(s: &str) -> Option<LinkMethod> { /* 严格匹配，未知返回 None */ }
+}
+
+/// 本机支持哪些方式。
+pub struct LinkCap {
+    pub symlink_dir: bool,
+    pub symlink_file: bool,
+    pub junction: bool,
+    pub hardlink: bool,
+    /// 顺序已排好：directories 给目录用，files 给单文件用。
+    pub dir_order: Vec<LinkMethod>,
+    pub file_order: Vec<LinkMethod>,
+    /// 探测用的临时目录（用于在 UI 上解释「为什么是 copy 模式」）。
+    pub probed_at: String,
+}
+
+pub fn capability(probe_root: &Path, cache: Option<&Path>) -> LinkCap;
+
+pub fn create_dir_link(src: &Path, dst: &Path, prefer: Option<LinkMethod>) -> Result<LinkMethod, String>;
+pub fn create_file_link(src: &Path, dst: &Path, prefer: Option<LinkMethod>) -> Result<LinkMethod, String>;
+
+/// 读回链接目标。**junction 与 symlink 都要能读**。
+pub fn read_target(p: &Path) -> Option<PathBuf>;
+
+/// 这条路径是不是链接（symlink 或 junction）。
+/// 注意：junction 的 is_symlink() 在部分 Rust 版本是 false，所以本函数不能只用它。
+pub fn is_link(p: &Path) -> bool;
+
+/// 判定链接类型，用于快照/还原时保持原类型。
+pub fn link_kind(p: &Path) -> Option<LinkMethod>;
+
+/// 解除链接本身，不跟随（junction 用 remove_dir，symlink 用 remove_file）。
+pub fn unlink(p: &Path) -> std::io::Result<()>;
+
+/// 同一物理对象？（realpath 归一后比较）
+pub fn same_target(a: &Path, b: &Path) -> bool;
+
+/// **新增（本轮补）**：目录里某一条目的链接类型。Windows 上**必须**用它，
+/// 因为 `DirEntry::file_type()` 对 junction 返回的不是 `is_symlink()`（见 §3.5）。
+pub fn entry_link_kind(p: &Path) -> Option<LinkMethod>;
+```
+
+### 3.3 junction 的实现要点（最容易踩坑的一段）
+
+`std` 没有 junction，必须直接调 Win32。**本仓库的 `windows-sys` 特征清单目前是不够的**：
+
+```toml
+# tauri-shell/core/Cargo.toml:60 —— 现状（只为 DPAPI 开的两项）
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
+# 本功能需要追加（已对本机 registry 里的 windows-sys 0.52.0 核对，以下符号都存在）：
+#   Win32_Storage_FileSystem  → CreateFileW / CreateSymbolicLinkW / GetFinalPathNameByHandleW
+#                               FILE_FLAG_OPEN_REPARSE_POINT / FILE_FLAG_BACKUP_SEMANTICS
+#                               FILE_ATTRIBUTE_REPARSE_POINT / FILE_WRITE_EA
+#   Win32_System_IO           → DeviceIoControl
+#   Win32_System_Ioctl        → FSCTL_SET_REPARSE_POINT / FSCTL_GET_REPARSE_POINT
+#                               IO_REPARSE_TAG_MOUNT_POINT（**注意：常数在 Ioctl 模块，不在 FileSystem**）
+#   Win32_Security            → CreateFileW 的文档要求（以及 §3.5 的 TOKEN_QUERY / GetTokenInformation）
+windows-sys = { version = "0.52", features = [
+  "Win32_Foundation", "Win32_Security_Cryptography", "Win32_Security",
+  "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl",
+] }
+```
+
+> 漏 `Win32_System_Ioctl` 的表现是 `FSCTL_SET_REPARSE_POINT` 未定义（编译期），
+> 漏 `Win32_Security` 的表现是 `CreateFileW` 未定义 —— 两者都会在 P0 第一小时撞上。
+
+```rust
+// 伪代码，只写关键调用顺序；错误分支全部返回 String（调用方转成 TxError）
+fn create_junction(target: &Path, link: &Path) -> std::io::Result<()> {
+    // 0. target 必须是**绝对路径**，并去掉 `\\?\` 前缀；相对路径建出来的 junction 会解析错
+    // 1. CreateDirectoryW(link, null) —— junction 的宿主必须是一个已存在的空目录
+    // 2. CreateFileW(link, GENERIC_WRITE, 0, null, OPEN_EXISTING,
+    //                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, null)
+    // 3. 组 REPARSE_DATA_BUFFER（结构体按定义手写 #[repr(C)]）：
+    //      ReparseTag        = IO_REPARSE_TAG_MOUNT_POINT (0xA0000003)
+    //      ReparseDataLength = 8 + 路径缓冲区长度
+    //      Reserve           = 0
+    //      SubstituteNameOffset = 0
+    //      SubstituteNameLength = "\\??\\" + target 的**字节数，不含结尾 NUL**
+    //      PrintNameOffset      = SubstituteNameLength + 2   （+2 是结尾 NUL）
+    //      PrintNameLength      = target 的字节数，不含结尾 NUL
+    //      PathBuffer = L"\\??\\" + target + L"\0" + target + L"\0"
+    //    （偏移全部是**相对于 PathBuffer 起点的字节数**，这是最容易写错的地方；
+    //      长度字段不含结尾 NUL，而第 4 步传入的总长度 = 8 + ReparseDataLength）
+    // 4. DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, &buffer, buffer_len, null, 0, &mut ret, null)
+    // 5. 失败时清理第 1 步建的空目录，避免留下垃圾
+}
+```
+
+**读取 junction** 同理：`CreateFileW(..., FILE_FLAG_OPEN_REPARSE_POINT)` +
+`FSCTL_GET_REPARSE_POINT`，解析 `PathBuffer` 的第一个 NUL 结尾串（`\??\C:\...`），
+去掉 `\??\` 前缀。**用 `std::fs::read_link` 读 junction 在部分情况下返回 Err**，
+所以 `read_target` 必须自己实现这条路径，不能只包一层 `read_link`。
+
+### 3.4 `store.rs` 的改动（逐处，行号为实测）
+
+**① `OpKind` 加两个变体**（`store.rs:745`）：
+
+```rust
+pub enum OpKind {
+    Write, CopyDir, Json, Delete, Mkdir,
+    LinkDir,   // 新建 dst 为指向 from 的目录链接
+    LinkFile,  // 新建 dst 为指向 from 的文件链接（symlink 优先）
+}
+// OpKind::name()（store.rs:753）里补 "linkDir" / "linkFile"（写进审计日志与 op 回显）
+```
+
+> **降级链统一（本轮定论，与计划文档相反）**：`create_dir_link` 的顺序是
+> `symlink → junction → Err`；`create_file_link` 是 `symlink → hardlink → Err`。
+> `copy` **不由 linkfs 产生**——Copy 是 `Op::copy_dir` 的语义，由调用方显式选择。
+> 理由见 §12.5：P0 实测 symlink 可用时它就是最简单的方案；被测不可用时 junction 顶上。
+
+**② `Op` 两个构造器**（`Op` 与构造器在 `store.rs:767`–`:825`）：
+
+```rust
+pub fn link_dir(dst: &str, src: &str) -> Op { /* kind=LinkDir, from=Some(src), path=dst */ }
+pub fn link_file(dst: &str, src: &str) -> Op { /* kind=LinkFile, from=Some(src), path=dst */ }
+```
+
+**③ `transaction()` 前置校验**（`store.rs:994`–`:1001`）：目前只校验 `CopyDir` 缺 `from`，要扩成三个：
+
+```rust
+if matches!(op.kind, OpKind::CopyDir | OpKind::LinkDir | OpKind::LinkFile) && op.from.is_none() { ... }
+```
+
+**④ 执行分支**（`store.rs:1037` 的 `match op.kind`，`CopyDir` 分支在 `:1076`，新臂紧随其后）：
+
+```rust
+OpKind::LinkDir => {
+    let src = op.from.clone().unwrap_or_default();
+    if !Path::new(&src).is_dir() {
+        return Err(TxError::plain(format!("link source is not a directory: {}", src)));
+    }
+    if Path::new(&real).exists() || linkfs::is_link(Path::new(&real)) {
+        return Err(TxError::plain(format!("link target already exists: {}", real)));
+    }
+    if let Some(parent) = Path::new(&real).parent() { let _ = std::fs::create_dir_all(parent); }
+    let method = linkfs::create_dir_link(Path::new(&src), Path::new(&real), None)
+        .map_err(TxError::plain)?;
+    log.push(json!({ "op": "linkDir", "path": real, "from": src, "method": method.as_str() }));
+}
+// LinkFile 同构，只是校验 is_file() 与 create_file_link
+```
+
+**⑤ 快照侧：必须记录链接的“种类”**（本次改动里最容易漏的地方）。
+`store.rs` 里链接被捕获/还原的地方有**两处**，两处都要改：
+
+| 位置 | 现状 | 改法 |
+|---|---|---|
+| `DirSnap` 枚举（`store.rs:833`–`:841`） | `Link(String, String, bool)` | 改成结构体变体 `Link { rel, target, is_dir, kind }` |
+| `Snapshot` 枚举 + `Store::snapshot()`（`store.rs:941`–`:952`） | `Snapshot::Link { path, target, is_dir }` | 加 `kind` |
+| `collect_dir_seen`（`store.rs:349`） | 只判 `ft.is_symlink()` | 改成 `linkfs::entry_link_kind(&from)`，**因此 junction 才能被捕获** |
+| `restore_dir`（`store.rs:453`） | 一律 `symlink_dir/symlink_file` | 按 `kind` 分派：`Junction → create_junction`、`Hardlink → std::fs::hard_link`、其余 `symlink_*` |
+| `Store::restore` 的 `Snapshot::Link` 臂（`store.rs:1287`） | 一律 `symlink_*` | 同上按 `kind` 分派 |
+| `entry_name`（`store.rs:479`） | 模式匹配 `Link(name, _, _)` | 跟着结构体变体改 |
+
+**为什么必须用 `entry_link_kind` 而不是 `file_type().is_symlink()`**：
+`scan.rs` 自己已经为 junction 写过兜底（`scan.rs:264`–`:269`：`if !is_dir && e.is_symlink { is_dir = exists_dir(&dir) }`），
+说明**作者已经观察到 junction 在 `DirEntry` 层不报 `is_symlink`**。老代码在 restore 时
+依赖 `ft.is_symlink()` 才能认出链接；一个 junction 在快照时若被当成「目录」，
+快照会**顺着链接把整个库内容当普通文件包一遍**，还原时把它写成真实副本 —— 静默、昂贵、不可察觉。
+
+**⑥ 新增失败码**（`store.rs:616` 附近，与 `RESTORE_SYMLINK_FAILED` 并列）：
+
+```rust
+pub const STORE_LINK_FAILED: &str = "store.linkFailed";
+```
+并同步 `src/renderer/engine-zh.js` 的 `CODE_ZH`：
+`'store.linkFailed': '创建链接失败：§1'`（`zhCode` 用 `§1` 占位符，见 `engine-zh.js:361` 起的现有条目）。
+
+### 3.5 `library.rs` 对外 API
+
+```rust
+pub struct Library { /* root: PathBuf, store: String */ }
+
+impl Library {
+    /// 库根：设置里的 libraryRoot，未设置时默认 `~/.agents`（`~/.agents/skills` 的父级）。
+    /// **不创建目录**，只解析。
+    pub fn root(&self, user_home: &str, settings: &Value) -> PathBuf;
+
+    /// skills / mcp / rules / memory 四类的主副本目录。
+    pub fn dir_for(&self, kind: &str) -> PathBuf;
+
+    /// links.json 台账读写。损坏时**不当作空**，返回 Err —— 与 store 对损坏 JSON 的立场一致。
+    pub fn load_ledger(&self) -> Result<Ledger, String>;
+    pub fn save_ledger(&self, l: &Ledger) -> Result<(), String>;
+
+    /// 登记一条链接（只记账，不落盘）。真正的落盘由调用方组织成 Op 走 transaction。
+    pub fn record(&self, l: &mut Ledger, entry: LinkEntry);
+
+    /// **新增（本轮补）**：`p` 是否指向库内（`same_target(p, 库内主副本)` 或 realpath 落在库根下）。
+    /// `disable_asset` 的安全闸与 `link.unmanaged` 判定共用这一个函数。
+    pub fn owns_target(&self, cap: &LinkCap, p: &Path) -> bool;
+}
+
+#[derive(Clone)]
+pub struct LinkEntry {
+    pub kind: String,        // skill | rule | memory | mcp
+    pub name: String,        // slug
+    pub src: String,         // 库内主副本绝对路径
+    pub dst: String,         // agent 侧路径
+    pub method: LinkMethod,
+    pub mode: String,        // "link" | "copy"
+    pub owner: String,       // "library" | "external"
+    pub created_at: String,
+    pub last_sync_at: String,
+}
+```
+
+**默认库根与既有约定一致**：扫描把 `~/.agents/skills` 当伪 agent `shared`
+（`scan.rs:1806` 起），库根取它的父目录 `~/.agents`，`skills/` 子目录正好就是那个共享
+目录 —— 收敛 5 份 skill 之后，`shared` 伪 agent 位置本身就是「库内主副本」，用户看到
+的资产条数不会因为「多出一个库目录」而翻倍。
+
+**ledger 的写入时机**：`save_ledger` 必须在 `transaction()` **成功之后**调用，
+失败则不动台账。台账本身写坏不致命（`doctor` 会以磁盘为准重建），
+但**不允许**用台账去覆盖磁盘。
+
+**`same_target` 的正确实现**：`std::fs::canonicalize` 只做**词法 + 链接跟随**，
+不做 UAC 别名归一（`C:\Program Files` 与 `C:\Program Files (x86)` 这类），也**不把盘符大小写统一**
+（`d:\` 与 `D:\` 视为不同）。所以：
+
+```
+1. 先 try canonicalize；
+2. 失败（悬空链接）时退回「父目录 canonicalize + 文件名」；
+3. 最后统一 to_lowercase()（Windows 路径大小写不敏感）再比较。
+```
+
+§3.1 的第 4 个探测问题就是为这件事服务的：如果句柄路径返回的是库内路径，
+`same_target` 可以直接用句柄，不必再猜。
+
+### 3.6 M1 验收（4 条，全过才算完成）
+
+```powershell
+cd tauri-shell
+cargo test -p agentkeeper-core linkfs
+cargo test -p agentkeeper-shell --test write_path
+```
+
+1. **非管理员会话**下 `create_dir_link` 返回 `Symlink` 或 `Junction`，**不是** `Err`。
+2. 事务里「删除 agent 侧真实目录 + 建链接」，用一个必然失败的后续 op 触发还原 →
+   目录原样回来，**内容逐字节相同**（用 `tests/common/mod.rs` 的 `dir_snapshot`）。
+3. **junction 还原后仍是 junction**（`linkfs::link_kind` 断言为 `Junction`），不是被悄悄换成 symlink。
+4. 台账被手工改坏（写个 `{`）→ `load_ledger` 返回 `Err`，**不返回空台账**，且不触碰磁盘。
+
+### 3.7 测试放在哪个 crate（本轮实证：**必须是 `src-tauri`**）
+
+`src-tauri/tests/contract.rs` 的开头写着原因：`Keeper` 与 `Store` 住在 `core`，
+但集成测试一律 `use agentkeeper_shell_lib::core::…`，因为所有集成套件都是
+**外壳 crate 的集成测试**。这与 cargo 的常规做法相反，但现状如此：
+
+```powershell
+cargo test -p agentkeeper-core --test write_path   # → error: no test target named `write_path` in package `agentkeeper-core`
+cargo test -p agentkeeper-shell --test write_path  # → ok. 19 passed
+```
+
+所以：
+
+| 测试 | 放哪里 | 怎么跑 |
+|---|---|---|
+| `linkfs` 能力探测 / `compose` 纯函数 / 台账读写 | `core/src/*.rs` 的 `mod tests` | `cargo test -p agentkeeper-core <名字>` |
+| 链接事务：创建 / 还原 / 类型保持 / 台账损坏 | `tauri-shell/src-tauri/tests/write_path.rs`（**追加**，别新建） | `cargo test -p agentkeeper-shell --test write_path` |
+| 收敛端到端、矩阵 payload 形状、doctor findings | `tauri-shell/src-tauri/tests/contract.rs` 或新建 `sharing.rs` 同目录 | `cargo test -p agentkeeper-shell --test sharing` |
+
+> `core/tests/` 下**只有** `mcp.rs` 和 `common/mod.rs`（`common/mod.rs` 是一行文档注释，
+> 没有任何代码）—— 不要以为 `tests/common/` 能直接复用，它只属于 `mcp.rs`。
+> **`src-tauri/tests/` 下已经有一个完整的 `common/mod.rs`**（255 行：`temp_root` / `cleanup` /
+> `serial` / `write` / `read` / `exists` / `dir_snapshot` / `join`），
+> `write_path.rs:16` 的 `mod common;` + `:23` 的 `use common::{…}` 就是用法；新建的
+> `sharing.rs` 只要写 `mod common;` 即可，**不要复制一份**。
+
+---
+
+## 4. M2 · Skills 共享
+
+### 4.1 收敛探测（只读，M7 的 `converge_plan` 复用同一函数）
+
+```rust
+// sharing.rs
+pub struct ConvergeGroup {
+    pub name: String,              // slug
+    pub verdict: Verdict,          // Identical | Diverged | SingleSource
+    pub keeper: Option<String>,    // 保留哪一份（绝对路径）
+    pub replace: Vec<ReplaceItem>, // 要替换成链接的路径
+    pub diffs: Vec<FileDiff>,      // Diverged 时逐文件差异（只给文件名 + 状态，不给全文）
+}
+
+pub enum Verdict { Identical, Diverged, SingleSource }
+
+pub struct FileDiff {
+    pub rel: String,
+    pub state: String,   // "only-a" | "only-b" | "different"
+}
+
+/// **纯只读**：不写盘、不建目录、不改台账。
+pub fn plan_converge(assets: &[Value], library: &Library, cap: &LinkCap) -> Vec<ConvergeGroup>;
+```
+
+判定规则（写死，不要“聪明化”）：
+
+| 情况 | 裁决 | 动作 |
+|---|---|---|
+| ≥2 份，逐文件 SHA-256 全等 | `Identical` | 保留一份入库存，其余替换为链接 |
+| ≥2 份，任一文件内容不同 | `Diverged` | **不动**，只给 `FileDiff` 清单 |
+| 只有 1 份 | `SingleSource` | 并入库，原位置替换为链接 |
+
+> 哈希口径：先按 `store::list_files` 的相对路径排序，逐文件算 SHA-256，
+> 再对「路径+哈希」列表整体算一次摘要。**必须排除** `SKIP_DIRS`（`store.rs:45` 的同一个常量，
+> **它是私有 `const`，要改成 `pub(crate)` 或提供包装函数**，不要另抄一份）。
+
+> **哈希要逐文件流式算，不能 `read` 整个文件**：`store::list_files` 会给到目录下**所有**文件，
+> 而 skill 里常有几十 MB 的二进制。`sha2` 已在依赖里（`core/Cargo.toml:36`）。
+
+> **口径漏洞（必须补的一条判定）**：`Identical` 建立在「条目集合 + 内容 + 链接目标字符串」上。
+> 两个 skill 里各有一个**同相对路径、同目标字符串的链接**是等价的；但一个**文件**与一个
+> **指向同内容的链接**在「逐文件读取内容」的口径下会被判成相同 —— 收敛成链接后语义变了。
+> 所以：`FileDiff.state` 之外再加一个 `kind` 字段（`file` | `link`），**`kind` 不同一律算 `Diverged`**。
+
+### 4.2 启用 / 停用（事务编排）
+
+```rust
+// keeper.rs
+/// 把库内资产启用到某个 agent/scope。返回与 distribute 同形状的 { ok, written[], skipped[], ... }
+pub fn enable_asset(&self, input: &Value) -> Value;   // { name, kind, agentId, scope, projectId }
+pub fn disable_asset(&self, input: &Value) -> Value;  // 同上
+```
+
+`enable_asset` 的 op 序列（**顺序不能变**）：
+
+```
+1. Op::mkdir   <agent 侧 skills 父目录>
+2. Op::delete  那个真实目录（仅当 agent 侧已存在真实目录且内容一致、且不是链接）
+3. Op::link_dir <agent 侧 skills/<slug>>  ← from = 库内路径
+```
+
+> **必须先删后建**（目标已存在时 `link_dir` 会直接报 `link target already exists`），
+> 而删除与建链接必须在**同一个事务**里，任一步失败两者都回滚。
+> `Delete` 的路径要进 `written` 回显；`skipped[]` 沿用 `distribute` 的
+> `{ target, reason }` 形状（`keeper.rs:843`–`:856` 的四种 reason 已有先例）。
+
+`disable_asset` 的安全闸（三条，缺一不可）：
+
+1. 目标必须是链接（`linkfs::is_link`）——是真实目录就拒绝，报 `share.notLinked`；
+2. 链接指向的必须是**库内**路径（`Library::owns_target`）——指向库外就拒绝，报 `share.foreignLink`；
+3. **绝不删除库内主副本**——代码里不允许出现 `rmrf(library_dir)`。
+
+### 4.3 卸载语义与 `.trash`
+
+```rust
+/// 从库里删除资产：移入 <store>/.trash/<kind>/<slug>-<ts>/，然后删全部链接。
+pub fn remove_from_library(&self, kind: &str, name: &str) -> Value;
+```
+
+- 移动用 `fs::rename`（同卷）→ 失败则 `copy_dir` + `rmrf`；
+- 每次移动与每条链接删除**各记一行** `audit.jsonl`（用 `settings::audit(root, &rec)`，`settings.rs:259`）；
+- `settings::ensure_store`（`settings.rs:87`）里把「启动即删 `backups/`」
+  （`remove_legacy_backups`，`settings.rs:111`）扩成「删 `backups/`（遗留）+
+  清理 `.trash/` 中超过 `trashDays`（默认 30）的条目」。两者的共同前提是
+  **尽力而为、绝不阻塞启动**，新函数照抄这个语气。
+
+### 4.4 M2 验收
+
+在一块假 home 上造 5 个 agent × 同名 skill（内容全等）→ 收敛后：
+- 库内 1 份；5 个链接；`audit.jsonl` 新增 6 行；磁盘总字节下降；
+- 改库内 `SKILL.md` 正文，5 个 agent 侧同时读到新内容；
+- 再造一组内容不同的：收敛入口置灰，`plan_converge` 返回 `Diverged` 且列出差异文件名。
+
+---
+
+## 5. M3 · MCP 单一事实源
+
+### 5.1 适配器新增字段（C8：改完必须重新冻结快照）
+
+`adapters.rs` 的 `Agent` 结构体（`adapters.rs:33`）加：
+
+```rust
+/// 「关闭」这个 agent 上的一个 server 时怎么做。
+/// 多数 agent 是删条目；Pi 之类靠 enabled:false。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DisableStyle { Remove, Flag }
+```
+
+`adapter-table.js` 每条 agent 加 `mcpDisable: 'remove' | 'flag'`（默认 `'remove'`），
+改完跑 `npm run tauri:adapters`（实测输出 `froze 17 adapters and 187 resolved path templates`）。
+**先只给确实需要 `Flag` 的 agent 标 `flag`，其余保持 `remove`** —— 不要凭猜给所有 agent 加字段。
+
+### 5.2 库内规范形态
+
+`<library>/mcp/servers/<slug>.json`：
+
+```jsonc
+{
+  "schema": 1,
+  "name": "fetch",
+  "transport": "stdio",          // stdio | http | sse
+  "command": "uvx",              // stdio 必填
+  "args": ["mcp-server-fetch"],
+  "env": {},                     // stdio
+  "url": null,                   // http/sse 必填
+  "headers": {},                 // http/sse
+  "allOf": { "claude-code": true, "codex": true, "pi": false }
+}
+```
+
+`settings`/`args` 之外**不存**任何 agent 特有封装。写盘时按 `mcp_bucket_for`
+（`keeper.rs:521`，实测只有 `copilot` → `"servers"`，其余 `"mcpServers"`）决定桶名，
+按 `mcp_target_for`（`keeper.rs:495`）决定落哪个文件（它已过滤 `approvals` / `tool-list` 这类记账文件）。
+
+### 5.3 物化（开/关）
+
+```rust
+pub fn materialize_mcp(&self, name: &str, agent_id: &str, scope: &str, project_id: Option<&str>, on: bool) -> Value;
+```
+
+- **开**：JSON 目标 → `Op::json_mutate`，在 `bucket` 下插入/覆盖 `configKey` 那一条；
+  TOML 目标 → 读出原文 → `toml_splice::splice_server(raw, server, section)` → `Op::write` 整份写回。
+  ⚠️ `splice_server` 的签名是 `(&str, &str, &str)`（`toml_splice.rs:156`），**它内部只改目标小节**，
+  不要自己序列化整份 TOML。
+- **关**：`DisableStyle::Remove` → 从 bucket 删除该 key（JSON）/ `toml_splice::remove_server(raw, server)`（TOML，`toml_splice.rs:181`，**两参**）；
+  `DisableStyle::Flag` → 设 `enabled: false`，**不删条目**。
+- 关闭时必须**只动这一条**：JSON 里其余 key 与键序保持（`serde_json` 已开 `preserve_order`）；
+  TOML 里其余注释逐字节保留。
+
+### 5.4 漂移检测（`doctor.rs`）
+
+```rust
+pub struct McpDrift {
+    pub name: String,
+    pub agent_id: String,
+    pub file: String,
+    pub field: String,        // "command" | "args" | "env" | ...
+    pub library_value: Value,
+    pub agent_value: Value,
+}
+```
+
+`doctor` 只**报告**，不写盘。界面给三个动作（M6）：
+「以库为准覆盖」/「以该 agent 为准回写库」/「标记为独立（从 allOf 移除）」。
+
+> **明确不做的**：库外、从未导入过的 server 一律不报告、不触碰。
+> 同名不同参**不覆盖**——这是与 cc-switch 刻意相反的决策（覆盖 = 静默丢数据）。
+
+### 5.5 M3 验收
+
+1. Codex（TOML）与 Claude Code（JSON）同时开启同一个 server：
+   - TOML 文件里**注释与小节顺序完全不变**（用夹具逐字节比对非目标部分）；
+   - JSON 文件里兄弟 server 与键序保留。
+2. 关闭后两个文件除该条外与开启前**逐字节相同**。
+3. `~/.claude/mcp.json` 里手写一个库里没有的 server → `doctor` 零报告、零写入。
+4. 同一 server 在两处参数不同 → `DoctorFinding { code: "mcp.drift" }`，且**没有**任何写入。
+
+---
+
+## 6. M4 · 规则与记忆共享
+
+### 6.1 `compose.rs`：区块标记（纯函数，最好测）
+
+```rust
+/// 把 body 作为一个区块放进 target：已有同名区块则替换，否则追加到末尾。
+/// 标记之外的内容**逐字节不动**。
+pub fn upsert_block(target: &str, slug: &str, body: &str) -> String;
+
+/// 移除指定区块；区块不存在时原样返回。
+pub fn remove_block(target: &str, slug: &str) -> String;
+
+/// 解析出所有区块：slug → (起止字节位置, 内容, rev)
+pub fn blocks(target: &str) -> Vec<Block>;
+
+/// 判定盘上区块内容是否与「上次生成时」一致。不一致 = 被外部改过。
+pub fn is_foreign_edit(target: &str, slug: &str, last_generated: &str) -> bool;
+```
+
+标记形态（**固定，不要在实现时改格式**）：
+
+```markdown
+<!-- agentkeeper:begin slug=team-conventions rev=9f2c1d -->
+…内容…
+<!-- agentkeeper:end slug=team-conventions -->
+```
+
+- `rev` = 内容 SHA-256 前 6 位（`model::hash16` 截断，`model.rs:15`），用于判断「盘上这份是不是我们上次写的那份」。
+- **换行符**：保持目标文件原有风格（全 CRLF 或全 LF），写入时按目标文件的检测结果生成
+  （`toml_splice.rs:157` 已有同样的检测：`if raw.contains("\r\n") { "\r\n" } else { "\n" }`，照抄这个判据）。
+  这一点单独测：Windows 上用户文件常是 CRLF，混写会让 diff 整文件变动。
+- `upsert_block` 必须是**幂等**的：同一 `(target, slug, body)` 跑两遍，第二遍结果逐字节等于第一遍。
+
+### 6.2 规则共享的两种模式
+
+| 模式 | 适用 | 实现 |
+|---|---|---|
+| `link` | 所有 agent 读同一份 | `Op::link_file`（symlink 优先，回退 hardlink）；agent 侧已是真实文件则先 `Delete` |
+| `compose` | 几段规则拼一份 | 读目标现文 → `upsert_block` → `Op::write` |
+
+**`compose` 的写回闸门**：写入前用 `is_foreign_edit` 判定；为真则**不写**，
+返回 `{ ok:false, code:"rule.foreignEdit", detail:{ slug, file } }`，由 M6 弹三方 diff。
+
+> ⚠️ hardlink 的已知缺陷：agent 用「写临时文件 + rename」保存时，hardlink 会被打断
+> （rename 换掉的是目录项，另一端的 inode 不会更新）。因此**文件型共享优先 symlink**，
+> hardlink 只在 symlink 不可用时使用，且 `doctor` 要把 hardlink 的链接单列为
+> `link.fragile`（info 级），提示可能被 agent 打断。
+
+### 6.3 本期不做
+
+- `.mdc`（Cursor rules 有 `alwaysApply` / `globs` frontmatter）**只支持 `link`**，
+  `compose` 的选项在 UI 上置灰并给出原因。
+- 不做 frontmatter 合并。
+
+### 6.4 M4 验收
+
+1. `AGENTS.md` 被 4 个 agent 引用（link 模式），改库内版本 → 4 处同时生效。
+2. `compose` 模式下在标记**外**追加一行 → 下次同步保留该行。
+3. `compose` 模式下改标记**内**一行 → 返回 `rule.foreignEdit`，盘上文件未被改动。
+4. CRLF 目标文件 compose 后仍是纯 CRLF（逐字节断言）。
+
+---
+
+## 7. M5 · 扫描与健康度
+
+### 7.1 扫描打标
+
+在 `scan_skills`（`scan.rs:257`）建资产处（`make_asset` 的 `meta`，`scan.rs:332` 起）加：
+
+```rust
+"link": match linkfs::entry_link_kind(&dir) {
+    None => Value::Null,
+    Some(m) => json!({
+        "method": m.as_str(),
+        "src": linkfs::read_target(&dir).map(|p| store::native_str(&p)),
+        "managed": /* 目标在库内 && 台账里有这条 */,
+    }),
+},
+```
+
+`link` 为 `null` 表示不是链接（绝大多数资产）。**不许因为这个改动改变现有 id**——
+id 由 `model::asset_id`（`model.rs:185`）决定，其中 `dir` 参与折叠成 `hash16(dir)[..6]`，
+**链接不参与**。也就是说：把真实目录换成链接后，`dir` 字符串不变 → **id 不变**。
+这是本功能「收敛后资产条数不涨」的前提，验收时逐条比对 id。
+
+### 7.2 `compute_effective` 增加 `sameInode`
+
+`compute_effective`（`scan.rs:1383`）现在只判 `shadowedBy` / `overrides`。加一条：
+同一 `kind:slug` 组里，若某两份 `canonicalize(dir)` 相同 → 给两者都打 `sameInode: true`，
+且**不从 `shadowedBy` 里算它们**（同一份东西不存在“遮蔽”）。
+
+> 现状提醒：`dedupe_by_physical_path`（`scan.rs:1303`）**先**按 canonicalize 折叠，
+> 所以同 `kind:slug:physical` 的两条根本到不了 `compute_effective`。`sameInode` 真正
+> 有用的是**跨 scope** 的情形（全局链接 + 项目链接指向同一个库内目录）。写测试时要
+> 构造「两个不同 scope、同一个 phys」的夹具，否则断言永远为真而什么都没测。
+
+### 7.3 7 类 finding
+
+```rust
+// doctor.rs
+pub struct DoctorFinding {
+    pub code: &'static str,
+    pub severity: &'static str,  // "critical" | "warn" | "info"
+    pub path: String,
+    pub detail: Value,
+    pub fixable: bool,
+    pub fix: Option<&'static str>,  // "relink" | "adopt" | "remove" | "converge"
+}
+```
+
+| code | 判定 | 级别 | fix |
+|---|---|---|---|
+| `link.dangling` | `read_target` 有值但目标 `!exists` | critical | `relink` |
+| `link.unmanaged` | 是链接但指向库外 | info | `adopt`（导入库） |
+| `link.hijacked` | 台账有记录但该路径已不是链接 | critical | `relink`（内容一致才允许） |
+| `link.fragile` | `method == hardlink` | info | — |
+| `asset.duplicated` | ≥2 份非链接、内容摘要相同 | info | `converge` |
+| `mcp.drift` | 见 §5.4 | warn | 三选一 |
+| `link.ledgerDrift` | 台账与磁盘不符 | warn | 以磁盘为准重建台账 |
+
+`doctor` 是**只读**的：任何输入下零写入（M7 里有测试用只读路径断言）。
+
+**新增 code 的翻译清单（M5/P1 分两次进 `CODE_ZH`）**：
+
+```
+store.linkFailed, share.notLinked, share.foreignLink, share.unknownAsset,
+link.methodUnavailable, converge.diverged, converge.partial, rule.foreignEdit,
+mcp.drift, link.ledgerDrift
+```
+
+> 为什么不能一次全加：`scripts/tauri-i18n.js` 只**扫源码里的 code 字面量**，多出来
+> 的 `CODE_ZH` 条目不算错，但会在 `engine-zh.js` 里堆一段没人用的词条；
+> 而**漏加**会直接 CODE-MISS 失败。所以按阶段加，每阶段跑一次 `node scripts/tauri-i18n.js`。
+
+### 7.4 M5 验收
+
+1. 手工把一个 junction 换成真实目录 → `link.hijacked` 出现，`fixable: true`。
+2. 删除库内主副本 → 所有指向它的链接报 `link.dangling`。
+3. 收敛 30 个 skill 前后，资产条数与「Curated + managed」计数按台账精确对上（且 30 个 id 不变）。
+
+---
+
+## 8. M6 · 界面
+
+### 8.1 视图注册（三处必须同时改）
+
+```js
+// src/renderer/app.js:1258 的 VIEWS（现有 8 个视图，插在 discover 之后）
+shared: { titleKey: 'nav.shared', subKey: 'shared.subtitle', render: viewShared }
+```
+```html
+<!-- src/renderer/index.html:36 之后 —— Discover 之后、nav-group-operate 之前 -->
+<button class="nav-item" data-view="shared"><span class="nav-ico">⇄</span><span class="nav-text" data-i18n="nav.shared">Shared</span></button>
+```
+```js
+// src/renderer/i18n.js —— en 与 zh 各一条
+'nav.shared': 'Shared' / '共享'
+```
+
+> 只改 `VIEWS` 不改 `index.html`，页签不会出现；只改 `index.html` 不改 `VIEWS`，
+> 点击会掉回 `overview`（`app.js:1708` 的 `if (!VIEWS[view]) view = 'overview'`）。
+> 点击绑定在 `app.js:1192`（`$$('.nav-item').forEach(b => b.addEventListener('click', () => go(b.dataset.view)))`），
+> **不需要改**。但导航文字由 `applyLanguage()` 读取 `data-i18n`，所以新按钮必须带
+> `data-i18n="nav.shared"`（`ui-audit.js` 的静态文本检查放行 `.nav-text`，但缺 `data-i18n`
+> 会让语言切换后标签停在英文）。
+
+### 8.2 命令与桥接（C5）
+
+新增 8 个命令，`src-tauri/src/lib.rs` 与 `tauri-bridge.js` **成对**添加：
+
+| 命令 | Rust 签名 | 桥接写法 | 返回 |
+|---|---|---|---|
+| `list_library` | `fn list_library() -> Value` | `call('list_library')` | `{ ok, root, cap, skills[], mcp[], rules[], memory[] }` |
+| `plan_converge` | `fn plan_converge() -> Value` | `call('plan_converge')` | `{ ok, groups[], savedBytes }` |
+| `apply_converge` | `fn apply_converge(payload: Value) -> Value` | `call('apply_converge', { payload: payload })` | 事务结果 + `written[]` |
+| `enable_asset` | `fn enable_asset(payload: Value) -> Value` | `call('enable_asset', { payload: input })` | 事务结果 |
+| `disable_asset` | `fn disable_asset(payload: Value) -> Value` | `call('disable_asset', { payload: input })` | 事务结果 |
+| `shared_doctor` | `fn shared_doctor() -> Value` | `call('shared_doctor')` | `{ ok, findings[] }` |
+| `apply_finding_fix` | `fn apply_finding_fix(payload: Value) -> Value` | `call('apply_finding_fix', { payload: input })` | 事务结果 |
+| `library_migrate` | `fn library_migrate(payload: Value) -> Value` | `call('library_migrate', { payload: input })` | `{ ok, moved, total }` |
+
+> 实测过的 `bridge` 关口规则（`scripts/check.js:170`–`:274`）：
+> 1. 命令必须在 `generate_handler!` 里；
+> 2. `call('x')` 的键必须是 Rust 形参名的 camelCase，**多余键也失败**；
+> 3. `Option<T>` 形参算可选；
+> 4. **只拦 `call('…', {…})` 这一种第二参写法**：传裸值、或先拼好对象再传变量
+>    （`call('x', o)`）都会**绕过形状检查**。所以新命令一律写成内联对象字面量。
+> 5. 另有基线习惯：`(args: Value)` 型命令在桥里写 `{ args: … }`（如 `read_asset`），
+>    `(payload: Value)` 型写 `{ payload: … }`（如 `save_skill`）。两者都合法，**按参数名对应即可**。
+>
+> 另外：`list_library` / `plan_converge` / `shared_doctor` 会遍历库目录并做哈希，
+> 属于**耗时命令**。既有先例是 `scan` / `read_asset` 用 `async fn` + `tauri::async_runtime::spawn_blocking`
+> （`lib.rs:277`、`:363`），这几个新命令照抄，别在 UI 线程里同步跑。
+
+### 8.3 矩阵交互
+
+沿用 `SHARED-ASSETS-PLAN.md` §5.1 的形态。实现要点：
+
+- 行数据来自 `list_library`，**一次请求拿全**，不要每行一次调用；
+- 单元格点击 → `confirmWrite`（`app.js:713`，签名 `{ title, action, targets, detail, danger }`）
+  → `enableAsset` / `disableAsset` → 成功后**局部重渲染该行**；
+- 列头批量 → 只弹一次确认，列全部真实路径（`confirmWrite` 超过 10 条时自动折叠成 `confirm.moreTargets`）；
+- 失败单元格 → 展示 `restoreErrors[]`（沿用 `reportWriteFailure`，`app.js:496`；
+  **它只认 `store.*` 三个 code**，新 code 要么加进那张 `if` 链，要么在共享页自己判）；
+- `cap.dir_order[0] === 'copy'` 时页面顶部常驻横幅 + 显示 `Resync`。
+
+### 8.4 i18n 清单（约 60 条，务必成对）
+
+前缀统一用 `shared.` / `matrix.` / `converge.` / `doctor.`：
+
+```
+nav.shared, shared.subtitle, shared.tabSkills, shared.tabMcp, shared.tabRules,
+shared.bannerCopyMode, shared.resync, shared.empty, shared.importToLibrary,
+matrix.agentColumn, matrix.enableAll, matrix.disableAll, matrix.cellFailed,
+matrix.readOnlyCell, matrix.legendOn, matrix.legendOff, matrix.legendFail,
+converge.title, converge.step1, converge.step2, converge.step3,
+converge.identical, converge.diverged, converge.single, converge.keepAt,
+converge.replaceWith, converge.diffFiles, converge.apply, converge.skipped,
+doctor.title, doctor.critical, doctor.warn, doctor.info, doctor.fix,
+doctor.dangling, doctor.unmanaged, doctor.hijacked, doctor.fragile,
+doctor.duplicated, doctor.drift, doctor.ledgerDrift, doctor.zeroFindings,
+```
+
+**JS 侧必须成对**：`i18n.js` 的 `en`（`:17`）与 `zh`（`:497`）两个对象，实测各 462 条，
+漏一边 `scripts/lint-renderer.js` 的 parity 会红；**多一条没人用的也会红**
+（`checkI18nUnused`），所以别提前把用不上的词条写进去。
+
+### 8.5 M6 验收
+
+1. 新视图在 1440×900 与 2180×1466 不溢出（`node scripts/ui-audit.js`，且 `total findings: 0`）。
+2. 矩阵键盘可达：Tab 走遍单元格、空格切换、列头有 `aria-label`。
+3. `node scripts/check.js` 全绿。
+4. 切到英文界面无中文残留，切回中文无英文句子（`node scripts/tauri-i18n.js` + 人工看一屏）。
+
+---
+
+## 9. M7 · CLI / MCP 工具 / 迁移
+
+### 9.1 MCP 工具（+5，总数 20）
+
+加到 `mcp.rs::tools()`（`mcp.rs:80`）与 `call_tool`（`mcp.rs:877`）的 `match name.as_str()`：
+
+| 工具 | 参数 | 说明 |
+|---|---|---|
+| `list_library` | 无 | 库内资产 + 各自启用的 agent |
+| `enable_asset` | `name, kind, agentId, scope?` | 走同一事务 |
+| `disable_asset` | 同上 | 走同一事务 |
+| `link_doctor` | 无 | findings |
+| `converge_plan` | 无 | **只出方案，零写入** |
+
+⚠️ `core/tests/mcp.rs:240` 有一处**钉死工具数量与顺序**的常量：
+
+```rust
+const TOOLS: [&str; 15] = [ /* … */ ];
+```
+
+加 5 个工具必须同一次把它改成 `[&str; 20]` 并在**末尾**追加名字
+（`:238` 的注释写明「改名对已经记住该名字的 agent 是破坏性变更」，
+所以**只能追加、不能重排、不能改名**）。另有两处会跟着红：
+
+- `core/tests/mcp.rs:157` 起的 `tools_list_exposes_every_tool_with_a_schema`：每个工具必须带
+  `name` / `description` / `inputSchema.type === "object"`；
+- `core/tests/mcp.rs:486` 的 `assert_eq!(stats["agents"].len(), 17)`：**这是 agent 数，不是工具数**，不受影响，
+  但同文件很容易误改，改前先读那一行的上下文。
+
+### 9.2 `ak-scan --shared`
+
+`core/src/bin/ak-scan.rs` 增加分支：打印 `{ library, ledger, findings }` 的完整 payload。
+无参数时行为**完全不变**（CI 依赖现有输出）。
+
+### 9.3 库位置迁移
+
+在「`~/.agents`（共享约定）」与 `<store>`（私有）之间切换：
+
+```
+1. 台账里把每条标记 migrating（带 from/to）
+2. 逐个：rename 主副本 → 重指全部链接（对每个 dst 做 unlink + link）
+3. 全部完成后清掉 migrating 标记
+4. 中断后重跑：从台账的 migrating 状态继续，不重复搬
+```
+
+**幂等验收**：200 个 skill，在第 100 个上强杀，重跑到底 → 最终状态与一次跑完一致。
+
+### 9.4 首次启用
+
+`bootstrap()`（`lib.rs:212`，**同步** `fn`）返回的 payload 增加
+`shared: { enabled }`。收敛候选数（`duplicateGroups`）在打开共享页时由
+`plan_converge` 现算，**不要**塞进启动路径（§9.4 下方的说明）。
+前端在 `enabled && duplicateGroups > 0` 时提示一次，**默认不收敛**，点进去才进向导。
+
+> `bootstrap`（`lib.rs:212`–`:228`）现在是**同步**命令，返回
+> `{ storeRoot, agents, sharedSkillsDir, kinds, version }`，其中 `agents` 是 17 个适配器的
+> 解析结果，**它自己不做扫描**（扫描由独立的 `scan` 命令在 `spawn_blocking` 里跑）。
+> 所以 `duplicateGroups` 不能指望「已有扫描结果」：要么在打开共享页时才算，
+> 要么给 `bootstrap` 的 `shared` 只放 `{ enabled }` 这种不需要遍历库的字段。
+> **推荐后者** —— 它把首次启动的耗时增长按在零。
+
+---
+
+## 10. 分阶段执行顺序（每阶段独立可提交、可回滚）
+
+> **规则：一个阶段做完 → 门禁全绿 → 提交 → 才开下一阶段。** 不要跨阶段并行改同一文件。
+
+### P0 · 探测（0.5 天）— 改 3 个文件
+
+1. `core/Cargo.toml` 补 `windows-sys` features（§3.3）；
+2. 写 `linkfs.rs` 的能力探测 + 原语（`as_str/parse/is_link/read_target/link_kind/entry_link_kind/unlink/same_target`）；
+3. `link-probe` 临时 bin 实测 §3.1 的 5 个问题，结论写进模块注释，**删掉 bin**；
+4. `settings.rs::defaults()`（`settings.rs:25`）加三个键。
+
+```powershell
+cd tauri-shell; cargo test -p agentkeeper-core linkfs
+```
+
+**Gate**：普通会话下 `capability()` 给出的 `dir_order` 至少含一个非 copy 方式；探测在只读目录下不 panic。
+
+### P1 · 事务与台账（2–3 天）
+
+1. `store.rs`：`OpKind` +2（`:745`）、`Op` +2（`:779` 起）、`DirSnap::Link`/`Snapshot::Link` 加 `kind`
+   （`:833`、`:948`）、`collect_dir_seen`（`:349`）、`restore_dir`（`:453`）、`restore` 的 Link 臂（`:1287`）、
+   `STORE_LINK_FAILED`（`:616`）；
+2. `library.rs`：库根、台账读写；
+3. `engine-zh.js` 加 `store.linkFailed`；
+4. `src-tauri/tests/write_path.rs` 追加 4 个用例（创建/还原/类型保持/台账损坏）。
+
+**Gate**：§3.6 的 M1 四条验收全过。
+
+### P2 · Skills（3–4 天）
+
+1. `sharing.rs::plan_converge`（只读）+ `keeper.rs` 的 `enable_asset`/`disable_asset`/`remove_from_library`；
+2. `scan.rs::scan_skills` 打 `meta.link`；
+3. `settings.rs::ensure_store` 清理过期 `.trash`。
+
+**Gate**：§4.4 三条验收；`--test sharing` 的收敛夹具测试绿。
+
+### P3 · MCP（3–4 天，可与 P2 并行但**不要同改 keeper.rs**）
+
+1. `adapters.rs` + `adapter-table.js` 加 `mcp_disable` → `npm run tauri:adapters`；
+2. `sharing.rs::materialize_mcp`；
+3. `doctor.rs` 的 `mcp.drift`。
+
+**Gate**：§5.5 四条验收；TOML 逐字节夹具绿。
+
+### P4 · 规则/记忆（2–3 天）
+
+1. `compose.rs`（纯函数 + 单测先写）；
+2. `sharing.rs` 的 rule/memory 编排；
+3. `rule.foreignEdit`。
+
+**Gate**：§6.4 四条验收。
+
+### P5 · 健康 + UI（3–4 天）
+
+1. `doctor.rs` 其余 6 类 finding；
+2. `scan.rs::compute_effective` 的 `sameInode`；
+3. 前端：`view-shared.js` + 7 处登记（§11.1 表）+ i18n + 桥接 + 8 个命令。
+
+**Gate**：M5 + M6 全部验收；`node scripts/check.js` 全绿且 `ui-audit` 为 0。
+
+### P6 · CLI / MCP / 迁移（2 天）
+
+1. 5 个 MCP 工具 + `core/tests/mcp.rs` 断言同步；
+2. `ak-scan --shared`；
+3. `library_migrate`；
+4. 文档：`DESIGN.md` 新章节、`MCP-SERVER.md`、`README*.md` 的 15→20、`changelog/next.json`。
+
+**Gate**：§9 两条验收。
+
+---
+
+## 11. 已知坑（按踩到的概率排序）
+
+### 11.1 新前端文件只登记一半（最隐蔽的一个）
+新增 `view-shared.js` 要在**7 处**登记。少一处的后果各不相同，**其中 3 处完全不会报错**：
+
+| # | 文件 | 位置（实测） | 不改的后果 |
+|---|---|---|---|
+| 1 | `src/renderer/index.html` | `:147`–`:149` 之间，**`engine-zh.js` 之后、`app.js` 之前** | 页面不加载 / 桥接注入报错 |
+| 2 | `tauri-shell/copy-frontend.js` | `:27` 的 `PLAIN` 数组 | **打不进 dist，`check.js` 仍全绿**（dist 关口只比白名单内的文件） |
+| 3 | `scripts/lint-renderer.js` | `:181`、`:213` 两处 `app.js` 硬编码 | i18n 覆盖率/未注册键检查看不到新文件（**不报错**） |
+| 4 | `scripts/lint-renderer.js` | `:354` 的 `targets` 数组、`:377` 的 `endsWith("app.js")`、`:383` 的全局冲突清单 | 未翻译字符串、内联 style、**跨脚本全局冲突**都漏检 |
+| 5 | `scripts/ui-audit.js` | `:12` 只读 `app.js` | 裸英文/死控件检查漏掉新文件（**不报错**） |
+| 6 | `scripts/ui-audit.js` | `:121` 起的 `decisions` 探针（`S.checked` / `PER_PAGE\|S.page`）仍只匹配 `app.js` | 误报「no multi-select / unbounded rows」 |
+| 7 | `scripts/test-affected.js` | `:92` 起的区域表 | `node scripts/test-affected.js` 对改动**一条测试都不跑** |
+
+> 补充两条本轮核对到的事实：
+> - `scripts/ui-baseline.js:55` 的 `VIEWS` 只截 `overview/assets/settings` 三页；
+>   共享页要做像素基线才需要加，**它不是 `check.js` 的关口**。
+> - `scripts/ui-audit.js` **在任何 findings 下都 exit 0**（`check.js` 的 ui 关口因此永远绿）。
+>   判据是输出里的 `total findings: 0`，或 `check.js` 打印的
+>   `ui: no dead controls / theme violations` 前面没有 `fail`。
+
+**建议做法**：把 3/4/5 的硬编码改成「`fs.readdirSync(renderer).filter(f => f.endsWith('.js'))`」，
+一次改完以后再也不会漏。第 2 处必须手加，且加完跑 `node tauri-shell/copy-frontend.js` 生成 dist。
+
+### 11.2 `update::manager` 的两个既有并发测试
+不是你的 bug。根因：
+- `check()` 在 `manager.rs:1050` 置 `inflight.running = true`，但 `last_attempt_at`
+  要到 `manager.rs:1056` 才写；中间窗口里 `status()` 能读到 `checking:true, lastAttemptAt:0`。
+- 第二个调用者可能在第一个占槽前就走进 throttle/cooldown 分支，导致发两次请求。
+
+修法（**若任务要求修**）：把 `mutate_state(last_attempt_at = started_at)` 挪到
+`inflight` 锁内、`running = true` 的同一临界区。不要求就不要动。
+
+### 11.3 删除顺序写反
+「先建链接再删旧目录」必然失败（`link_dir` 的目标已存在会报错）。正确是 `Delete` → `LinkDir`，
+且两者在**同一事务**里。
+
+### 11.4 junction 的 reparse buffer 偏移算错
+`SubstituteNameOffset` / `PrintNameOffset` 是**相对于 `PathBuffer` 起点的字节数**，不是相对结构体；
+长度字段**不含**结尾 NUL。写错的表现是 `DeviceIoControl` 返回 `ERROR_INVALID_PARAMETER`。
+**先写一个只建一个 junction 的最小测试**，跑通再往上叠。
+另外：常数 `FSCTL_SET_REPARSE_POINT` / `IO_REPARSE_TAG_MOUNT_POINT` 在
+`windows-sys` 的 `Win32_System_Ioctl` 模块，不在 `Win32_Storage_FileSystem`（§3.3）。
+
+### 11.5 `file_type()` 认不出 junction
+`store::collect_dir_seen`（`:349`）与 `scan::read_entries`（`:105`）都用
+`DirEntry::file_type()`。`scan.rs:264`–`:269` 的注释已经记录了这个坑（junction 不报 `is_dir`），
+原因是 Rust 0.52 系列只在 `symlink_metadata` 层判 `FILE_ATTRIBUTE_REPARSE_POINT`。
+**凡是要判断「这是不是我们建的链接」的地方，一律走 `linkfs::entry_link_kind`。**
+
+### 11.6 忘记重冻结适配器快照
+改了 `adapters.rs::AGENTS` 或 `scripts/adapter-table.js` 而不跑 `npm run tauri:adapters`，
+`adapters.rs` 内置快照测试会红（现在冻结了 17 个 agent / 187 条路径模板）。
+**红了先重算常量，不要删测试。**
+
+### 11.7 dist 陈旧
+改了 `src/renderer/*` 后 `check.js` 报 dist 不一致。跑 `node tauri-shell/copy-frontend.js`
+（或 `npm run tauri:sync`）。**永远不要手改 `tauri-shell/dist/`。**
+
+### 11.8 `mcp.rs` 工具数量断言
+`core/tests/mcp.rs:240` 是 `const TOOLS: [&str; 15]`，**长度写进了类型**，加工具必须同步改长度，
+否则编译期就红（在这个具体点上，编译器替你守住了）。不要在别处另写一份工具名清单。
+
+### 11.9 CRLF 混写
+compose 写入规则文件时若把 CRLF 文件写成 LF，用户会看到「整个文件都变了」的 diff。
+写入前检测目标文件换行风格并沿用（判据见 §6.1）。
+
+### 11.10 `shared` 这个编号已被占用
+`scan.rs:1806` 起把 `~/.agents/skills` 报成伪 agent `agentId: "shared"`。
+新代码里避免再叫 `shared` 的东西（视图 key 叫 `shared` 没问题，是前端命名空间；
+但 Rust 侧结构体/字段别复用这个词，容易与扫描结果混淆）。**更重要的是**：文件是否在
+「库内」不能用 `agentId == "shared"` 来判断 —— 库根可被切换到 `<store>`（§9.3），
+必须用 `Library::owns_target`。
+
+### 11.11 `settings.save` 只接受 `defaults()` 里已有的键
+`settings.rs:162`–`:169`：patch 里**未知键和类型不匹配的键会被静默丢弃**。
+新增 `linkMethod` / `libraryRoot` / `trashDays` 必须先加进 `defaults()`（`settings.rs:25`），
+否则设置页点了保存、界面回显成功，磁盘上却没有这个键 —— 而且失败是静默的。
+`libraryRoot` 用 `String`（空串 = 跟随默认），`trashDays` 用 `Number`。
+
+### 11.12 先写 `{` 手测台账损坏测试的隐患
+§3.6 验收 4 要「手工写坏台账」。`common::write` 会 `create_dir_all` 父目录，
+所以测试真的会建出 `links.json`；用完记得 `common::cleanup`，否则 `temp_root` 排在
+`%TEMP%` 里会一直涨（`common/mod.rs` 的注释已经点名了这件事）。
+
+---
+
+## 12. 与计划文档的冲突（以本文为准）
+
+实施时按右列写，并在 P0 顺手把 `SHARED-ASSETS-PLAN.md` 改成一致（别留两套说法）。
+
+| # | `SHARED-ASSETS-PLAN.md` 的说法 | 实施口径（本文） |
+|---|---|---|
+| 1 | `read_link_target(p)`：「`fs::read_link` 对 junction 可用，但需用 `symlink_metadata().file_type().is_symlink()` 统一判定」 | **两句都不成立**：`read_link` 对 junction 在部分情况返回 Err，`is_symlink()` 也可能为 false。读出目标必须走 `FSCTL_GET_REPARSE_POINT`，判定类型必须走 `linkfs::entry_link_kind`（§3.3、§3.4⑤） |
+| 2 | 「快照侧零改动，`DirSnap::Link` 已经能把链接原样捕获/还原」 | **必须改**：`store.rs:349` 用 `ft.is_symlink()`，认不出 junction；此时它会把链接当目录，**顺着链接把库内整棵树快照进内存**，还原时写成真实副本（§3.4 ⑤） |
+| 3 | `create_file_link`：`hardlink → symlink` | **symlink → hardlink**。hardlink 会被 agent 的「写临时文件 + rename」打断（计划自己在 §6.2/§7 也承认），不当首选（§3.4 ①） |
+| 4 | M1 验收「`create_dir_link` 返回 `method: "junction"`」 | 返回 `Symlink` **或** `Junction` 都算通过；首选项由 P0 实测定（§3.6） |
+| 5 | M6 命令表「`apply_converge { groups }`」「`enable_asset` 返回事务结果」 | 全部改成 `payload: Value` 一个形参，桥接 `call('x', { payload: input })`（§8.2） |
+| 6 | 测试放 `core/tests/sharing.rs` / `tests/write_path.rs` | 本仓库的集成测试在 **`tauri-shell/src-tauri/tests/`**，`core` 下只有 `mcp.rs`（§3.7） |
+| 7 | M4「`AGENTS.md` ↔ `CLAUDE.md` ↔ `GEMINI.md` 同源映射」 | 适配器表里 `rules` 是**按 agent 各自声明的一串文件名**（`pi` 用 `AGENTS.md`、`workbuddy` 用 `SOUL.md`/`IDENTITY.md`），映射按 `adapter-table.js` 实际声明做，不要硬编码文件名对；`CLAUDE.md` / `GEMINI.md` 需要先确认它们在表里出现的位置，没有再谈「同源」 |
+
+> 另有一处**本轮核对得出、计划里没写**、会直接影响 P5 的：`keeper::skill_dir_for`
+> （`keeper.rs:393`–`:407`）只取 `agent.globals.skills.first()`（项目作用域取
+> `agent.projects.skills.first()`），**单个值**；而 `adapters.rs` 里 `warp` 的
+> `globals.skills` 是 `NONE`（`adapters.rs:377`）。所以矩阵**不是 17 列**：skills 列按
+> **实际解析出来的目录**生成，解析不出就不给这一列并写明原因（`warp` 该列为空，不是缺陷）。
+
+---
+
+## 13. 终验清单（发布前逐条打勾）
+
+```powershell
+cd tauri-shell
+cargo test --workspace                    # 0 failed（基线 333）
+cargo clippy --workspace --all-targets    # 无新增 warning（实测输出：每个 target 的 `generated N warnings` 之和 = 64）
+cd ..
+node scripts/check.js                     # all 8 gates passed
+node scripts/tauri-i18n.js                # MISS 0 / CODE-MISS 0 / AMBIGUOUS 0
+node scripts/ui-audit.js                  # total findings: 0（注意它永远 exit 0）
+node tauri-shell/copy-frontend.js --check
+node scripts/changelog.js check
+cargo tauri build                         # 安装包能出（可选，CI 跑）
+```
+
+> 旧口径里的「clippy 基线 49 个」与实测不符。本机 `cargo clippy --workspace --all-targets`
+> 的 `generated N warnings` 逐条是：core lib **23**、core test `mcp` **2**、core lib-test
+> **27（23 条与 lib 重复）**、shell `update` **5**、`boundary` **5（1 条重复）**、
+> `contract` **2（1 条重复）**。**判据用「改动前后跑同一条命令，逐行 diff 不新增 warning」**，
+> 不要拿固定数字对 —— toolchain 一升级这个数字就变。
+
+**功能终验**（在真实机器上，不只用夹具）：
+
+| # | 场景 | 期望 |
+|---|---|---|
+| 1 | 5 份同名 skill 收敛 | 1 库 + 5 链接，改一处五处生效，**30 个 id 不变** |
+| 2 | 内容不一致的一组 | 不收敛、给出差异文件名与 `only-a/only-b/different` 状态 |
+| 3 | 停用某 agent | 只删链接，库内主副本仍在，`audit.jsonl` 有记录 |
+| 4 | 删库内资产 | 进 `.trash`，链接全删，审计有记录，30 天后被 `ensure_store` 清掉 |
+| 5 | Codex + Claude 同开一个 MCP | TOML 注释保留；关闭后逐字节还原 |
+| 6 | 手写库外 MCP | `doctor` 零报告、零写入 |
+| 7 | compose 规则 | 标记外内容保留；CRLF 不变 |
+| 8 | agent 把链接换成真实目录 | 报 `link.hijacked`，可修复 |
+| 9 | 库位置迁移中断后重跑 | 最终状态一致 |
+| 10 | 恢复普通会话（非管理员） | 全流程可用（**这是本功能存在的理由**） |
+| 11 | 跑完 #1 后再手动删库内 `SKILL.md` | 5 个 agent 侧都报 `link.dangling`，无 agent 崩溃 |
+
+---
+
+## 14. 文档同步（P6 一并做，不要留到最后）
+
+| 文档 | 改什么 |
+|---|---|
+| `docs/DESIGN.md` | 新增「§X 共享层」：linkfs 降级链、Op 扩两型、台账语义、`.trash`、矩阵交互（现有 9 章，插在 §8 路线图之前） |
+| `docs/MCP-SERVER.md` | 15 → 20 个工具：`:100`、`:125`、`:136`（标题「工具 API（15 个）」）三处 |
+| `docs/SHARED-ASSETS-PLAN.md` | 文首加一行：`> 已实施，见 docs/SHARED-ASSETS-DESIGN.md`；并按 §12 修正 7 处口径 |
+| `README.md` / `README.en.md` | 「15 工具」→「20 工具」（各有 2 处：功能列表 + MCP 服务段） |
+| `changelog/next.json` | 每阶段一条 `feat`（**M1 已记**：`共享资产 M1：链接内核…`） |
+| `docs/RUST-ENV.md` | 若 P0 的探测结论与本文 §3.1 不符，以实测定论并更新 |
+
+---
+
+## 15. 交接说明（给接手的人）
+
+- **先读**：本文 §1（硬约束）→ §3（M1）→ §16（M1 实况）→ 对应模块。
+  `SHARED-ASSETS-PLAN.md` 是决策依据，遇到「为什么这么做」去那里找；
+  遇到「具体怎么改、行号在哪」只看本文。
+- **不要改的**：`store.rs` 的事务语义、`toml_splice.rs` 的按区段手术、`scan.rs` 的 id 生成规则。
+  这三处是既有不变量，动了要单独评审。
+- **可以改的**：`keeper.rs` 的 `distribute`（把 copy 换成 link 是本次的核心目的之一），
+  但要保留旧行为作为 `mode: "copy"` 分支（`keeper.rs:860` 的 `Op::copy_dir`），不要直接删。
+- **拿不准时**：宁可让操作失败并给出可读的 code，也不要「尽力而为」地写出半对的状态。
+  这条与本项目 `store.rs` 的整体立场一致。
+
+---
+
+## 16. M1 实施记录（2026-11-02，已完成）
+
+### 16.1 交付清单（都已落在 0.2.4 工作树上）
+
+| 文件 | 改动 | 说明 |
+|---|---|---|
+| `tauri-shell/core/src/linkfs.rs` | **新增 1210 行** | `LinkMethod` / `LinkCap` / `capability` / `probe` / `create_dir_link` / `create_file_link` / `read_target` / `is_link` / `link_kind` / `entry_link_kind` / `unlink` / `same_target` / `replace_with_hardlink` / `restore_hardlink`；14 条单测 |
+| `tauri-shell/core/src/library.rs` | **新增 570 行** | `Library::resolve/root/dir_for/skill_dir/mcp_record_path/ledger_path/load_ledger/save_ledger/record/owns_target/owns_skill_dir/capability`、`Ledger`、`LinkEntry`、`Migrating`；9 条单测 |
+| `tauri-shell/core/src/store.rs` | +464 / −63 | `OpKind::LinkDir/LinkFile` + `Op::link_dir/link_file` + 事务执行分支 + `STORE_LINK_FAILED`；`DirSnap::Link` 与 `Snapshot::Link` 都带上 `kind`；`collect_dir_seen` / `Store::snapshot` / `restore_dir` / `Store::restore` 全部按种类分派；`rmrf` 与 `Op::delete` 改为对链接「只删目录项」 |
+| `tauri-shell/core/src/settings.rs` | +64 | `defaults()` 增 `linkMethod` / `libraryRoot` / `trashDays`；`ensure_store` 增 `remove_expired_trash`（按 `trashDays` 清理 `.trash/`，尽力而为、不阻塞启动） |
+| `tauri-shell/core/src/lib.rs` | +3 | `pub mod library;` `pub mod linkfs;`（字母序） |
+| `tauri-shell/core/Cargo.toml` | +22 / −1 | `windows-sys` features 补 `Win32_Security` / `Win32_Storage_FileSystem` / `Win32_System_IO` / `Win32_System_Ioctl` |
+| `src/renderer/engine-zh.js` | +50 | `CODE_ZH` 增 `store.linkFailed`；`PATTERNS` 增 20 条（链接原语、台账、还原三句） |
+| `tauri-shell/src-tauri/tests/write_path.rs` | +193 | **4 条 M1 验收用例**（见 16.3） |
+| `tauri-shell/src-tauri/tests/contract.rs` | +5 | `get_settings_is_a_flat_defaults_object` 的键清单加入三个新键 |
+| `changelog/next.json` | +1 条 | `feat：共享资产 M1：链接内核…` |
+
+临时产物（`src/bin/link-probe.rs`、`link-probe2.rs`、`Cargo.toml` 里的对应 `[[bin]]`）**已按计划删除**。
+
+### 16.2 P0 实测结论（覆盖 §3.1 的待测清单）
+
+Windows 11 x64、普通用户会话、`symlink_dir` 未被策略禁用：
+
+| 问题 | 结果 |
+|---|---|
+| `symlink_dir` 普通会话 | **成功**，`is_symlink`=true、`read_link` 可读回、可透过链接读文件 |
+| FSCTL junction | **成功**；`attributes = 0x410`（DIRECTORY \| REPARSE_POINT）；`symlink_metadata().is_symlink()` 为 **true**，但 `file_type().is_dir()` 为 **false** |
+| junction 上的 `std::fs::remove_dir` | **会跟随进库内删内容**（踩到过一次，库副本被清空）。必须 `RemoveDirectoryW` |
+| 目录符号链接上的 `remove_file` | **报 Access denied**（`symlink_metadata().is_dir()` 对目录 symlink 是 false）。`unlink` 必须两种都试 |
+| 在已存在目录上建链接 | symlink 与 junction 都 `ERROR_ALREADY_EXISTS (183)`，必须先删后建 |
+| 相对目标 | `read_link` 返回 `.\foo`。`create_*_link` 因此只接受绝对路径 |
+| 无写权限目录 | 两种方式都 `ERROR_ACCESS_DENIED (5)` |
+| `hard_link` 跨卷 | `ERROR_NOT_SAME_DEVICE (17)`，`kind = CrossesDevices` |
+| **SYMLINK 重解析点布局** | **Windows 10 起多 4 字节 `Flags`**，`PathBuffer` 起点 = 头 16 字节 + 4。漏掉它会读回 `md\??\C:\…`（偏移对、长度对、起点错 4 字节） |
+| MOUNT_POINT 布局 | 无 `Flags`，`PathBuffer` 起点 = 16 字节 |
+
+### 16.3 M1 四条验收（逐条落地在哪、怎么跑）
+
+```powershell
+cd tauri-shell
+cargo test -p agentkeeper-core --lib linkfs      # 14 passed
+cargo test -p agentkeeper-core --lib library     #  9 passed
+cargo test -p agentkeeper-shell --test write_path # 23 passed（含下面 4 条）
+```
+
+| # | 验收 | 测试 | 结果 |
+|---|---|---|---|
+| 1 | 非管理员会话下 `create_dir_link` 成功（不是 `Err`） | `linkfs::tests::probe_reports_a_usable_dir_chain`（能力层）+ `write_path::a_link_op_creates_a_link_not_a_copy`（事务层） | ✅ 本机 `dir_order = [Symlink, Junction]` |
+| 2 | 事务里「删真实目录 + 建链接」，后续 op 失败 → 目录逐字节回来 | `write_path::a_failed_transaction_restores_the_directory_and_its_links` | ✅ 真实文件逐字节一致 + 目录里那条链接仍是链接且内容可读 |
+| 3 | junction 还原后仍是 junction | `write_path::a_junction_is_restored_as_a_junction` + `linkfs::tests::junction_round_trips_through_the_reparse_buffer` | ✅ `link_kind == Junction` |
+| 4 | 台账被写坏 → `Err`、不返回空、不动磁盘 | `write_path::a_corrupt_link_ledger_is_an_error_not_an_empty_one` + `library::tests::a_missing_ledger_is_empty_but_a_corrupt_one_is_an_error` | ✅ 追加覆盖「缺 `entries`」「条目缺字段」「未知 method」三种损坏 |
+
+### 16.4 全量门禁（本轮最后一次运行）
+
+```text
+cargo test --workspace                 361 passed / 0 failed   （基线 333 → +28）
+cargo clippy --workspace --all-targets 无新增 warning（25 / 2 / 29 / 5 / 5 / 2，与基线逐 target 相同量级，新文件 0 条）
+node scripts/check.js                  all 8 gates passed
+node scripts/ui-audit.js               total findings: 0
+node scripts/tauri-i18n.js             MISS 0 / CODE-MISS 0 / AMBIGUOUS-MULTI 0
+node scripts/test-affected.js          exit 0
+node scripts/comment-lang.js           英文注释 11 行（新文件 0 行），中文覆盖率 99.8%
+```
+
+### 16.5 实施中修掉的三个既有缺陷（都在 M1 的写入路径上）
+
+这三处原来不在计划里，但因为链接一旦落盘就会踩到，属于**必须清零**的问题：
+
+1. **`store::rmrf` 会顺着 junction 删掉库内容**。已在入口处加 `linkfs::is_link` 分支，
+   链接一律走`unlink`（只删目录项）。这条是数据丢失级的，若做 M2 的「删库内资产」前
+   没修，第一次删除就会清空 shared 目录。
+2. **`Op::delete` 对悬空链接静默无效**（`Path::exists()` 跟随链接返回 false），
+   且 `remove_file` 失败被吞。现在「存在或链接」都进删除分支，失败返回错误。
+3. **`construct` 侧硬链接没有目标可读**，快照只记 `kind+空 target` 会让还原直接失败、
+   条目消失。现在快照额外记一份内容，还原阶段按内容在同目录里现找对端
+   （`linkfs::restore_hardlink`）；找不到就对端就保留普通文件——内容永远不丢。
+
+### 16.6 M2 可以直接接手的接口
+
+```rust
+// 1) 库根与能力（已实现，直接用）
+let lib = core::library::Library::resolve(&user_home, &settings_value);
+let cap = lib.capability(&store_root);                 // 探测落在 <store>/probe，缓存 <store>/linkcap.txt
+let mut ledger = lib.load_ledger()?;                   // 损坏 = Err（M1 验收 4）
+
+// 2) 事务里建链接（已实现）
+ops.push(Op::delete(&agent_side));                     // 先删（同一事务）
+ops.push(Op::link_dir(&agent_side, &lib.skill_dir("pdf")));
+store.transaction(&ops, &meta);                        // 日志里带 "method": "symlink" | "junction" | "hardlink"
+lib.record(&mut ledger, library::LinkEntry::new("skill", "pdf", &src, &dst, method));
+lib.save_ledger(&ledger)?;                             // 只在事务成功之后
+
+// 3) 安全闸（已实现）
+if !linkfs::is_link(path) { return share_not_linked(); }
+if !lib.owns_target(path) { return share_foreign_link(); }
+```
+
+**M2 需要自己补的两件事**（本轮刻意没做，避免与 P2 的实现选择打架）：
+
+- `store.transaction` 目前从环境变量 `AK_LINK_METHOD`（`symlink|junction|hardlink`）读链接方式偏好；
+  P2 应改成由 `enable_asset` 的 input 传入，落到 `Op::link_dir` 的第三个参数上（现在是 `None` = 自动）。
+- `.trash/` 的**写入**（`remove_from_library`）还没实现；清理侧（`settings::remove_expired_trash`）
+  已经在了，并且有 `trashDays` 设置。写的时候注意：`fs::rename` 同卷优先，跨卷回退 `copy_dir + rmrf`。
+
+### 16.7 给下一位的三条提醒
+
+1. **`scan.rs:264` 的注释过时了**：它说 junction 不报 `is_dir()`，本机实测
+   `symlink_metadata().file_type().is_dir()` 为 false 但 `metadata()` 为 true。
+   `scan` 的兜底仍然有效，但新代码一律用 `linkfs::entry_link_kind`。
+2. **`store::same_target` 与 `linkfs::same_target` 是同一份实现**（前者直接转调后者）。
+   新增的「同一物理对象」判断不要再写第三份。
+3. **不要用 `std::fs::remove_dir` 删任何可能是 junction 的路径**。`rmrf` 已经守住了这条，
+   但测试脚手架（`common::cleanup`）走的就是 `rmrf`，所以新增夹具也别绕过它。
