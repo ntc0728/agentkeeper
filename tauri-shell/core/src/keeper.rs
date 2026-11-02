@@ -1840,6 +1840,55 @@ impl Keeper {
         if let Some(record) = input.get("record").filter(|v| v.is_object()) {
             req["record"] = record.clone();
         }
+        // `config`（MCP 工具表的承诺，§9.1）：库里还没有这条记录时，先把它写成
+        // 库内规范形态，再继续物化 —— 这正是「一份资产写一次，所有 agent 看到同一
+        // 份」的入口。只收规范字段（command/args/env/url/headers/cwd/transport），
+        // agent 私有调优不跟着走（与 `canonical_record` 的口径一致）。
+        //
+        // 为什么不放进 materialize_plan：落库是一次**写**（要走事务、进审计），
+        // materialize 只管「算 op」；把写混进规划函数会破坏它「纯规划」的契约。
+        if on
+            && input.get("record").is_none()
+            && !lib
+                .mcp_records()
+                .iter()
+                .any(|r| r.get("name").and_then(Value::as_str) == Some(name.as_str()))
+        {
+            if let Some(config) = input.get("config").filter(|v| v.is_object()) {
+                let mut record = json!({
+                    "schema": sharing::MCP_SCHEMA,
+                    "name": name,
+                    "transport": config
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .map(|_| "http")
+                        .unwrap_or("stdio"),
+                });
+                if let Value::Object(m) = &mut record {
+                    for key in ["command", "args", "env", "cwd", "url", "headers"] {
+                        if let Some(v) = config.get(key) {
+                            m.insert(key.to_string(), v.clone());
+                        }
+                    }
+                }
+                let path = store::native_str(&lib.mcp_record_path(&slug(&name)));
+                let body = format!(
+                    "{}\n",
+                    serde_json::to_string_pretty(&record).unwrap_or_else(|_| "{}".to_string())
+                );
+                let tx = self.store.transaction(
+                    &[Op::write(&path, &body)],
+                    &json!({
+                        "kind": "mcp",
+                        "action": "library-record",
+                        "assetName": name,
+                    }),
+                );
+                if !tx.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    return tx;
+                }
+            }
+        }
         let plan = match sharing::materialize_plan(
             lib,
             &self.user_home,

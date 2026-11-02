@@ -773,3 +773,47 @@ Written by the regression test.
 
     cleanup(&dir);
 }
+
+// MCP 工具表承诺的行为（§9.1）：`kind=mcp` 且库里还没有这条记录时，`config`
+// 会**先写进库内规范形态**、再物化到 agent 配置。之前 schema 里写了 `config`，
+// 实现却只认 `record`——agent 按文档传参会拿到 mcp.noRecordInLibrary。
+#[test]
+fn enable_mcp_with_config_records_it_into_the_library_first() {
+    let fx = Fixture::new("mcp-shared-config");
+    let keeper = fx.keeper();
+
+    let (_resp, opened) = call(
+        &keeper,
+        "enable_asset",
+        json!({
+            "name": "github",
+            "kind": "mcp",
+            "agentId": "workbuddy",
+            "config": { "command": "gh-mcp", "args": ["serve"] }
+        }),
+    );
+    assert_eq!(opened["ok"], json!(true), "{opened}");
+
+    // 库内规范形态落了（这就是「单一事实源」的那一份）。
+    let lib = keeper.library();
+    let record_path = lib.mcp_record_path(&agentkeeper_core::model::slug("github"));
+    let record: Value =
+        serde_json::from_str(&std::fs::read_to_string(&record_path).expect("record file"))
+            .expect("record JSON");
+    assert_eq!(record["name"], json!("github"));
+    assert_eq!(record["transport"], json!("stdio"));
+    assert_eq!(record["command"], json!("gh-mcp"));
+
+    // agent 配置也物化了。workbuddy 的 MCP 配置路径按适配器表解析；
+    // 这里不猜具体文件，改为核对库里台账与漂移面。
+    let (_, lib_view) = call(&keeper, "list_library", json!({}));
+    let view = lib_view;
+    let row = view["mcp"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter()
+                .find(|r| r["name"] == json!("github"))
+        })
+        .unwrap_or_else(|| panic!("no mcp row for github: {view}"));
+    assert_eq!(row["cells"]["workbuddy"]["state"], json!("on"), "{row}");
+}
