@@ -1261,6 +1261,7 @@ const VIEWS = {
   agents: { titleKey: 'nav.agents', subKey: 'agents.subtitle', render: viewAgents },
   projects: { titleKey: 'nav.projects', subKey: 'projects.subtitle', render: viewProjects },
   discover: { titleKey: 'nav.discover', subKey: 'discover.subtitle', render: viewDiscover },
+  shared: { titleKey: 'nav.shared', subKey: 'shared.subtitle', render: () => window.__akShared.viewShared() },
   health: { titleKey: 'nav.health', subKey: 'health.subtitle', render: viewHealth },
   activity: { titleKey: 'nav.activity', subKey: 'activity.subtitle', render: viewActivity },
   settings: { titleKey: 'nav.settings', subKey: 'settings.subtitle', render: viewSettings }

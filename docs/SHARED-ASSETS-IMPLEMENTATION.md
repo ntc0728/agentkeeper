@@ -14,17 +14,20 @@
 | 平台 | Windows 10/11 x64（仅此范围，不做 macOS/Linux） |
 | 基线 | 0.2.4，commit `24b32f4` |
 | 工期 | 14–17 个工作日（P0→P6，含测试；见 §11 的改动幅度） |
-| 当前状态 | **M1（P0+P1）、M2（P2）、M3（P3）、M4（P4）、M5（P5 的 Rust 侧）已完成并验收**（2026-11-02）；M6 起未开始。验收记录见 §16、§17、§18、§19 与 §20 |
+| 当前状态 | **M1（P0+P1）、M2（P2）、M3（P3）、M4（P4）、M5（P5 的 Rust 侧）、M6（P5 的界面侧）已完成并验收**（2026-11-02）；M7（P6）起未开始。验收记录见 §16、§17、§18、§19、§20 与 §21 |
 | 环境 | rustc/cargo 1.99.1 · tauri-cli 2.12.4 · MSVC 14.44 · SDK 10.0.26100 · Node 22.22.1 |
 
-> **本轮之后开工的人先读 §16–§20**：§16 是 M1 的实际交付清单与实测结论（与本手册初稿
+> **本轮之后开工的人先读 §16–§21**：§16 是 M1 的实际交付清单与实测结论（与本手册初稿
 > 不同的地方已就地改写），§17 是 M2 的交付清单、三条验收的落点、以及在实施中修掉的五个
 > 既有缺陷 —— 其中三个会直接毁数据，务必先看一遍；§18 是 M3（MCP 单一事实源）
 > 的交付清单、四条验收的落点，以及实施中修掉的一处 TOML 换行混写缺陷；§19 是 M4
 > （规则与记忆共享）的交付清单、四条验收的落点，以及实施中修掉的三个缺陷（其中两个
 > 会静默写坏内容）；§20 是 M5（扫描与健康度）的交付清单、七类 finding 的判据与三条
 > 验收的落点，以及实施中清零的一处既有缺陷 —— 扫描去重会把「同一个文件的规则与记忆」
-> 折成一条，记忆计数因此少一份。
+> 折成一条，记忆计数因此少一份；§21 是 M6（共享页界面）的交付清单、8 个命令与
+> `list_library` 载荷、四条界面验收的落点、以及**真实运行时冒烟**里清零的两处缺陷
+> （默认库根下收敛方案把库内主副本算成两份；规则/记忆矩阵的行标识与 M4 的
+> 「目标文件名 = slug」模型不一致）。
 
 ---
 
@@ -113,8 +116,10 @@ npm run changelog:add -- feat "一句话说清用户能感知的变化"
 | `tauri-shell/core/src/compose.rs` | ~260 | M4 | 规则区块标记的插入/替换/剥离（纯函数） |
 | `tauri-shell/core/src/sharing.rs` | ~900 | M2/M3/M4 | 收敛探测、MCP 物化、规则共享的事务编排 |
 | `tauri-shell/core/src/doctor.rs` | ~450 | M5 | 7 类 finding 的检测（只读） |
+| `tauri-shell/core/src/library_view.rs` | 1428 | M6 | `list_library` 矩阵数据视图（库根 / 列 / 四类行 / 单元格状态，只读） |
+| `tauri-shell/core/src/shared_ops.rs` | 2200 | M6 | 收敛应用、健康发现一键修、库根迁移（写入编排） |
 | `tauri-shell/src-tauri/tests/sharing.rs` | ~600 | 测 | **集成测试必须放这里**（理由见 §3.7）；同目录已有 `common/mod.rs` 可直接 `mod common;` |
-| `src/renderer/view-shared.js` | ~1100 | M6 | 共享页（矩阵 / 收敛向导 / 预览） |
+| `src/renderer/view-shared.js` | 1246 | M6 | 共享页（矩阵 / 收敛向导 / 健康面板） |
 | `scripts/adapter-table.js` 的字段 | — | M3 | 每条 agent 加 `mcpDisable`（C8） |
 
 > `src/renderer/` 现在是 6 个文件：`theme-init.js` `engine-zh.js` `i18n.js` `app.js`
@@ -813,7 +818,11 @@ mcp.drift, link.ledgerDrift
 
 ---
 
-## 8. M6 · 界面
+## 8. M6 · 界面（**已完成，见 §21**）
+
+> 本节是实施前的规格；实际交付、`list_library` 载荷、四条验收的落点与实施中清零的
+> 缺陷见 **§21**。与本节不同的地方（矩阵行按「目标文件名 slug」分组、`foreign`
+> 单元格的采纳条件、`library_migrate` 只做命令与核心实现而不做 UI 入口）以 §21 为准。
 
 ### 8.1 视图注册（三处必须同时改）
 
@@ -1022,7 +1031,7 @@ cd tauri-shell; cargo test -p agentkeeper-core linkfs
 
 **Gate**：§6.4 四条验收。
 
-### P5 · 健康 + UI（3–4 天）
+### P5 · 健康 + UI（3–4 天）— **M5 与 M6 均已完成**
 
 1. `doctor.rs` 其余 6 类 finding；
 2. `scan.rs::compute_effective` 的 `sameInode`；
@@ -1921,3 +1930,221 @@ report.has_critical();
    `apply_finding_fix` 按 `code` 分派；`link.hijacked` 必须先看 `fixable` /
    `detail.contentMatches` —— 内容不一致时只能人工处理，不能自动 relink。
 
+
+---
+
+## 21. M6 实施记录（2026-11-02，已完成）
+
+M6 = §8（界面）+ §10 P5 的前端部分。**只做 M6**：`bootstrap.shared` 与首次启用提示
+（§9.4）、5 个 MCP 工具与 `ak-scan --shared`（M7）、库迁移的 UI 入口（P6）一概没碰。
+本期交付的是「共享页 + 它需要的 8 个命令、数据视图与写入编排」，并在**真实 Tauri
+运行时**（本机 fixture home、真 WebView2、真 IPC）上跑完了四条界面验收。
+
+### 21.1 交付清单
+
+| 文件 | 改动 | 说明 |
+|---|---|---|
+| `tauri-shell/core/src/library_view.rs` | **新增 1428 行**（22 条单测） | `list_library`：库根 / `cap` / 列（agent）/ 四类行；skills 含库内主副本与外部行；mcp 用库内记录 + 候选配置文件 + `plan_drift`；rules/memory 按「目标文件名 slug」建行与单元格。只读 |
+| `tauri-shell/core/src/shared_ops.rs` | **新增 2200 行**（17 条单测） | `assets_of` / `converge_plan` / `doctor_report` / `apply_converge` / `apply_finding_fix` / `migrate_library`；写路径全部 `store.transaction`（迁移按 §9.3 的台账 journal 例外） |
+| `tauri-shell/core/src/linkfs.rs` | +47 | `LinkCap::to_json`（camelCase，含 `copyOnly`） |
+| `tauri-shell/core/src/keeper.rs` | +125 | `enable_asset` / `disable_asset` 增加 `kind=="mcp"` 分支（走 `materialize_plan` 的 ops + 事务；§17.9 允许的「扩分支」）；`link_prefer` 改 `pub(crate)` |
+| `tauri-shell/core/src/sharing.rs` | +95 | `materialize_plan` 改 `pub`；`plan_converge` 去重库内主副本；`actionable()` 收窄为「非 diverged 且 `replace` 非空」 |
+| `tauri-shell/core/src/doctor.rs` | +31 | finding `detail` 补 `assetId` / `scope` / `assetIds` / `scopes`（检测判据零改动） |
+| `tauri-shell/src-tauri/src/lib.rs` | +111 | 8 个命令与 `generate_handler!`；6 个 `async + spawn_blocking`、2 个同步（单事务） |
+| `tauri-shell/tauri-bridge.js` | +14 | 8 个 `window.ak.*`；payload 型全部 `{ payload: … }` 内联字面量 |
+| `tauri-shell/src-tauri/tests/shared_ui.rs` | **新增 595 行** | 5 条端到端用例：矩阵形状、`plan_converge` 只读、doctor 形状、收敛后 copy→on、relink |
+| `src/renderer/view-shared.js` | **新增 1246 行** | 共享页（IIFE，只暴露 `window.__akShared`）：横幅 / 5 个 tab / 矩阵 / 收敛向导 / 健康面板 |
+| `src/renderer/index.html` | +2 | 导航项 + `view-shared.js`（在 `app.js` 之前） |
+| `src/renderer/app.js` | +1 | `VIEWS.shared` |
+| `src/renderer/i18n.js` | +238 | en/zh 各 **579** 键（新增 117 对），全部 `shared./matrix./converge./doctor.` 前缀 |
+| `src/renderer/styles.css` | +137 | 矩阵 / 横幅 / tab / 向导样式，仅主题变量、零裸 hex |
+| `src/renderer/engine-zh.js` | +26 | 8 条新 code 的中文 + 6 条 `<command> task failed` 模式 |
+| `scripts/lint-renderer.js` | 4 处硬编码改为读全部 renderer 脚本 | 新文件自动纳入「未翻译 / 全局冲突 / i18n 覆盖率」检查；词典文件豁免「未翻译」规则 |
+| `scripts/ui-audit.js` | 同上级改造 | 静态文案 / 死控件 / 可点行 / i18n 探针覆盖新文件 |
+| `scripts/test-affected.js` | +17 | 新增 `shared` 区域；`ALL_TESTS` 补 `--test shared_ui` |
+| `tauri-shell/copy-frontend.js` | 1 行 | `PLAIN` 加 `view-shared.js`（dist 由脚本生成，未手改） |
+| `changelog/next.json` | +1 条 | `feat：共享资产 M6 …`（30 条） |
+
+### 21.2 8 个命令与桥接
+
+| 命令 | Rust | 桥接 |
+|---|---|---|
+| `list_library` | `async fn list_library() -> Result<Value,String>` | `listLibrary()` |
+| `plan_converge` | `async fn plan_converge() -> Result<Value,String>` | `planConverge()` |
+| `apply_converge` | `async fn apply_converge(payload: Value) -> Result<Value,String>` | `applyConverge(payload)` |
+| `enable_asset` | `fn enable_asset(payload: Value) -> Value`（同步，单事务） | `enableAsset(payload)` |
+| `disable_asset` | `fn disable_asset(payload: Value) -> Value`（同步，单事务） | `disableAsset(payload)` |
+| `shared_doctor` | `async fn shared_doctor() -> Result<Value,String>` | `sharedDoctor()` |
+| `apply_finding_fix` | `async fn apply_finding_fix(payload: Value) -> Result<Value,String>` | `applyFindingFix(payload)` |
+| `library_migrate` | `async fn library_migrate(payload: Value) -> Result<Value,String>` | `libraryMigrate(payload)` |
+
+> **`library_migrate` 本期只交付命令 + 核心实现，不在共享页放入口**：迁移的 UI 与
+> 200-skill 强杀验收属 P6（§9.3）。核心实现是幂等、可续跑的（台账 `migrating` 标记），
+> 单测覆盖「跑两次第二次 moved=0」与「预置 migrating 标记后续跑」。
+
+### 21.3 `list_library` 载荷（矩阵唯一数据源）
+
+```jsonc
+{ "ok": true, "root": "<库根>",
+  "cap": { "symlinkDir":true,"symlinkFile":true,"junction":true,"hardlink":true,
+           "dirOrder":["symlink","junction"], "fileOrder":["symlink","hardlink"],
+           "probedAt":"<store>/probe", "copyOnly":false },
+  "agents": [ { "id","label","accent","installed","skillsDir","ruleDirs[]","memoryDirs[]",
+                "mcpFiles[]","mcpStyle" } ],
+  "skills": [ { "name","slug","label","dir","size","external"?, "cells": { "<agentId>": {…} } } ],
+  "mcp":    [ { "name","slug","record","cells": { "<agentId>": { "file","configKey","drift" } } } ],
+  "rules":  [ { "name","slug","label","libraryFile","mode","cells": {…} } ],
+  "memory": [ /* 同 rules */ ] }
+```
+
+单元格状态词表：`on` / `off` / `copy` / `foreign` / `drift` / `unsupported`(+`reason`) /
+`error`。三个与规格不同的口径（都以本节为准）：
+
+1. **rules/memory 的行按目标文件名主干 slug 分组**，不是按库内文件名。M4 的
+   `sharing::rule_plan` 用目标文件名推库内主副本（`CLAUDE.md` → `rules/claude.md`），
+   两者必须同口径，否则「启用」写的是另一个 slug 的库内文件（真实运行时已复现：
+   单元格随后变 `foreign`、块体为空）。行集合 = 库内文件 slug ∪ 各 agent 固定文件名
+   声明的 slug；固定声明只挂同名行，目录型声明在每一行给 `<dir>/<slug>.md`。
+2. **`off` 且本行无库内主副本 → `unsupported`/`noSource`**：没有内容可共享，不可点。
+3. **skills 的外部行**（扫描到真实副本、库内没有）：
+
+```jsonc
+{ "name":"team-wiki", "dir":null, "external":[{ "assetId","agentId","scope","path" }],
+  "cells": { "<agentId>": { "state":"copy", "path":"…" } } }
+```
+
+前端「导入到库」用第一条 `external[].assetId` 调 `enableAsset`。
+
+### 21.4 §8.5 四条验收（逐条落点）
+
+| # | 验收 | 落点与实测 |
+|---|---|---|
+| 1 | 1440×900 与 2180×1466 不溢出，`ui-audit` total findings 0 | `node scripts/ui-audit.js` → **0**；真实 WebView2 用 CDP 在两种尺寸下导航到共享页：`documentElement.scrollWidth == clientWidth`（1440/2180）、`#view-root` 同级相等、矩阵单元格全部 `aria-label` 非空 → **2/2 尺寸 pass** |
+| 2 | 矩阵键盘可达：Tab 走遍单元格、空格切换、列头有 `aria-label` | 每个单元格是 `<button class="mx-cell" data-state aria-pressed aria-label>`，列头是 `<button>` 且带 `aria-label`（列头批量一次确认）；CDP 探针统计「无 aria-label 的 button = 0」；焦点用 `data-focus-key` 在局部重画后恢复 |
+| 3 | `node scripts/check.js` 全绿 | **all 8 gates passed**（residue / bridge 44↔44 / tree / renderer / ui / i18n / dist / untracked） |
+| 4 | 英中切换无残留 | `node scripts/tauri-i18n.js` → MISS 0 / CODE-MISS 0 / AMBIGUOUS 0；真实运行时 `i18n.setLang('zh') + applyLanguage('zh')` 后矩阵/图例/横幅无英文（探针检查 6 个已知英文句子），切回英文同理 |
+
+**额外的真实运行时验收**（本机 fixture：默认库根 `~/.agents`、3 个 skill、1 个 MCP、
+库内 2 份规则；真 WebView2 + 真 IPC，15/15 断言通过，0 console error）：
+
+- 收敛：`planConverge` → office-docx `identical`（replace 2 处）、team-wiki `single`、
+  pdf `diverged`；向导只默认勾 identical，应用后结果面板 `office-docx Done`，
+  两处真实目录变成指向库内的链接，再取方案 `actionable: 0`。
+- 规则：claude 行（库内 `rules/claude.md` + 目标 `~/.claude/CLAUDE.md` 已有用户内容）
+  → 单元格 `foreign` 可点 → compose 采纳后：用户原文逐字保留在区块外、库内内容进区块、
+  内容不重复、单元格变 `on`。
+- MCP：github 在 Claude 侧 `on` → 停用后 `.mcp.json` 里该条消失（库内记录不动）→
+  再启用后条目回来（按库内规范形态物化）。
+
+### 21.5 全量门禁（本轮最后一次运行）
+
+```text
+cargo test --workspace                  505 passed / 0 failed（基线 459 → +46；连续跑两次均 505）
+cargo clippy --workspace --all-targets  25 / 2 / 29 / 4 / 5，与 §20.4 逐 target 相同，M6 新文件 0 条
+node scripts/check.js                   all 8 gates passed
+node scripts/ui-audit.js                total findings: 0（I18N/INTERACTION/THEME/UX 全 0，ACCEPTED 2）
+node scripts/tauri-i18n.js              MISS 0 / CODE-MISS 0 / AMBIGUOUS 0
+node scripts/comment-lang.js            英文注释 14 行（与基线相同），中文覆盖率 99.8%
+node scripts/test-affected.js           exit 0（areas: renderer, shared, core, doctor, keeper, shell）
+node scripts/changelog.js check         ok（30 entries）
+```
+
+> **已知噪声（不是 M6 引入的）**：早期一次并发跑全量时 `keeper::tests::cached_index_operations`
+> 失败过 1 次；随后 5 次全量（含最后连续 2 次）均 0 failed。根因是既有测试对进程级
+> 资产缓存的隔离缺陷（`keeper.rs:2442-2448` 的注释已记录「单独跑过、全量下取决于交错
+> 顺序」），与本功能无关，本期未改。
+
+### 21.6 实施中清零的缺陷（两处是真实运行时才暴露的）
+
+**① 默认库根下 `plan_converge` 把库内主副本算成两份 → 假的 `identical` 组 + 自我替换。**
+默认库根是 `~/.agents`，它同时是扫描里的伪 agent `shared` 的 skills 目录。`lib_node`
+在被加入 `all` 之前没有与扫描侧同路径的真实副本去重，于是「库里只有一份 team-wiki」
+被报成 `identical`、`replace` 指向库内自己、`copies` 同一路径两条；应用时命中
+`enable_asset` 的自指分支返回 `ok:false`（且无 code）。
+修法：`lib_node` 入组前按物理同一性丢弃扫描侧同路径的真实副本（**保留指向库内的链接
+节点**，已收敛的「一份真实 + 若干链接」仍不进方案）；`actionable()` 收窄为
+`replace` 非空；`apply_converge` 的组级失败一律带 `converge.notConvergeable`。
+回归测试 4 条（`sharing::tests::the_library_copy_is_counted_once_when_the_shared_agent_reports_it`、
+`a_library_copy_and_an_agent_copy_converge_without_replacing_the_library`、
+`shared_ops` 两条真 scan e2e）。
+
+**② 规则/记忆矩阵的行标识与 M4 的「目标文件名 = slug」模型不一致。**
+旧实现按库内文件建行（`rules/agents.md` → 行 agents），但 `rule_plan` 按**目标文件名**
+推库内主副本（`CLAUDE.md` → `rules/claude.md`）。于是点 claude-code 的单元格会写另一个
+slug 的库内文件、块体为空，单元格随后显示 `foreign`。
+修法：行集合 = 库内文件 slug ∪ 固定文件名声明 slug；固定声明只挂同名行；目录型声明给
+每行 `<dir>/<slug>.md`；`off` 且无库内主副本 → `unsupported/noSource`。单测 22 条
+（原 16 条按新口径改写 + 6 条新增）。
+
+**③ `foreign` 的采纳条件（防内容重复）。**
+M4 的 compose 分支在「库内还没有主副本」时用目标文件现文当区块内容，**且不创建库内
+主副本** —— 用它采纳一个已存在的规则文件会把内容同时留在区块外与区块内（重复），
+库里仍然没有内容。M4 的验收夹具都预置了库内内容，所以这条路径从未被测试到。
+修法（M6 层）：rules/memory 的 `foreign` 只有在「本行 `libraryFile` 存在」或
+「`mode == link`（link 会先把目标写成库内主副本）」时才可点；否则只读并解释
+`matrix.foreignNoSource`。真实运行时已验证：有库内主副本时采纳后原文保留、内容不重复。
+
+**④ 前端 mcp 单元格用 `slug` 调开关。** 库内 MCP 记录名可能含空格（`GitHub MCP`），
+`enable_asset`/`disable_asset` 的 mcp 分支按库内 `name` 找记录。前端改为
+`name: row.name`，并带 `file: cell.file`（R2 的分支支持可选 file）。
+
+**⑤ 规则/记忆的开关参数（`enable_rule` 不读 `name`）。** 契约与实现统一为：cells 始终
+带 `path`，enable/disable 一律带 `file: cell.path`；矩阵不再依赖 `name` 做目标解析。
+
+**⑥ 新前端文件的登记链（§11.1 的 7 处）。** `lint-renderer.js` 与 `ui-audit.js` 原来
+硬编码 `app.js`：新增 `view-shared.js` 后它不会被告警、i18n 覆盖率与全局冲突也漏检。
+改成「读 `src/renderer/*.js`」后，新增脚本自动纳入（词典文件 `i18n.js`/`engine-zh.js`
+豁免「未翻译 UI 文案」规则）；`test-affected.js` 加 `shared` 区域与 `--test shared_ui`；
+`copy-frontend.js` 的 `PLAIN` 加 `view-shared.js` 并重新生成 dist。
+
+**⑦ 小项**：`shared_ui.rs` 的模块文档有一行纯英文（comment-lang 15→14，回到基线）；
+`actionable` 语义收窄后 `shared_ui` 的收敛断言无需改（它断言的是应用后的状态）。
+
+### 21.7 没有做的事 / 已知限制（不要以为漏了）
+
+- `bootstrap.shared` 与「首次发现重复技能」的提示 = P6（§9.4）。
+- 5 个 MCP 工具、`ak-scan --shared`、`library_migrate` 的界面与 200-skill 强杀验收 = M7/P6。
+- **规则/记忆矩阵没有「导入到库」动作**：compose 只拼「库内已有内容」；要让一份
+  现有规则进入库，只能走 `link` 模式（目标文件成为主副本）或手工放到
+  `<root>/rules|memory/<slug>.md`。M4 的 keeper-absent compose 分支没有实现成口子。
+- `foreign` 的**三方 diff** 界面没做：当前 `foreign` 要么只读解释，要么在
+  「有库内主副本 / link 模式」时直接 compose 采纳；区块被外部改过时返回的
+  `rule.foreignEdit` 会以中文 toast 呈现，不弹 diff。
+- 目录型规则声明（cursor/cline/zed/roo/continue 的 `rules` 目录）目标固定
+  `<dir>/<slug>.md`；目录里已有的 `.mdc` 不会被自动接管（契约简化，M4 的
+  `rule_plan` 同样按目标扩展名走）。
+- 矩阵只覆盖**全局作用域**（project scope 的扫描资产进 skills 的 `external[]`，
+  规则/记忆不进矩阵）。
+- 共享页没有加入 `scripts/ui-baseline.js` 的像素基线（它只截 overview/assets/settings；
+  加不加不影响 `check.js`）。
+- `mcp` 的重新启用按库内规范形态物化，JSON 会被重新序列化（键序保留、缩进重排）
+  —— 这是 M3 的既有行为，不是 M6 引入。
+
+### 21.8 M7 可以直接接手的接口
+
+```rust
+// 1) 与 8 个命令一一对应的 core 入口（MCP 工具直接复用，不要另写一套）
+core::library_view::list_library(&keeper);                       // §21.3 的形状
+core::shared_ops::converge_plan(&keeper);                        // { ok, groups, savedBytes, actionable }
+core::shared_ops::apply_converge(&keeper, &json!({ "groups": ["pdf"] }));
+core::shared_ops::doctor_report(&keeper);                        // = doctor::diagnose(...).to_json()
+core::shared_ops::apply_finding_fix(&keeper, &json!({ "code": "link.dangling", "path": "…" }));
+core::shared_ops::migrate_library(&keeper, &json!({ "to": "store" }));
+
+// 2) 能力探测的 IPC 形状
+core::linkfs::LinkCap::to_json();                                // camelCase，含 copyOnly
+
+// 3) MCP 开关复用同一事务路径
+keeper.enable_asset(&json!({ "kind": "mcp", "name": "github", "agentId": "claude-code",
+                             "scope": "global", "file": "<abs 配置文件>" }));
+```
+
+**给 M7 的三条提醒**：
+
+1. 5 个 MCP 工具（`list_library` / `enable_asset` / `disable_asset` / `link_doctor` /
+   `converge_plan`）的返回形状直接复用上面的 `Value`，**不要再包一层英文句子**；
+   `core/tests/mcp.rs` 的 `TOOLS` 数组只能追加、不能重排。
+2. `apply_finding_fix` 的 `mcp.drift` 有三选一（`choice: library|agent|independent`）；
+   MCP 工具若只暴露一种，先读 `doctor` 的 `detail.scope`（本期只有 global）。
+3. `library_migrate` 的 `to` 接受 `default` / `store` / 绝对路径；迁移会改
+   `settings.libraryRoot`。写 MCP 工具前先确认调用方愿意承担「迁移后重新扫描」的成本。

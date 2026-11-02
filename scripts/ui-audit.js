@@ -9,7 +9,24 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const app = fs.readFileSync(path.join(ROOT, 'src/renderer/app.js'), 'utf8');
+const RENDERER = path.join(ROOT, 'src', 'renderer');
+/**
+ * 全部渲染脚本（按文件名排序）。
+ *
+ * 以前只读 `app.js`，于是新增的 `view-shared.js` 里的裸英文、死控件、
+ * 不可点数据行全都不会被告警（§11.1 第 5/6 处）。现在读目录：新增的
+ * `*.js` 自动纳入，且每条发现都带真实文件名。
+ */
+const SOURCES = fs
+  .readdirSync(RENDERER)
+  .filter((f) => f.endsWith('.js'))
+  .sort()
+  .map((f) => ({
+    label: `src/renderer/${f}`,
+    text: fs.readFileSync(path.join(RENDERER, f), 'utf8')
+  }));
+/** 全体渲染脚本的合并文本：结构探针（多选 / 分页 / 快捷键）按整包判断。 */
+const app = SOURCES.map((s) => s.text).join('\n');
 const html = fs.readFileSync(path.join(ROOT, 'src/renderer/index.html'), 'utf8');
 const css = fs.readFileSync(path.join(ROOT, 'src/renderer/styles.css'), 'utf8');
 const i18n = fs.readFileSync(path.join(ROOT, 'src/renderer/i18n.js'), 'utf8');
@@ -33,76 +50,85 @@ html.split('\n').forEach((l, i) => {
   if (a && !/data-i18n/.test(l)) problems.i18n.push(`index.html:${i + 1}  ${a[1]}="${a[2]}"`);
 });
 
-// app.js：裸的 el('th', {}, 'English') 表头、标题、开关标签
-app.split('\n').forEach((l, i) => {
-  if (/^\s*(\/\/|\*|\/\*)/.test(l)) return;
-  const th = l.match(/el\('th',\s*(?:\{[^}]*\},\s*)?'([A-Za-z][^']*)'\)/);
-  if (th && !/t\('/.test(th[0])) problems.i18n.push(`app.js:${i + 1}  table header "${th[1]}"`);
-  const ti = l.match(/title:\s*'([A-Za-z][^']{4,})'/);
-  if (ti && !/t\('/.test(ti[0])) problems.i18n.push(`app.js:${i + 1}  title "${ti[1]}"`);
-  const lbl = l.match(/el\('label',\s*\{\},\s*'([A-Za-z][^']{3,})'\)/);
-  if (lbl && !/t\('/.test(lbl[0])) problems.i18n.push(`app.js:${i + 1}  label "${lbl[1]}"`);
-  const empty = l.match(/class: 'empty'\s*\},\s*'([A-Za-z][^']{8,})'/);
-  if (empty && !/t\('/.test(empty[0])) {
-    problems.i18n.push(`app.js:${i + 1}  empty-state text "${empty[1].slice(0, 50)}"`);
-  }
-});
+// 渲染脚本里的裸表头 / 标题 / 开关标签。按文件逐个查，发现项带真实文件名。
+for (const source of SOURCES) {
+  source.text.split('\n').forEach((l, i) => {
+    if (/^\s*(\/\/|\*|\/\*)/.test(l)) return;
+    const where = `${source.label}:${i + 1}`;
+    const th = l.match(/el\('th',\s*(?:\{[^}]*\},\s*)?'([A-Za-z][^']*)'\)/);
+    if (th && !/t\('/.test(th[0])) problems.i18n.push(`${where}  table header "${th[1]}"`);
+    const ti = l.match(/title:\s*'([A-Za-z][^']{4,})'/);
+    if (ti && !/t\('/.test(ti[0])) problems.i18n.push(`${where}  title "${ti[1]}"`);
+    const lbl = l.match(/el\('label',\s*\{\},\s*'([A-Za-z][^']{3,})'\)/);
+    if (lbl && !/t\('/.test(lbl[0])) problems.i18n.push(`${where}  label "${lbl[1]}"`);
+    const empty = l.match(/class: 'empty'\s*\},\s*'([A-Za-z][^']{8,})'/);
+    if (empty && !/t\('/.test(empty[0])) {
+      problems.i18n.push(`${where}  empty-state text "${empty[1].slice(0, 50)}"`);
+    }
+  });
+}
 
 /* ---------- 2. 死掉的交互元素 ---------- */
 
 // 点击处理器挂在后面几行的按钮没问题；这里要抓的是那些躺在 el(...) 树里、从头到尾
 // 没挂过任何监听器的按钮。
-const appLines = app.split('\n');
-const buttonLines = [];
-appLines.forEach((l, i) => {
-  const m = l.match(/el\('button',\s*\{(.*)\}/);
-  if (m) buttonLines.push({ line: i + 1, attrs: m[1], text: l.trim().slice(0, 110) });
-});
-for (const b of buttonLines) {
-  const hasInline = /onclick/.test(b.attrs);
-  // 往后看 4 行，找类名/变量名匹配的 addEventListener —— 粗糙，但真出问题的都能抓到。
-  const ctx = appLines.slice(b.line - 1, b.line + 4).join('\n');
-  const hasLater = /addEventListener\('click'/.test(ctx);
-  if (!hasInline && !hasLater) {
-    problems.interaction.push(`app.js:${b.line}  button without any click handler — ${b.text}`);
-  }
-}
+for (const source of SOURCES) {
+  const appLines = source.text.split('\n');
+  const where = (line) => `${source.label}:${line}`;
 
-// 同级的行可点、它自己却没有 onclick 的数据行。合理例外：动作挂在单元格里的行
-// （带 CTA 按钮的空态、"展开更多"），以及明确标了 .static 的表格。
-//
-// 判据以前只读 `el('tr', {` **这一行**，而 app.js 里 onclick 通常写在下一行
-// （对象字面量换行展开）。于是每一个多行写法的可点行都会被报成缺陷 —— 例如
-// `el('tr', {` 下一行紧跟 `onclick: () => drillAgent(id)` 或 `onclick: openFirst`
-// 的写法。把窗口拉宽到整个对象字面量的开头几行，按代码实际结构判断。
-if (/table\.tbl tbody tr \{ cursor: pointer/.test(css)) {
+  // 点击处理器挂在后面几行的按钮没问题；这里要抓的是那些躺在 el(...) 树里、从头到尾
+  // 没挂过任何监听器的按钮。
+  const buttonLines = [];
   appLines.forEach((l, i) => {
-    if (!/el\('tr',\s*\{/.test(l)) return;
-    // 表头行可能换行：el('th') 会出现在下一行。
-    const ctx3 = appLines.slice(i, i + 3).join('\n');
-    if (/el\('th'/.test(ctx3) || /el\('thead'/.test(l)) return;   // header rows
-    if (/class: 'empty'/.test(l)) return;                       // empty states
-    if (/colspan/.test(l)) return;                              // expander / footer rows
-    // 属性写在紧跟的几行里：取到对象字面量的末尾（`}` 后接 `,` 或 `)`）为止。
-    let block = '';
-    for (let k = i; k < Math.min(appLines.length, i + 12); k++) {
-      block += appLines[k] + '\n';
-      if (/^\s*\},?\s*$/.test(appLines[k]) || /^\s*\},/.test(appLines[k])) break;
+    const m = l.match(/el\('button',\s*\{(.*)\}/);
+    if (m) buttonLines.push({ line: i + 1, attrs: m[1], text: l.trim().slice(0, 110) });
+  });
+  for (const b of buttonLines) {
+    const hasInline = /onclick/.test(b.attrs);
+    // 往后看 4 行，找类名/变量名匹配的 addEventListener —— 粗糙，但真出问题的都能抓到。
+    const ctx = appLines.slice(b.line - 1, b.line + 4).join('\n');
+    const hasLater = /addEventListener\('click'/.test(ctx);
+    if (!hasInline && !hasLater) {
+      problems.interaction.push(`${where(b.line)}  button without any click handler — ${b.text}`);
     }
-    if (/onclick/.test(block)) return;                          // wired (multi-line)
-    // 只读表格里的行是有意不可交互的。
-    const ctx = appLines.slice(Math.max(0, i - 8), i + 1).join('\n');
-    if (/tbl static/.test(ctx)) return;
-    problems.interaction.push(`app.js:${i + 1}  data row without onclick while other rows are clickable — verify intent`);
+  }
+
+  // 同级的行可点、它自己却没有 onclick 的数据行。合理例外：动作挂在单元格里的行
+  // （带 CTA 按钮的空态、"展开更多"），以及明确标了 .static 的表格。
+  //
+  // 判据以前只读 `el('tr', {` **这一行**，而 app.js 里 onclick 通常写在下一行
+  // （对象字面量换行展开）。于是每一个多行写法的可点行都会被报成缺陷 —— 例如
+  // `el('tr', {` 下一行紧跟 `onclick: () => drillAgent(id)` 或 `onclick: openFirst`
+  // 的写法。把窗口拉宽到整个对象字面量的开头几行，按代码实际结构判断。
+  if (/table\.tbl tbody tr \{ cursor: pointer/.test(css)) {
+    appLines.forEach((l, i) => {
+      if (!/el\('tr',\s*\{/.test(l)) return;
+      // 表头行可能换行：el('th') 会出现在下一行。
+      const ctx3 = appLines.slice(i, i + 3).join('\n');
+      if (/el\('th'/.test(ctx3) || /el\('thead'/.test(l)) return;   // header rows
+      if (/class: 'empty'/.test(l)) return;                       // empty states
+      if (/colspan/.test(l)) return;                              // expander / footer rows
+      // 属性写在紧跟的几行里：取到对象字面量的末尾（`}` 后接 `,` 或 `)`）为止。
+      let block = '';
+      for (let k = i; k < Math.min(appLines.length, i + 12); k++) {
+        block += appLines[k] + '\n';
+        if (/^\s*\},?\s*$/.test(appLines[k]) || /^\s*\},/.test(appLines[k])) break;
+      }
+      if (/onclick/.test(block)) return;                          // wired (multi-line)
+      // 只读表格里的行是有意不可交互的。
+      const ctx = appLines.slice(Math.max(0, i - 8), i + 1).join('\n');
+      if (/tbl static/.test(ctx)) return;
+      problems.interaction.push(`${where(i + 1)}  data row without onclick while other rows are clickable — verify intent`);
+    });
+  }
+
+  // 长得像控件、实际是 span/div 的元素
+  appLines.forEach((l, i) => {
+    if (/class: '[^']*\bclickable\b/.test(l) && /'span'/.test(l) && !/onclick/.test(l)) {
+      problems.interaction.push(`${where(i + 1)}  span marked .clickable without onclick`);
+    }
   });
 }
-
-// 长得像控件、实际是 span/div 的元素
-appLines.forEach((l, i) => {
-  if (/class: '[^']*\bclickable\b/.test(l) && /'span'/.test(l) && !/onclick/.test(l)) {
-    problems.interaction.push(`app.js:${i + 1}  span marked .clickable without onclick`);
-  }
-});
 
 /* ---------- 3. 主题违规（硬编码颜色） ---------- */
 

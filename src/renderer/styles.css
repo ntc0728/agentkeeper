@@ -1880,3 +1880,140 @@ details > summary { cursor: pointer; user-select: none; }
     scroll-behavior: auto !important;
   }
 }
+
+/* ================= 共享资产页（M6） =================
+ * 矩阵 / 副本横幅 / tab / 收敛向导 / 健康面板。
+ * 颜色一律来自主题 token：这里不出现任何裸 hex，深色主题才会跟着
+ * :root 的覆盖一起变（`node scripts/ui-audit.js` 的 theme 规则会抓裸色值）。 */
+
+.shared-page { display: flex; flex-direction: column; gap: 14px; }
+
+/* 副本模式横幅：机器建不出链接时它常驻，右侧是唯一的「重扫」出口。 */
+.shared-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 12px; border: 1px solid var(--alert-warn-border);
+  background: var(--amber-soft); color: var(--alert-warn-text);
+  border-radius: var(--radius-sm); font-size: var(--fs-small);
+}
+.shared-banner-ico { font-weight: 700; }
+.shared-banner-text { flex: 1 1 320px; min-width: 0; }
+.shared-meta { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.shared-root { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+
+/* tab 栏：按钮天然可 Tab，选中态由 aria-selected 表达（不靠颜色单独承载）。 */
+.shared-tabs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+.shared-tab {
+  appearance: none; border: 1px solid transparent; border-bottom: 0;
+  background: transparent; color: var(--text-2); font: inherit;
+  font-size: var(--fs-small); font-weight: 560; padding: 7px 12px;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0; cursor: pointer;
+}
+.shared-tab:hover { background: var(--ghost-hover-bg); color: var(--text); }
+.shared-tab[aria-selected="true"] {
+  background: var(--surface); border-color: var(--border); border-bottom-color: var(--surface);
+  color: var(--accent); margin-bottom: -1px;
+}
+.shared-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.shared-panel { min-width: 0; }
+
+/* Skills 工具条：搜索（本地过滤）+ 收敛重复。 */
+.shared-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+.mx-search {
+  width: 190px; max-width: 40vw; padding: 5px 9px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--text); font: inherit; font-size: var(--fs-small);
+}
+.mx-search:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* 矩阵：宽表在自己的卡片里横向滚动，不撑破视口。 */
+.mx-card .card-body { padding: 8px 10px 12px; }
+.mx-wrap { overflow-x: auto; }
+.mx-table { min-width: 360px; }
+.mx-table th, .mx-table td { padding: 6px 8px; border-bottom: 1px solid var(--table-border); text-align: left; }
+.mx-table thead th { color: var(--text-3); font-size: var(--fs-micro); font-weight: 600; white-space: nowrap; }
+.mx-th:first-child { min-width: 160px; }
+.mx-th-agent { width: 92px; text-align: center; }
+.mx-col {
+  appearance: none; border: 0; background: transparent; color: inherit;
+  font: inherit; font-size: var(--fs-micro); font-weight: 600;
+  padding: 2px 4px; border-radius: var(--r-xs); cursor: pointer;
+  max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mx-col:hover { background: var(--ghost-hover-bg); color: var(--accent); }
+.mx-col:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mx-row:last-child td { border-bottom: 0; }
+.mx-name { min-width: 0; }
+.mx-name-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.mx-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mx-chips { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.mx-c { text-align: center; }
+.mx-cell {
+  width: 30px; height: 26px; padding: 0;
+  border: 1px solid var(--border); border-radius: var(--r-xs);
+  background: var(--surface-2); color: var(--text-2);
+  font: inherit; font-size: var(--fs-small); line-height: 1; cursor: pointer;
+}
+.mx-cell:hover { border-color: var(--btn-hover-border); }
+.mx-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mx-cell[data-state="on"] { background: var(--green-soft); border-color: var(--alert-ok-border); color: var(--green); }
+.mx-cell[data-state="off"] { background: var(--surface); color: var(--text-3); }
+.mx-cell[data-state="copy"] { background: var(--amber-soft); border-color: var(--alert-warn-border); color: var(--amber); }
+.mx-cell[data-state="foreign"] { background: var(--accent-soft); border-color: var(--alert-info-border); color: var(--accent); }
+.mx-cell[data-state="drift"] { background: var(--amber-soft); border-color: var(--alert-warn-border); color: var(--amber); }
+.mx-cell[data-state="unsupported"] { background: transparent; color: var(--text-3); opacity: .6; }
+.mx-cell[data-state="error"] { background: var(--red-soft); border-color: var(--alert-err-border); color: var(--red); }
+
+.mx-legend {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border);
+  color: var(--text-3); font-size: var(--fs-micro);
+}
+.mx-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.mx-legend-dot { display: inline-block; min-width: 14px; text-align: center; }
+
+/* 收敛向导（openModal 内容） */
+.cv-step { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.cv-step-label { font-size: var(--fs-title); font-weight: 600; color: var(--text); }
+.cv-list { display: flex; flex-direction: column; gap: 8px; max-height: 46vh; overflow: auto; padding-right: 2px; }
+.cv-group {
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); padding: 9px 11px; min-width: 0;
+}
+.cv-group.is-diverged { opacity: .72; }
+.cv-group-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.cv-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cv-paths { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; min-width: 0; }
+.cv-path { min-width: 0; }
+.cv-subpath { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.cv-diffs { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border-strong); }
+.cv-count { margin-left: auto; }
+.cv-saved { color: var(--text-2); font-size: var(--fs-small); }
+.cv-result {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 7px 9px; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--surface-2);
+}
+.cv-result-name { font-weight: 600; }
+
+/* 健康面板：severity 分组 → code 分组 → 单条 finding。 */
+.doc-card .card-body { padding-top: 10px; }
+.doc-list { display: flex; flex-direction: column; gap: 12px; }
+.doc-counts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.doc-section { display: flex; flex-direction: column; gap: 8px; }
+.doc-section-head { font-size: var(--fs-small); font-weight: 600; color: var(--text-2); }
+.doc-code-group { display: flex; flex-direction: column; gap: 6px; }
+.doc-code { font-size: var(--fs-small); color: var(--text-2); }
+.doc-finding {
+  border: 1px solid var(--border); border-left: 3px solid var(--warn-line);
+  border-radius: var(--radius-sm); background: var(--surface-2);
+  padding: 8px 10px; display: flex; flex-direction: column; gap: 5px; min-width: 0;
+}
+.doc-finding[data-code="link.dangling"], .doc-finding[data-code="link.hijacked"] { border-left-color: var(--red); }
+.doc-path { color: var(--text-2); overflow-wrap: anywhere; }
+.doc-drift { color: var(--text-3); overflow-wrap: anywhere; }
+.doc-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+@media (max-width: 900px) {
+  .shared-tools { margin-left: 0; width: 100%; }
+  .mx-search { width: 100%; max-width: none; }
+}

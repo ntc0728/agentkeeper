@@ -966,6 +966,53 @@ fn same_volume(a: &str, b: &Path) -> bool {
     vol(pa).is_some() && vol(pa) == vol(b)
 }
 
+impl LinkCap {
+    /// 把能力探测结果序列化成界面用的 `cap`。
+    ///
+    /// 键名是 camelCase（渲染层直接读）；`copyOnly` 由 `dir_order` 现算，不单独
+    /// 存字段 —— 存两份会在缓存命中和现探测之间出现互相矛盾的值。
+    ///
+    /// 这个 impl 只读字段、不做探测：调用方仍必须先走 [`capability`]。
+    pub fn to_json(&self) -> serde_json::Value {
+        let order = |methods: &[LinkMethod]| {
+            serde_json::Value::Array(
+                methods
+                    .iter()
+                    .map(|m| serde_json::Value::String(m.as_str().to_string()))
+                    .collect(),
+            )
+        };
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "symlinkDir".to_string(),
+            serde_json::Value::Bool(self.symlink_dir),
+        );
+        map.insert(
+            "symlinkFile".to_string(),
+            serde_json::Value::Bool(self.symlink_file),
+        );
+        map.insert(
+            "junction".to_string(),
+            serde_json::Value::Bool(self.junction),
+        );
+        map.insert(
+            "hardlink".to_string(),
+            serde_json::Value::Bool(self.hardlink),
+        );
+        map.insert("dirOrder".to_string(), order(&self.dir_order));
+        map.insert("fileOrder".to_string(), order(&self.file_order));
+        map.insert(
+            "probedAt".to_string(),
+            serde_json::Value::String(self.probed_at.clone()),
+        );
+        map.insert(
+            "copyOnly".to_string(),
+            serde_json::Value::Bool(self.copy_only()),
+        );
+        serde_json::Value::Object(map)
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* 测试                                                                */
 /* ------------------------------------------------------------------ */

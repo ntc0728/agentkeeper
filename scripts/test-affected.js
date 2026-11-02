@@ -154,6 +154,22 @@ const AREAS = [
     ],
   },
   {
+    name: 'shared',
+    // M6 的共享页：矩阵数据视图 + 写入编排 + 8 个命令与桥接。
+    // `lib.rs` 的改动同时命中 `shell` 区域，两边是叠加的（都跑不亏）。
+    match: (f) =>
+      /tauri-shell\/core\/src\/(library_view|shared_ops)\.rs$/.test(f) ||
+      /tauri-shell\/src-tauri\/src\/lib\.rs$/.test(f) ||
+      /tauri-shell\/src-tauri\/tests\/shared_ui\.rs$/.test(f) ||
+      /src\/renderer\/(view-shared|engine-zh)\.js$/.test(f),
+    tests: [
+      { pkg: 'agentkeeper-core', args: ['--lib'] },
+      { pkg: 'agentkeeper-shell', args: ['--test', 'shared_ui'] },
+      { pkg: 'agentkeeper-shell', args: ['--lib'] },
+      { pkg: 'agentkeeper-shell', args: ['--test', 'contract'] },
+    ],
+  },
+  {
     name: 'shell',
     match: (f) => f.startsWith('tauri-shell/src-tauri/src/'),
     tests: [
@@ -182,6 +198,7 @@ const ALL_TESTS = [
   { pkg: 'agentkeeper-shell', args: ['--test', 'boundary'] },
   { pkg: 'agentkeeper-shell', args: ['--test', 'write_path'] },
   { pkg: 'agentkeeper-shell', args: ['--test', 'doctor'] },
+  { pkg: 'agentkeeper-shell', args: ['--test', 'shared_ui'] },
 ];
 
 /* ------------------------------------------------------------- 改动的文件 */

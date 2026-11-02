@@ -304,6 +304,14 @@ const PATTERNS = [
   ['^discard task failed: §1$', '放弃暂存失败：§1'],
   ['^audit task failed: §1$', '操作记录读取失败：§1'],
   ['^stats task failed: §1$', '本地统计读取失败：§1'],
+  // M6 的 6 个耗时命令各有自己的前缀（命令名与 Rust 侧 `format!` 逐字对应），
+  // 这样关卡能证明每条命令的失败都有译文，而不是都落到一句泛泛的「任务失败」。
+  ['^list_library task failed: §1$', '读取共享库失败：§1'],
+  ['^plan_converge task failed: §1$', '计算收敛方案失败：§1'],
+  ['^apply_converge task failed: §1$', '应用收敛方案失败：§1'],
+  ['^shared_doctor task failed: §1$', '共享健康检查失败：§1'],
+  ['^apply_finding_fix task failed: §1$', '修复健康问题失败：§1'],
+  ['^library_migrate task failed: §1$', '迁移共享库失败：§1'],
   ['^op[§1] (§2) is missing a "from"$', '第 §1 个操作（§2）缺少 "from" 字段'],
   ['^cannot read write source §1: §2$', '无法读取写入源 §1：§2'],
   ['^write failed for §1: §2$', '写入 §1 失败：§2'],
@@ -461,6 +469,24 @@ const CODE_ZH = {
   'mcp.noRecordInLibrary': '共享库里没有这条 MCP 服务器的规范形态，无法写入 agent（可能只有名字，或缺了必要字段）',
   'mcp.notMaterialisable': '这条 MCP 服务器缺少必要字段（命令行服务器要有 command，远程服务器要有 url），已拒绝写入',
   'mcp.drift': '共享库与这个 agent 的配置里，这条 MCP 服务器的参数不一致；没有自动改动任何一方',
+  // 共享层（M6）：收敛、健康修复与库迁移的拒绝。
+  // 每一种修法都不同，不能合并成一句「操作失败」：
+  //   converge.diverged        —— 同名副本内容不一致，收敛会覆盖其中一方的改动
+  //   converge.notConvergeable —— 组里没有可动的副本
+  //   doctor.notFixable        —— 这类问题本来就没有单一修法（如硬链接）
+  //   doctor.sourceMissing     —— 重新链接时源位置（库内主副本）已不存在
+  //   doctor.contentChanged    —— 被顶掉的副本与库内不一致，自动重建会覆盖改动
+  //   doctor.unsupportedFix    —— 这个 code 没有对应的修复动作
+  'converge.diverged': '这组同名副本的内容不一致，收敛会覆盖其中一方的改动，请先手工对齐',
+  'converge.notConvergeable': '这组里没有可以收敛的副本',
+  'doctor.notFixable': '这类问题没有可自动执行的修复动作，需要手工处理',
+  'doctor.sourceMissing': '重新链接时源位置已不存在（库内主副本可能被删除了），请先恢复源文件',
+  'doctor.contentChanged': '被替换的副本内容与库内主副本不一致，自动重建会覆盖你的改动，本次没有写入',
+  'doctor.unsupportedFix': '当前版本没有这种问题的修复动作',
+  // 库根迁移（§9.3）。目标不可用要在搬任何东西之前拒绝；失败则保留
+  // `migrating` 标记，重跑从断点继续 —— 两种结局的后续动作不同，所以分两条。
+  'library.migrateTarget': '迁移目标不可用：需要绝对路径，且不能与当前库根互相嵌套；若有另一条未完成的迁移也不会被覆盖',
+  'library.migrateFailed': '共享库迁移中断了：已搬完的部分不会重复搬，修复问题后重跑同一目标即可从断点继续',
   'project.duplicate': '项目已注册',
   'project.notDirectory': '所选路径不是文件夹',
   'project.directoryNotFound': '文件夹不存在',

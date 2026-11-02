@@ -24,7 +24,7 @@ const SRC = path.join(ROOT, 'src', 'renderer');
 const DIST = path.join(SHELL, 'dist');
 
 /** 原样复制，不做任何转换。顺序就是 <script> 的顺序。 */
-const PLAIN = ['theme-init.js', 'engine-zh.js', 'i18n.js', 'app.js', 'styles.css'];
+const PLAIN = ['theme-init.js', 'engine-zh.js', 'i18n.js', 'view-shared.js', 'app.js', 'styles.css'];
 
 const BRIDGE_ANCHOR = '  <script src="engine-zh.js"></script>';
 const BRIDGE_INJECT_LINES = [

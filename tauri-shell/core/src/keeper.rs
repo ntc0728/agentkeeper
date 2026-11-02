@@ -1273,7 +1273,10 @@ impl Keeper {
     }
 
     /// 设置里的链接方式偏好（`linkMethod`，`auto` = 交给能力顺序）。
-    fn link_prefer(&self) -> Option<LinkMethod> {
+    ///
+    /// `pub(crate)`：`shared_ops` 的重链 / 导入动作要按同一份偏好建链接，
+    /// 不能让新建的链接与用户设置里选的方式不一致。
+    pub(crate) fn link_prefer(&self) -> Option<LinkMethod> {
         let raw = self
             .settings()
             .get("linkMethod")
@@ -1308,6 +1311,12 @@ impl Keeper {
     ///
     /// **`kind` 为 `rule` / `memory` 时是另一套编排**：目标是单个文件（`link` 或
     /// `compose`，见 [`Self::enable_rule`]），不走这里的目录收敛逻辑。
+    ///
+    /// **`kind` 为 `mcp` 时也是另一套编排**（M6）：MCP 的事实源是库内规范形态
+    /// `<root>/mcp/servers/<slug>.json`，写盘目标是 agent 的 JSON/TOML 配置里的
+    /// **一条**服务器。§17.9 明确允许「扩这个分支」，只要每种 kind 走自己的编排 ——
+    /// 这里的 `mcp` 分支只是把 `sharing::materialize_plan` 算出的 op 送进事务，
+    /// 与目录收敛那条路没有任何共用语义（详见 [`Self::enable_mcp`]）。
     pub fn enable_asset(&self, input: &Value) -> Value {
         let lib = self.library();
         // 用 `non_empty` 而不是 `prop`：`prop` 对缺失字段返回字符串 "undefined"
@@ -1316,6 +1325,9 @@ impl Keeper {
         let kind = non_empty(input, "kind").unwrap_or_else(|| "skill".to_string());
         if kind == "rule" || kind == "memory" {
             return self.enable_rule(&lib, &kind, input);
+        }
+        if kind == "mcp" {
+            return self.enable_mcp(&lib, input);
         }
         if kind != "skill" {
             return unsatisfied("share.unsupportedKind");
@@ -1704,6 +1716,112 @@ impl Keeper {
         tx
     }
 
+    /// 启用一个 **MCP 服务器**（M6）：把库内规范形态物化到某个 agent / scope 的配置里。
+    ///
+    /// `input`：`{ name, agentId, scope?, projectId?, file? }`。`file` 可选 —— 矩阵的
+    /// `mcp.cells[].file` 会带上解析好的目标配置；不给时按适配器声明顺序挑第一份
+    /// 能「只动一条」的配置（[`sharing::mcp_config_candidates`]）。
+    ///
+    /// 编排全在 [`sharing::materialize_plan`] 里：它读库内记录、算出 open_ops、
+    /// 决定 `DisableStyle`；本函数只负责把 op 送进事务并补上审计元数据。**不写台账**
+    /// —— 台账记的是「链接」，MCP 物化没有目录链接这回事。
+    fn enable_mcp(&self, lib: &library::Library, input: &Value) -> Value {
+        self.operate_mcp(lib, input, true)
+    }
+
+    /// 停用一个 **MCP 服务器**（M6）：按 `DisableStyle` 删掉 agent 配置里的那一条，
+    /// 或把它置为 `enabled:false`；库内记录与其它 agent 的配置一个字节不动。
+    fn disable_mcp(&self, lib: &library::Library, input: &Value) -> Value {
+        self.operate_mcp(lib, input, false)
+    }
+
+    /// 开 / 关一次 MCP 物化的共用主体：差别只有 `on` 与应答里的 reason / action。
+    fn operate_mcp(&self, lib: &library::Library, input: &Value, on: bool) -> Value {
+        // 名字是 MCP 的唯一索引（库内记录、配置里的键都由它决定）。没给 name 时
+        // 从 assetId 反查 —— 与 `disable_asset` 的 skill 分支同一套兜底，避免
+        // 调用方必须同时知道两种 id 形态。
+        let name = match non_empty(input, "name") {
+            Some(n) => n,
+            None => {
+                let resolved = non_empty(input, "assetId")
+                    .and_then(|id| self.index_get(&id))
+                    .map(|a| prop(&a, "name"))
+                    .unwrap_or_default();
+                if resolved.is_empty() {
+                    return unsatisfied("mcp.noRecordInLibrary");
+                }
+                resolved
+            }
+        };
+        let scope = non_empty(input, "scope").unwrap_or_else(|| "global".to_string());
+        let project_dir = self.project_dir_of(input);
+        let mut req = json!({
+            "name": name,
+            "agentId": prop(input, "agentId"),
+            "scope": scope,
+            "on": on,
+        });
+        if let Some(file) = non_empty(input, "file") {
+            req["file"] = json!(store::native_str(Path::new(&file)));
+        }
+        // 显式记录只用于「刚导入、还没落库」的一次性物化（与 materialize_mcp 同口径）。
+        if let Some(record) = input.get("record").filter(|v| v.is_object()) {
+            req["record"] = record.clone();
+        }
+        let plan = match sharing::materialize_plan(
+            lib,
+            &self.user_home,
+            project_dir.as_deref(),
+            &req,
+        ) {
+            Ok(Ok(Some(plan))) => plan,
+            Ok(Ok(None)) => {
+                // 已经是一模一样的状态：零写入是一次成功，不是失败。
+                return json!({
+                    "ok": true,
+                    "written": [],
+                    "skipped": [{
+                        "target": input.clone(),
+                        "reason": if on { "already open" } else { "already closed" },
+                    }],
+                });
+            }
+            Ok(Err(code)) => return json!({ "ok": false, "code": code }),
+            Err(code) => return json!({ "ok": false, "code": code }),
+        };
+        let mut tx = self.store.transaction(
+            &plan.ops,
+            &json!({
+                "kind": "mcp",
+                "action": if on { "enable" } else { "disable" },
+                "agentId": input.get("agentId").cloned().unwrap_or(Value::Null),
+                "projectId": input.get("projectId").cloned().unwrap_or(Value::Null),
+                "assetName": name,
+                "server": plan.server,
+                "file": plan.file,
+            }),
+        );
+        if !tx.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return tx;
+        }
+        self.invalidate();
+        if let Value::Object(m) = &mut tx {
+            m.insert("written".to_string(), json!([plan.file]));
+            m.insert("skipped".to_string(), json!([]));
+            m.insert("file".to_string(), json!(plan.file));
+            m.insert("server".to_string(), json!(plan.server));
+            m.insert("style".to_string(), json!(plan.style.as_str()));
+            m.insert("on".to_string(), json!(on));
+        }
+        tx
+    }
+
+    /// 项目作用域的基准目录（`projects.json` 里登记的 `dir`）。解析不出来返回 `None`。
+    fn project_dir_of(&self, input: &Value) -> Option<String> {
+        registry::get(input.get("projectId").and_then(Value::as_str)?)
+            .and_then(|p| p.get("dir").and_then(Value::as_str).map(|s| s.to_string()))
+    }
+
     /// 往台账里登记（或更新）一条链接。台账读不出来时**不覆盖**，原样报错。
     fn record_link(
         &self,
@@ -1736,6 +1854,11 @@ impl Keeper {
         // 路径，然后把一次**成功的**停用报成 `share.unknownAsset`。
         if kind == "rule" || kind == "memory" {
             return self.disable_rule(&lib, &kind, input);
+        }
+        // MCP（M6，§17.9 允许扩分支）：停用 = 在 agent 的配置里删掉那一条 / 或
+        // 置 `enabled:false`（由 `DisableStyle` 决定），库内记录与其它 agent 不动。
+        if kind == "mcp" {
+            return self.disable_mcp(&lib, input);
         }
         let mut name = non_empty(input, "name").unwrap_or_default();
         if name.is_empty() {

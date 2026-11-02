@@ -24,6 +24,39 @@ const problems = [];
 
 function rel(p) { return path.relative(ROOT, p); }
 
+/**
+ * 渲染进程的全部脚本（按文件名排序）。
+ *
+ * 以前这里硬编码 `app.js` / `i18n.js` / `theme-init.js` 三份；新增
+ * `view-shared.js` 时只要漏改一处，它就会静默逃过「未翻译字符串、内联
+ * style、跨脚本全局冲突、i18n 覆盖率」四条规则，而本地全绿、打包后白屏
+ * （§11.1）。现在改成读目录：新增的 `*.js` 自动纳入，不需要再登记。
+ */
+function rendererScripts() {
+  const dir = path.join(SRC, 'renderer');
+  return fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith('.js'))
+    .sort()
+    .map((f) => path.join(dir, f));
+}
+
+/**
+ * 「i18n 键被用在了哪里」的合并文本：全部渲染脚本 + index.html。
+ *
+ * 正向检查（调用了不存在）与反向检查（定义了没人用）都必须按**整包**算：
+ * 只看 app.js 的话，`view-shared.js` 里新用的键会被报成死键，而拼写错误
+ * 又会检测不到。
+ */
+function rendererUsageText() {
+  const scripts = rendererScripts()
+    .map((f) => fs.readFileSync(f, 'utf8'))
+    .join('\n');
+  const htmlPath = path.join(SRC, 'renderer', 'index.html');
+  const html = fs.existsSync(htmlPath) ? fs.readFileSync(htmlPath, 'utf8') : '';
+  return scripts + '\n' + html;
+}
+
 /* ---- 1. 顶层重复声明 + 被遮蔽的标识符 ---- */
 
 /**
@@ -178,20 +211,17 @@ function checkI18nParity() {
   // 却仍然被用成一个两种语言里都不存在的名字来调用（拼写错误，或者
   // 只在 app.js 里改了名）。这种情况下 t() 会把键本身返回，于是
   // UI 就无声无息地把 "dashboard.enabledCount" 显示给用户。
-  const appPath = path.join(SRC, 'renderer', 'app.js');
-  if (fs.existsSync(appPath)) {
-    const app = fs.readFileSync(appPath, 'utf8');
-    const html = fs.existsSync(path.join(SRC, 'renderer', 'index.html'))
-      ? fs.readFileSync(path.join(SRC, 'renderer', 'index.html'), 'utf8') : '';
-    const used = new Set();
-    for (const m of app.matchAll(/\bt\(\s*'([a-z][\w.]+)'/g)) used.add(m[1]);
-    for (const m of html.matchAll(/data-i18n(?:-placeholder)?="([a-z][\w.]+)"/g)) used.add(m[1]);
-    const unknown = [...used].filter((k) => !en.has(k));
-    for (const k of unknown) {
-      problems.push(`i18n.js  t('${k}') is called but no such key exists — the UI would render the key itself`);
-    }
-    if (!unknown.length && used.size) console.log(`  i18n usage OK (${used.size} keys referenced, all defined)`);
+  // 扫描范围是**全部渲染脚本 + index.html**：新文件里的 t('…') 与
+  // data-i18n 也要参与，否则新页面的拼写错误会静默上屏。
+  const usage = rendererUsageText();
+  const used = new Set();
+  for (const m of usage.matchAll(/\bt\(\s*'([a-z][\w.]+)'/g)) used.add(m[1]);
+  for (const m of usage.matchAll(/data-i18n(?:-placeholder|-title|-label)?="([a-z][\w.]+)"/g)) used.add(m[1]);
+  const unknown = [...used].filter((k) => !en.has(k));
+  for (const k of unknown) {
+    problems.push(`i18n.js  t('${k}') is called but no such key exists — the UI would render the key itself`);
   }
+  if (!unknown.length && used.size) console.log(`  i18n usage OK (${used.size} keys referenced, all defined)`);
 }
 
 /* ---- 5b. i18n：没人引用的键（死重） ---- */
@@ -210,22 +240,20 @@ function checkI18nParity() {
  */
 function checkI18nUnused() {
   const i18nPath = path.join(SRC, 'renderer', 'i18n.js');
-  const appPath = path.join(SRC, 'renderer', 'app.js');
-  if (!fs.existsSync(i18nPath) || !fs.existsSync(appPath)) return;
+  if (!fs.existsSync(i18nPath)) return;
   const i18nSrc = fs.readFileSync(i18nPath, 'utf8');
-  const app = fs.readFileSync(appPath, 'utf8');
-  const html = fs.existsSync(path.join(SRC, 'renderer', 'index.html'))
-    ? fs.readFileSync(path.join(SRC, 'renderer', 'index.html'), 'utf8') : '';
+  // 全部渲染脚本 + index.html：新页面用到的键不能被误报成死键。
+  const usage = rendererUsageText();
 
   const i = i18nSrc.indexOf('  en: {');
   const j = i18nSrc.indexOf('\n  }', i);
   const en = [...i18nSrc.slice(i, j).matchAll(/^\s*'([^']+)':/gm)].map((m) => m[1]);
 
   const roots = new Set();
-  for (const m of app.matchAll(/\bt\(\s*'([a-z][\w.]*)'\s*\+/g)) roots.add(m[1]);
-  for (const m of app.matchAll(/\bt\(\s*`([a-z][\w.]*)\$\{/g)) roots.add(m[1]);
+  for (const m of usage.matchAll(/\bt\(\s*'([a-z][\w.]*)'\s*\+/g)) roots.add(m[1]);
+  for (const m of usage.matchAll(/\bt\(\s*`([a-z][\w.]*)\$\{/g)) roots.add(m[1]);
 
-  const used = (k) => app.includes(`'${k}'`) || app.includes(`"${k}"`) || html.includes(k)
+  const used = (k) => usage.includes(`'${k}'`) || usage.includes(`"${k}"`)
     || [...roots].some((p) => p !== k && k.startsWith(p));
   const dead = en.filter((k) => !used(k));
   if (dead.length) {
@@ -351,11 +379,8 @@ function findTemplateProse(src, file) {
 /* ---- 运行 ---- */
 
 console.log('linting renderer…\n');
-const targets = [
-  path.join(SRC, 'renderer', 'app.js'),
-  path.join(SRC, 'renderer', 'i18n.js'),
-  path.join(SRC, 'renderer', 'theme-init.js')
-];
+// 目录扫描而不是硬编码：新增的渲染脚本自动纳入（§11.1）。
+const targets = rendererScripts();
 
 let shadowCount = 0, hardCount = 0, styleCount = 0;
 for (const f of targets) {
@@ -371,20 +396,22 @@ for (const f of targets) {
     continue;
   }
   shadowCount += checkScope(src, f) ? 0 : 1;
-  // 每个目标都是渲染进程文件。这个守卫防止非渲染进程目标
-  // 悄无声息地继承「未翻译字符串」这条只适用于 UI 的规则。
-  hardCount += f.includes(`${path.sep}renderer${path.sep}`) ? findUntranslated(src, f) : 0;
-  if (f.endsWith("app.js")) hardCount += findTemplateProse(src, f);
+  // 两个词典文件里的字符串**本来就是**译文，不是界面上的裸文案：
+  // 对它们跑「未翻译字符串」只会把每一条中文词条都报成缺陷。
+  // 其余渲染脚本（app.js、theme-init.js、view-shared.js…）仍然要查。
+  const isDictionary = ['i18n.js', 'engine-zh.js'].includes(path.basename(f));
+  if (!isDictionary) {
+    hardCount += f.includes(`${path.sep}renderer${path.sep}`) ? findUntranslated(src, f) : 0;
+    // 模板字面量里的英文散文对所有 UI 渲染脚本生效：新页面同样会把英文拼进
+    // `el('div', {}, \`\${n} items\`)` 里。
+    hardCount += findTemplateProse(src, f);
+  }
   styleCount += findInlineStyles(src, f);
   checkRequires(src, f);
 }
 checkI18nParity();
 checkI18nUnused();
-const collisions = checkGlobalCollisions([
-  path.join(SRC, 'renderer', 'app.js'),
-  path.join(SRC, 'renderer', 'i18n.js'),
-  path.join(SRC, 'renderer', 'theme-init.js')
-]);
+const collisions = checkGlobalCollisions(rendererScripts());
 console.log(`  global collisions  : ${collisions}`);
 
 console.log(`  shadowed identifiers: ${shadowCount}`);

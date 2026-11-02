@@ -332,11 +332,15 @@ impl ConvergePlan {
         })
     }
 
-    /// 可以一键收敛的组数（`Diverged` 不算）。
+    /// 可以一键收敛的组数。
+    ///
+    /// 两条排除：`Diverged` 组不能动；`replace` 为空的组没有可替换的位置
+    /// （典型是「库内只有一份」的 `SingleSource`，它只是被列出来让界面说明现状，
+    /// 点一下也不会有任何写入）。
     pub fn actionable(&self) -> usize {
         self.groups
             .iter()
-            .filter(|g| g.verdict != Verdict::Diverged)
+            .filter(|g| g.verdict != Verdict::Diverged && !g.replace.is_empty())
             .count()
     }
 }
@@ -430,7 +434,22 @@ pub fn plan_converge(assets: &[Value], library: &Library, cap: &LinkCap) -> Conv
         if let Some(n) = lib_node {
             all.push(n);
         }
-        all.extend(copies);
+        // 库内主副本只参与一次：默认库根是 `~/.agents`，它同时被扫描器报成伪 agent
+        // `shared` 的资产 —— 同一物理目录会以「副本」的身份再出现一次。把它当成
+        // 第二份，就会算出一组「保留库内路径、把它替换成指向自己的链接」的假
+        // `identical`（replace 与 keeper 是同一条路径）。
+        //
+        // **但链接要留着**：一条指向库内的链接不是重复副本，它说明这个位置已经
+        // 纳管（「一份真实 + 若干链接」的组仍然不进方案，见下面的 `all.len() > 1`）。
+        let lib_path = store::native_str(&lib_dir);
+        let mut deduped: Vec<CopyNode> = Vec::new();
+        for node in copies {
+            if node.link.is_none() && same_dir(&node.path, &lib_path) {
+                continue;
+            }
+            deduped.push(node);
+        }
+        all.extend(deduped);
 
         // 已经是纯链接、且指向同一个库内主副本的组：没有收敛价值，不列进方案。
         let real: Vec<&CopyNode> = all.iter().filter(|c| c.link.is_none()).collect();
@@ -940,8 +959,13 @@ impl McpPlan {
     }
 }
 
+/// 算「把库内记录物化到某个 agent 配置」要走的 op，**不落盘**。
+///
+/// M6 起 `pub`：`keeper::enable_asset` 的 `mcp` 分支与 `shared_ops` 的修复动作
+/// 都要拿这份 op 列表自己送进 `store::transaction`，并附上各自的审计元数据。
+/// 返回 `Ok(Ok(None))` 表示「这里已经一模一样」——零 op，不是失败。
 #[allow(clippy::type_complexity)]
-fn materialize_plan(
+pub fn materialize_plan(
     library: &Library,
     user_home: &str,
     project_dir: Option<&str>,
@@ -1765,6 +1789,69 @@ mod tests {
         let g = &plan.groups[0];
         assert_eq!(g.verdict, Verdict::SingleSource);
         assert_eq!(g.replace.len(), 1);
+    }
+
+    /// 默认库根（`~/.agents`）下，库内主副本会**同时**被扫描成伪 agent `shared`
+    /// 的资产。回归：它只能算一份 —— 组是 `single`、`copies` 只有一条、`replace`
+    /// 为空，绝不出现「保留库内路径、再把库内路径替换成指向自己的链接」。
+    #[test]
+    fn the_library_copy_is_counted_once_when_the_shared_agent_reports_it() {
+        let t = tmp("libdup");
+        let lib = Library::at(t.0.join("home/.agents"));
+        let keeper = lib.skill_dir("team-wiki");
+        write(&keeper.join("SKILL.md"), "body\n");
+        let assets = vec![json!({
+            "kind": "skill",
+            "name": "team-wiki",
+            "dir": store::native_str(&keeper),
+            "agentId": "shared",
+            "agentLabel": "Shared (~/.agents)",
+            "scope": "global",
+        })];
+        let plan = plan_converge(&assets, &lib, &cap_with_links());
+        assert_eq!(plan.groups.len(), 1);
+        let g = &plan.groups[0];
+        assert_eq!(g.verdict, Verdict::SingleSource);
+        assert_eq!(g.copies.len(), 1);
+        assert_eq!(g.copies[0].path, store::native_str(&keeper));
+        assert!(g.replace.is_empty());
+        assert_eq!(g.keeper.as_deref(), Some(g.copies[0].path.as_str()));
+        assert_eq!(plan.actionable(), 0, "没有可替换的位置，不计入可一键收敛");
+    }
+
+    /// 库内一份 + 另一个 agent 一份全等（且伪 agent `shared` 也报了库内那份）：
+    /// 结果是 `identical`，保留方是库内路径，`replace` 只含 agent 那份。
+    #[test]
+    fn a_library_copy_and_an_agent_copy_converge_without_replacing_the_library() {
+        let t = tmp("libagent");
+        let lib = Library::at(t.0.join("home/.agents"));
+        let keeper = lib.skill_dir("team-wiki");
+        let agent_copy = t.0.join("home/.claude/skills/team-wiki");
+        write(&keeper.join("SKILL.md"), "body\n");
+        write(&agent_copy.join("SKILL.md"), "body\n");
+        let assets = vec![
+            json!({
+                "kind": "skill", "name": "team-wiki",
+                "dir": store::native_str(&agent_copy),
+                "agentId": "claude-code", "agentLabel": "Claude Code", "scope": "global",
+            }),
+            json!({
+                "kind": "skill", "name": "team-wiki",
+                "dir": store::native_str(&keeper),
+                "agentId": "shared", "agentLabel": "Shared (~/.agents)", "scope": "global",
+            }),
+        ];
+        let plan = plan_converge(&assets, &lib, &cap_with_links());
+        assert_eq!(plan.groups.len(), 1);
+        let g = &plan.groups[0];
+        let keeper_str = store::native_str(&keeper);
+        let agent_str = store::native_str(&agent_copy);
+        assert_eq!(g.verdict, Verdict::Identical);
+        assert_eq!(g.keeper.as_deref(), Some(keeper_str.as_str()));
+        assert_eq!(g.replace.len(), 1);
+        assert_eq!(g.replace[0].path, agent_str);
+        assert_eq!(g.copies.len(), 2);
+        assert_eq!(plan.actionable(), 1);
     }
 
     /// 本机没有链接能力时：给出分组解释原因，但**绝不**建议替换。

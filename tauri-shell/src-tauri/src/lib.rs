@@ -641,6 +641,109 @@ async fn import_bundle(app: tauri::AppHandle) -> Value {
         .unwrap_or_else(|e| json!({ "ok": false, "error": format!("import task failed: {}", e) }))
 }
 
+// --- 共享资产（M6）--------------------------------------------------------
+//
+// 这 8 个命令是共享页的全部数据面：矩阵数据源、收敛方案与应用、单个位置
+// 的开关、健康检查与一键修复、库根迁移。命令层只做「打开 Keeper + 调用
+// core」的适配，所有判定（哪些路径归哪个 agent、一个位置算不算已启用）
+// 都在 `core::library_view` / `core::shared_ops` 里，界面拿到的就是契约
+// 形状，不再二次推导。
+//
+// 线程分界与上面的写路径同一口径：凡是会遍历目录、做内容哈希的只读查询，
+// 以及可能一次写多组文件的动作，都走 `spawn_blocking`；单条链接的开关只
+// 做一次事务，与 `save_skill` 同级，保持同步。
+
+/// `list_library` —— 共享矩阵的唯一数据源。
+///
+/// 一次调用要扫库内主副本、逐个 agent 的声明路径做链接判定，必要时还要
+/// 探测本机链接能力；这些在 UI 线程上做会让共享页打开的那一刻冻住整个
+/// 窗口，所以整段丢给阻塞池。
+#[tauri::command]
+async fn list_library() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| core::library_view::list_library(&open_keeper()))
+        .await
+        .map_err(|e| format!("list_library task failed: {}", e))
+}
+
+/// `plan_converge` —— 只出收敛方案，零写入。
+///
+/// 方案要扫描全部资产并逐组做目录摘要比较，与 `scan` 同级重，所以同样
+/// 不占 UI 线程。只读契约由 `core::shared_ops::converge_plan` 保证。
+#[tauri::command]
+async fn plan_converge() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| core::shared_ops::converge_plan(&open_keeper()))
+        .await
+        .map_err(|e| format!("plan_converge task failed: {}", e))
+}
+
+/// `apply_converge` —— 按组应用收敛方案。
+///
+/// 每个可动组都要拷贝目录、删旧位置、建链接，并各自走一次事务；这是本页
+/// 最重的写路径（可能一次处理几十组），必须离开 UI 线程。
+#[tauri::command]
+async fn apply_converge(payload: Value) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core::shared_ops::apply_converge(&open_keeper(), &payload)
+    })
+    .await
+    .map_err(|e| format!("apply_converge task failed: {}", e))
+}
+
+/// `enable_asset` —— 把一个 agent 位置接到库内主副本。
+///
+/// 保持同步：它只有一次 `keeper.enable_asset` 事务（复制 → 删除 → 建链接），
+/// 与 `save_skill` 同量级；为一次事务付一次线程跳转没有收益。
+#[tauri::command]
+fn enable_asset(payload: Value) -> Value {
+    open_keeper().enable_asset(&payload)
+}
+
+/// `disable_asset` —— 断开一个 agent 位置，库内主副本保留。
+///
+/// 同样同步：单条链接的删除加台账更新，一次事务就结束。
+#[tauri::command]
+fn disable_asset(payload: Value) -> Value {
+    open_keeper().disable_asset(&payload)
+}
+
+/// `shared_doctor` —— 共享页健康检查。
+///
+/// 它会先跑一整场扫描，再对每条受管链接做内容比对，是整个共享页最重的
+/// 只读调用；健康 tab 虽然是懒加载，但一旦触发就必须在阻塞池里跑。
+#[tauri::command]
+async fn shared_doctor() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| core::shared_ops::doctor_report(&open_keeper()))
+        .await
+        .map_err(|e| format!("shared_doctor task failed: {}", e))
+}
+
+/// `apply_finding_fix` —— 修一条健康发现。
+///
+/// 修法可能包含重算摘要、重建台账或整组收敛（`asset.duplicated` 会转调
+/// `apply_converge`），耗时不可预估，所以与做检查一样离开 UI 线程。
+#[tauri::command]
+async fn apply_finding_fix(payload: Value) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core::shared_ops::apply_finding_fix(&open_keeper(), &payload)
+    })
+    .await
+    .map_err(|e| format!("apply_finding_fix task failed: {}", e))
+}
+
+/// `library_migrate` —— 迁移库根（幂等、可断点续跑）。
+///
+/// 它要逐个顶层条目 rename（跨卷时退回 copy + rm）并重指每条链接；几百个
+/// skill 时会跑很久，只能在阻塞池里做。中断后的进度由台账的 `migrating`
+/// 标记承载，重跑会接着上次的位置继续。
+#[tauri::command]
+async fn library_migrate(payload: Value) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core::shared_ops::migrate_library(&open_keeper(), &payload)
+    })
+    .await
+    .map_err(|e| format!("library_migrate task failed: {}", e))
+}
+
 // --- 更新通道 -------------------------------------------------------------
 //
 // 状态机住在 `core::update::manager` 里；这些命令是渲染层
@@ -1165,6 +1268,14 @@ pub fn run() {
             install_skill,
             export_bundle,
             import_bundle,
+            list_library,
+            plan_converge,
+            apply_converge,
+            enable_asset,
+            disable_asset,
+            shared_doctor,
+            apply_finding_fix,
+            library_migrate,
             update_status,
             update_check,
             update_releases,

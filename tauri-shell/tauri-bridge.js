@@ -40,6 +40,20 @@
     // 本身递过去会让调用失败，而渲染层没有 catch，按钮看上去就像点不动。
     saveSkill: function (payload) { return call('save_skill', { payload: payload }); },
     upsertMcp: function (payload) { return call('upsert_mcp', { payload: payload }); },
+
+    // --- 共享资产（M6）---
+    // 前三个查询没有参数；payload 型的对象挂在 `payload` 键下面（原因见
+    // `saveSkill` 上方那段说明）。`list_library` / `plan_converge` /
+    // `shared_doctor` 是耗时命令，Rust 侧走阻塞池，这里照常 await。
+    listLibrary: function () { return call('list_library'); },
+    planConverge: function () { return call('plan_converge'); },
+    applyConverge: function (payload) { return call('apply_converge', { payload: payload }); },
+    enableAsset: function (payload) { return call('enable_asset', { payload: payload }); },
+    disableAsset: function (payload) { return call('disable_asset', { payload: payload }); },
+    sharedDoctor: function () { return call('shared_doctor'); },
+    applyFindingFix: function (payload) { return call('apply_finding_fix', { payload: payload }); },
+    libraryMigrate: function (payload) { return call('library_migrate', { payload: payload }); },
+
     deleteMcp: function (assetId) { return call('delete_mcp', { args: { assetId: assetId } }); },
     deleteAsset: function (assetId) { return call('delete_asset', { args: { assetId: assetId } }); },
     distribute: function (assetId, targets) { return call('distribute', { args: { assetId: assetId, targets: targets } }); },

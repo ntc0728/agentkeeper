@@ -423,6 +423,10 @@ fn check_scan_links(
         let path = store::native_str(Path::new(dir));
         let kind = a.get("kind").and_then(Value::as_str).unwrap_or_default();
         let name = a.get("name").and_then(Value::as_str).unwrap_or_default();
+        // 修复入口用 assetId / scope 做索引（M6 的 `apply_finding_fix`）。它们是
+        // 事实字段，不参与任何判定 —— `findings[].detail` 的其余键才是判据。
+        let asset_id = a.get("id").cloned().unwrap_or(Value::Null);
+        let scope = a.get("scope").cloned().unwrap_or(Value::Null);
 
         if method == LinkMethod::Hardlink {
             c.push(DoctorFinding {
@@ -432,6 +436,8 @@ fn check_scan_links(
                 detail: json!({
                     "method": LinkMethod::Hardlink.as_str(),
                     "target": link.get("src").cloned().unwrap_or(Value::Null),
+                    "assetId": asset_id,
+                    "scope": scope,
                 }),
                 fixable: false,
                 fix: None,
@@ -454,6 +460,8 @@ fn check_scan_links(
                     "name": name,
                     "target": store::native_str(&target),
                     "source": "scan",
+                    "assetId": asset_id,
+                    "scope": scope,
                 }),
                 fixable: true,
                 fix: Some(FIX_RELINK),
@@ -471,6 +479,8 @@ fn check_scan_links(
                     "kind": kind,
                     "name": name,
                     "target": store::native_str(&target),
+                    "assetId": asset_id,
+                    "scope": scope,
                 }),
                 fixable: true,
                 fix: Some(FIX_ADOPT),
@@ -489,6 +499,8 @@ fn check_scan_links(
                         "name": name,
                         "target": store::native_str(&target),
                         "method": method.as_str(),
+                        "assetId": asset_id,
+                        "scope": scope,
                     }),
                     fixable: true,
                     fix: Some(FIX_REBUILD),
@@ -506,6 +518,10 @@ fn check_scan_links(
 struct SkillCopy {
     path: String,
     agent_id: String,
+    /// 扫描结果里的资产 id / scope（库内主副本没有对应资产，为 `None` / `"library"`）。
+    /// M6 的修复入口据此把「收敛」转回一个扫描资产；不参与重复内容判定。
+    asset_id: Option<String>,
+    scope: String,
 }
 
 /// `asset.duplicated`：同一个 slug 有 ≥2 份**真实目录**且内容摘要相同。
@@ -559,6 +575,12 @@ fn check_duplicated_skills(library: &Library, assets: &[Value], c: &mut Collecto
             .push(SkillCopy {
                 path: store::native_str(Path::new(dir)),
                 agent_id: agent_id.to_string(),
+                asset_id: a.get("id").and_then(Value::as_str).map(|s| s.to_string()),
+                scope: a
+                    .get("scope")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
             });
     }
 
@@ -585,6 +607,8 @@ fn check_duplicated_skills(library: &Library, assets: &[Value], c: &mut Collecto
                 .push(SkillCopy {
                     path: store::native_str(&dir),
                     agent_id: "library".to_string(),
+                    asset_id: None,
+                    scope: "library".to_string(),
                 });
         }
     }
@@ -612,6 +636,11 @@ fn check_duplicated_skills(library: &Library, assets: &[Value], c: &mut Collecto
             }
             let paths: Vec<String> = hits.iter().map(|c| c.path.clone()).collect();
             let agents: Vec<String> = hits.iter().map(|c| c.agent_id.clone()).collect();
+            let asset_ids: Vec<String> = hits
+                .iter()
+                .filter_map(|c| c.asset_id.clone())
+                .collect();
+            let scopes: Vec<String> = hits.iter().map(|c| c.scope.clone()).collect();
             c.push(DoctorFinding {
                 code: ASSET_DUPLICATED,
                 severity: SEV_INFO,
@@ -621,6 +650,8 @@ fn check_duplicated_skills(library: &Library, assets: &[Value], c: &mut Collecto
                     "slug": slug_name,
                     "copies": paths,
                     "agents": agents,
+                    "assetIds": asset_ids,
+                    "scopes": scopes,
                     "bytes": bytes,
                 }),
                 fixable: true,
