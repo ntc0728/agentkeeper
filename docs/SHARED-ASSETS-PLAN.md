@@ -188,14 +188,22 @@ M7 命令行 / MCP 工具 / 迁移兼容
 
 1. 新增 `core/src/linkfs.rs`：链接原语与能力探测
    - `capability() -> LinkCap`：探测 junction / symlink / hardlink 可用性，缓存。
-   - `create_dir_link(src, dst) -> Result<Method>`：junction → symlink → 失败。
-   - `create_file_link(src, dst) -> Result<Method>`：hardlink → symlink → 失败。
-   - `read_link_target(p) -> Option<PathBuf>`：**必须能识别 junction**（`fs::read_link` 对 junction 可用，
-     但需用 `symlink_metadata().file_type().is_symlink()` 统一判定；journal 里的 `is_dir` 标志保留）。
+   - `create_dir_link(src, dst) -> Result<Method>`：~~junction → symlink → 失败~~
+     **symlink → junction → 失败**（P0 实测定论，见实施手册 §12-4 / §16.2）。
+   - `create_file_link(src, dst) -> Result<Method>`：~~hardlink → symlink → 失败~~
+     **symlink → hardlink → 失败**（hardlink 会被 agent 的「写临时文件 + rename」
+     打断，不当首选，实施手册 §12-3）。
+   - `read_link_target(p) -> Option<PathBuf>`：~~`fs::read_link` 对 junction 可用~~
+     **两句都不成立**：`read_link` 对 junction 在部分情况返回 Err，
+     `symlink_metadata().file_type().is_symlink()` 也可能为 false。读目标必须走
+     `FSCTL_GET_REPARSE_POINT`，判定类型必须走 `linkfs::entry_link_kind`
+     （实施手册 §12-1 / §3.3）。
    - `is_link(p)` / `points_to(p, expected)` / `identity(p)`：用 `realpath` 做**身份**比较
      （现有 `dedupe_by_physical_path` 已做 canonicalize，复用同一份缓存）。
 2. `store.rs` 扩两个 Op：`Op::link_dir(dst, src)`、`Op::link_file(dst, src)`。
-   - 快照侧**零改动**：`DirSnap::Link` 已经能把链接原样捕获/还原。
+   - ~~快照侧**零改动**~~ **必须改**：快照用 `ft.is_symlink()` 认不出 junction，会把
+     链接当目录、顺着链接把库内整棵树快照进内存，还原时写成真实副本
+     （实施手册 §12-2 / §3.4⑤）。`DirSnap::Link` 记录链接种类，还原按种类分派。
    - 失败还原时，链接还原继续走 `symlink_dir/symlink_file`；**junction 还原**要补一条：
      捕获时记录 `LinkKind::Junction`，还原用 reparse point（否则还原出的链接类型变了，
      下层的「零特权」前提就破了）。
@@ -203,7 +211,8 @@ M7 命令行 / MCP 工具 / 迁移兼容
 
 **验收**
 - 在同一事务里「删除 agent 侧独立目录 + 建链接」，中途人为注入失败 → 目录原样回来（含 mtime 与链接类型）。
-- 非管理员会话下，`create_dir_link` 返回 `method: "junction"`，不是 error。
+- 非管理员会话下，`create_dir_link` 返回 `Symlink` **或** `Junction` 都算通过——首选项由
+  P0 实测定，本机实测 symlink 可用所以返回 `symlink`（实施手册 §12-4 / §16.2）。
 - 台账与磁盘不一致时，`doctor` 报 `link.ledgerDrift`，且不改磁盘。
 
 **不做**：网络盘、跨卷 hardlink、macOS/Linux 的差异处理（本期不验收）。
@@ -284,8 +293,11 @@ M7 命令行 / MCP 工具 / 迁移兼容
    不静默覆盖；确认框里给出三方 diff（库内版本 / 盘上版本 / 上次生成版本）。
 3. **记忆**：`MEMORY.md` + `memory/` 目录整体走链接；若目标 agent 只认单文件，则退化为 `compose`
    （把库内 `MEMORY.md` 聚合进去）。
-4. **规则改名映射**：`AGENTS.md` ↔ `CLAUDE.md` ↔ `GEMINI.md` 是「同一个内容、不同文件名」，
-   矩阵里对这几列给出「同源」提示，避免用户以为要维护三份。
+4. **规则改名映射**：~~`AGENTS.md` ↔ `CLAUDE.md` ↔ `GEMINI.md` 是「同一个内容、不同文件名」，
+   矩阵里对这几列给出「同源」提示~~ **按适配器表实际声明做，不硬编码文件名对**：
+   `rules` 是各 agent 各自声明的一串文件名（`pi` 用 `AGENTS.md`、`workbuddy` 用
+   `SOUL.md`/`IDENTITY.md`），`CLAUDE.md`/`GEMINI.md` 是否在表里要先确认
+   （实施手册 §12-7）。
 
 **验收**
 - `AGENTS.md` 被 4 个 agent 引用，改动库内版本 → 4 个位置同时生效（link 模式）。
