@@ -136,6 +136,10 @@
     {
       "kind": "fix",
       "text": "删除库内 SKILL.md（目录还在）不再静默：健康检查报 link.dangling(masterUnreadable)，矩阵单元格显示错误而不是假装启用"
+    },
+    {
+      "kind": "opt",
+      "text": "计划文档与实施手册的口径并轨：修正降级链方向等 5 处已被实施推翻的说法"
     }
   ]
 }
