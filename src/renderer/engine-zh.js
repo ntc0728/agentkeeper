@@ -446,6 +446,7 @@ const CODE_ZH = {
   'rule.foreignEdit': '「§1」里的共享区块被你改过了；为避免覆盖你的编辑，本次没有写入。请先处理这处差异再同步',
   'rule.mdcLinkOnly': '「§1」是带 frontmatter 的 .mdc 规则文件，只能以链接方式共享，不能拼接区块',
   'rule.noTarget': '没有找到可共享的规则文件：这个 agent 或项目下没有声明对应的规则路径',
+  'rule.targetUnreadable': '「§1」读不出来（权限或被占用）；为避免当成空文件覆盖你的内容，本次没有写入。请先解决占用再同步',
   'link.ledgerDrift': '链接台账与磁盘上的实际情况不一致；请让健康检查以磁盘为准重建台账',
   'store.corruptTransaction': '事务记录已损坏',
   'store.opFieldMissing': '第 §1 项操作缺少 op 字段',

@@ -1489,7 +1489,12 @@ pub fn rule_plan(library: &Library, target: &RuleTarget, mode: Option<RuleMode>)
                     // 目标还不存在、库里也没有：没有内容可 link。
                     return RulePlan::refused(&file, mode, "rule.noTarget", json!({ "file": file }));
                 }
-                let body = std::fs::read_to_string(file_path).unwrap_or_default();
+                // 读失败（权限、被占用）绝不能当成「文件是空的」：那会让主副本
+                // 里落进一份空内容，随后启用把目标换成指向这份空主副本的链接
+                // —— 用户的原文一个字节都找不回来。宁可拒绝，让人先解决占用。
+                let Ok(body) = std::fs::read_to_string(file_path) else {
+                    return RulePlan::refused(&file, mode, "rule.targetUnreadable", json!({ "file": file }));
+                };
                 ops.push(Op::write(&keeper, &body));
             }
             // 目标位置：真实文件先删，再建链接（顺序不能反，§11.3）。
@@ -1506,12 +1511,19 @@ pub fn rule_plan(library: &Library, target: &RuleTarget, mode: Option<RuleMode>)
             }
         }
         RuleMode::Compose => {
-            let raw = std::fs::read_to_string(file_path).unwrap_or_default();
+            // 目标文件与库内主副本**任一**读失败都拒绝（权限、被占用）：把失败
+            // 当成空文件会让「圈区块」变成「清空文件」，那正是这里绝不做的事。
+            let Ok(raw) = std::fs::read_to_string(file_path) else {
+                return RulePlan::refused(&file, mode, "rule.targetUnreadable", json!({ "file": file }));
+            };
             // 区块内容 = 库内主副本的内容。库里没有主副本时退回目标文件自己，
             // 于是第一次 compose 得到一个「原有内容被圈成受管区块」的文件
             // （一个字节都没被改写），用户看得见它成了受管区块。
             let body = if keeper_path.exists() {
-                std::fs::read_to_string(keeper_path).unwrap_or_default()
+                let Ok(keeper_body) = std::fs::read_to_string(keeper_path) else {
+                    return RulePlan::refused(&file, mode, "rule.targetUnreadable", json!({ "file": keeper_path.to_string_lossy() }));
+                };
+                keeper_body
             } else {
                 raw.clone()
             };
@@ -1572,7 +1584,11 @@ pub fn rule_plan(library: &Library, target: &RuleTarget, mode: Option<RuleMode>)
 /// 只删区块，文件本身留着 —— `compose` 从来没有把文件变成链接，停用它就是把
 /// 我们放进去的那一截拿走。区块之外的内容一个字节都不动。
 pub fn uncompose_plan(file: &str, slug: &str) -> RulePlan {
-    let raw = std::fs::read_to_string(file).unwrap_or_default();
+    // 读失败不能当成空文件：`remove_block("") == ""` 会让这次停用被当成
+    // 「本来就没有区块」而静默成功，用户以为已停用、盘上却什么都没动。
+    let Ok(raw) = std::fs::read_to_string(file) else {
+        return RulePlan::refused(file, RuleMode::Compose, "rule.targetUnreadable", json!({ "file": file, "slug": slug }));
+    };
     let next = compose::remove_block(&raw, slug);
     RulePlan {
         file: file.to_string(),

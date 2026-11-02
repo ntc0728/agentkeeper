@@ -2331,3 +2331,18 @@ node scripts/tauri-i18n.js    MISS 0 / CODE-MISS 0（library.trashFailed 已进 
 node scripts/test-affected.js 连跑 3 次全绿（此前一次失败为 §11.2 已知的 update::manager 并发噪声）
 完整规模迁移验收              AK_P6_SKILLS=200 → 1 passed（261.13 s，400 条链接全部重指、重跑零写入）
 ```
+
+### 23.6 跨阶段硬约束审核（第 5 路，补跑）
+
+> 前一轮两次中途失败的跨阶段审核重跑完成，结论 **PASS-WITH-ISSUES（2 低危）**，
+> 六项核对全部符合：C1（core 0 处 tauri 引用）、§15 三处不变量（均为规格允许
+> 扩口，无死代码残留）、静默损坏扫描（migrate_library 为唯一批准例外且 journal
+> 自洽）、删除顺序（全部 delete→link 同事务）、并发 invalidate（写路径全覆盖）、
+> §13 终验（520 passed / 8 gates / 0 MISS / ui-audit 0 / clippy 无新增）。
+
+成立并已清零（2 处，均为低危）：
+
+| # | 位置 | 问题 | 清零方式 |
+|---|---|---|---|
+| 1 | `sharing.rs` 三处 `read_to_string().unwrap_or_default()` | 读失败（权限/占用）被当成「文件是空的」：compose 首次启用会把空内容写进库、再把目标换成指向它的链接（用户原文找不回）；uncompose 会把停用静默报成成功 | 三处全部改为读失败即 `RulePlan::refused`，新 code `rule.targetUnreadable`（已进 CODE_ZH，带 §1 文件占位） |
+| 2 | 新增测试目标各 1 条 clippy warning | `sharing.rs:602` 借用表达式（本轮新增的 repoint 测试） | 清零。`contract.rs:1447` 的 assert_eq! 字面布尔为**既有**（M7 前就在），不动 |

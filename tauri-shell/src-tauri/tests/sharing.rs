@@ -599,10 +599,11 @@ fn enabling_repoints_a_link_that_points_at_the_wrong_master_copy() {
     let dst_path = std::path::Path::new(&dst);
     assert!(linkfs::is_link(dst_path), "fixture must start from a linked state");
     linkfs::unlink(dst_path).expect("unlink fixture link");
-    std::fs::create_dir_all(&fx.library_skill("notes")).expect("notes master");
-    std::fs::write(join(&fx.library_skill("notes"), &["SKILL.md"]), "# notes\n").expect("write notes");
+    let notes_master = fx.library_skill("notes");
+    std::fs::create_dir_all(&notes_master).expect("notes master");
+    std::fs::write(join(&notes_master, &["SKILL.md"]), "# notes\n").expect("write notes");
     linkfs::create_dir_link(
-        std::path::Path::new(&fx.library_skill("notes")),
+        std::path::Path::new(&notes_master),
         dst_path,
         None,
     )
