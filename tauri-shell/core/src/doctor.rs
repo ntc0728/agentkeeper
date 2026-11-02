@@ -142,6 +142,15 @@ impl DoctorReport {
     }
 }
 
+/// 主副本的**关键内容**还在吗？
+///
+/// 目录级 `exists()` 捕捉不到「目录在、SKILL.md 被删」——而那正是 agent 读不到
+/// 内容的形态（§13 终验 #11）。skill 的关键内容是 `SKILL.md`；rule / memory 的
+/// 主副本**本身**是单个文件，目录级判定对它们已经足够（目录在即文件在）。
+fn master_unreadable(target: &Path, kind: &str) -> bool {
+    kind == "skill" && !target.join("SKILL.md").is_file()
+}
+
 /// code 在报告里的固定顺序。按 §7.3 的表格从上到下，方便人对着文档读。
 fn code_rank(code: &str) -> u8 {
     match code {
@@ -295,6 +304,7 @@ fn check_ledger(ledger: &crate::library::Ledger, c: &mut Collector) {
                         severity: SEV_CRITICAL,
                         path,
                         detail: json!({
+                            "reason": "targetMissing",
                             "kind": kind,
                             "name": name,
                             "target": store::native_str(&target),
@@ -302,6 +312,28 @@ fn check_ledger(ledger: &crate::library::Ledger, c: &mut Collector) {
                         }),
                         fixable: true,
                         fix: Some(FIX_RELINK),
+                    });
+                }
+                Some(target) if master_unreadable(&target, kind) => {
+                    // 目标目录还在，但**主副本的关键内容没了**（skill 没有
+                    // SKILL.md）。§13 终验 #11 的字面场景：删库内 SKILL.md，
+                    // 各 agent 侧都必须报出来 —— 目录级 `exists()` 捕捉不到它，
+                    // 而 agent 读内容确实会失败，静默等于「界面说健康、agent
+                    // 实际坏了」。relink 修不了内容缺失（没有可指的内容），
+                    // 所以 fixable: false，诊断信息在 detail 里。
+                    c.push(DoctorFinding {
+                        code: LINK_DANGLING,
+                        severity: SEV_CRITICAL,
+                        path,
+                        detail: json!({
+                            "reason": "masterUnreadable",
+                            "kind": kind,
+                            "name": name,
+                            "target": store::native_str(&target),
+                            "src": entry.src,
+                        }),
+                        fixable: false,
+                        fix: None,
                     });
                 }
                 Some(target) if !linkfs::same_target(&target, src) => {
@@ -456,6 +488,7 @@ fn check_scan_links(
                 severity: SEV_CRITICAL,
                 path,
                 detail: json!({
+                    "reason": "targetMissing",
                     "kind": kind,
                     "name": name,
                     "target": store::native_str(&target),
@@ -465,6 +498,27 @@ fn check_scan_links(
                 }),
                 fixable: true,
                 fix: Some(FIX_RELINK),
+            });
+            continue;
+        }
+        if master_unreadable(&target, kind) {
+            // 扫描侧同样要接住「目录在、SKILL.md 没了」（§13 终验 #11 的字面
+            // 场景）：agent 读内容会失败，静默就是「界面说健康、agent 实际坏」。
+            c.push(DoctorFinding {
+                code: LINK_DANGLING,
+                severity: SEV_CRITICAL,
+                path,
+                detail: json!({
+                    "reason": "masterUnreadable",
+                    "kind": kind,
+                    "name": name,
+                    "target": store::native_str(&target),
+                    "source": "scan",
+                    "assetId": asset_id,
+                    "scope": scope,
+                }),
+                fixable: false,
+                fix: None,
             });
             continue;
         }

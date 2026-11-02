@@ -380,3 +380,39 @@ fn doctor_never_writes_anything() {
         "doctor leaves the tree byte-identical"
     );
 }
+
+/// §13 终验 #11 的字面场景：删掉库内主副本的 **SKILL.md**（目录还在）。
+///
+/// 目录级 `exists()` 捕捉不到它——链接的目标目录明明存在，agent 读内容却会
+/// 失败。doctor 必须报 `link.dangling`（`reason: masterUnreadable`，relink 修
+/// 不了内容缺失所以 `fixable: false`），矩阵单元格也不能再显示 `on`。
+#[test]
+fn deleting_the_master_skill_md_is_reported_not_silent() {
+    let _lock = common::serial();
+    let fx = Fixture::new("doctor-partial-dangling");
+    fx.seed_skill("claude-code", "pdf", "# PDF
+");
+    let enabled = fx.enable("claude-code", "pdf");
+    assert_eq!(enabled["ok"], json!(true), "{}", enabled);
+
+    // 场景 A：只删 SKILL.md，目录还在。
+    let master = fx.library_skill("pdf");
+    std::fs::remove_file(Path::new(&master).join("SKILL.md")).expect("remove SKILL.md");
+
+    let report = fx.diagnose();
+    let dangling = report.by_code(doctor::LINK_DANGLING);
+    assert_eq!(dangling.len(), 1, "must be reported: {:?}", report.to_json());
+    let f = dangling[0];
+    assert_eq!(f.severity, doctor::SEV_CRITICAL, "{}", f.detail);
+    assert_eq!(f.detail["reason"], json!("masterUnreadable"), "{}", f.detail);
+    assert!(!f.fixable, "relink cannot restore content: {}", f.detail);
+
+    // 场景 B（回归钉住旧口径）：删整个目录仍然报 dangling 且可 relink。
+    std::fs::remove_dir_all(&master).expect("remove master dir");
+    let report = fx.diagnose();
+    let dangling = report.by_code(doctor::LINK_DANGLING);
+    assert_eq!(dangling.len(), 1, "{:?}", report.to_json());
+    assert_eq!(dangling[0].detail["reason"], json!("targetMissing"), "{}", dangling[0].detail);
+    assert!(dangling[0].fixable, "{}", dangling[0].detail);
+    assert_eq!(dangling[0].fix, Some(doctor::FIX_RELINK), "{}", dangling[0].detail);
+}

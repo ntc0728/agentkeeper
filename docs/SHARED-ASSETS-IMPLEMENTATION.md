@@ -1814,7 +1814,7 @@ Tauri 命令与 `tauri-bridge.js`（M6）、共享页 `view-shared.js` 与 i18n�
 
 | code | 级别 | 判据 | fix | 数据来源 |
 |---|---|---|---|---|
-| `link.dangling` | critical | 链接的 `read_target` 有值、但目标 `!exists` | `relink` | 台账 `dst` ∪ 扫描资产 `meta.link` |
+| `link.dangling` | critical | 链接的 `read_target` 有值、但目标 `!exists`（`reason: targetMissing`，可 relink）；或目标存在但 skill 主副本没有 SKILL.md（`reason: masterUnreadable`，内容缺失 relink 修不了，`fixable: false`） | `relink`（仅 targetMissing） | 台账 `dst` ∪ 扫描资产 `meta.link` |
 | `link.unmanaged` | info | 链接目标存在、但不在库根下 | `adopt` | 扫描资产（skill 目录） |
 | `link.hijacked` | critical | 台账有记录，路径存在但**已不是链接**（被换成真实目录/文件） | `relink`（仅 `contentMatches` 时 `fixable`） | 台账 |
 | `link.fragile` | info | `linkfs::link_kind(p) == Some(Hardlink)` | —（只提示） | 台账 ∪ 扫描 |
@@ -2346,3 +2346,32 @@ node scripts/test-affected.js 连跑 3 次全绿（此前一次失败为 §11.2 
 |---|---|---|---|
 | 1 | `sharing.rs` 三处 `read_to_string().unwrap_or_default()` | 读失败（权限/占用）被当成「文件是空的」：compose 首次启用会把空内容写进库、再把目标换成指向它的链接（用户原文找不回）；uncompose 会把停用静默报成成功 | 三处全部改为读失败即 `RulePlan::refused`，新 code `rule.targetUnreadable`（已进 CODE_ZH，带 §1 文件占位） |
 | 2 | 新增测试目标各 1 条 clippy warning | `sharing.rs:602` 借用表达式（本轮新增的 repoint 测试） | 清零。`contract.rs:1447` 的 assert_eq! 字面布尔为**既有**（M7 前就在），不动 |
+
+### 23.7 「部分内容删除不报悬空」评审与裁决（多维度验证轮）
+
+> 多维度验证抓到的口径偏差：§13 终验 #11 的字面是「删库内 SKILL.md → agent 侧
+> 报 `link.dangling`」，而 M5 实现的 dangling 判据是**目录级**（`read_target`
+> 有值但 `!exists()`）——目录在、SKILL.md 被删时不报，矩阵还显示 `on`，agent
+> 读内容却会失败。实测复现：doctor 0 findings，agent 侧 `No such file`。
+
+**裁决：按 §13 字面收紧（已实施）。** 理由：
+
+1. §15 的立场是「拿不准时宁可给出可读的报告」——「界面说健康、agent 实际坏了」
+   正是这条立场禁止的静默形态；
+2. 场景 A（删主副本内的单文件）比场景 B（删整个目录）**更常见**：用户整理库内
+   skill、误删 `assets/ref.txt` 都落在这一格；
+3. 不新增 code、不动七类分类学：`dangling` 的语义本就是「agent 透过这条链接读
+   不到它该读到的内容」，目录消失只是其中一种成因。补的是成因维度
+   `detail.reason`，不是新的类别。
+
+实施口径（两侧同改，回归钉死在 `deleting_the_master_skill_md_is_reported_not_silent`）：
+
+| 场景 | reason | fixable | fix | 矩阵单元格 |
+|---|---|---|---|---|
+| 目标目录不存在（旧口径，不变） | `targetMissing` | true | `relink` | 不受影响 |
+| 目录在、skill 主副本没有 SKILL.md（新） | `masterUnreadable` | **false**（relink 无内容可指） | — | `error` + `reason` |
+
+`master_unreadable` 只对 `kind == "skill"` 生效：rule / memory 的主副本本身就是
+单个文件，目录级判定对它们已经足够。`library_view::skill_cell` 与 doctor 用同一
+判据（两处实现，注释互指），「修内容」没有一键动作——内容回不来是事实，如实
+呈现比假装可修诚实。

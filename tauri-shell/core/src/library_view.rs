@@ -348,11 +348,21 @@ fn skill_cell(lib: &Library, target: &str) -> Value {
         Err(e) => return json!({ "state": "error", "reason": e.to_string() }),
     };
     if let Some(method) = linkfs::entry_link_kind(path) {
-        return if lib.owns_target(path) {
-            json!({ "state": "on", "path": target, "method": method.as_str() })
-        } else {
-            json!({ "state": "foreign", "path": target, "method": method.as_str() })
-        };
+        if !lib.owns_target(path) {
+            return json!({ "state": "foreign", "path": target, "method": method.as_str() });
+        }
+        // 链接指向库内但主副本的关键内容没了（skill 没有 SKILL.md）：
+        // 不能显示 `on` —— 那会让用户以为共享层健康，而 agent 读内容确实会
+        // 失败（§13 终验 #11 的字面场景）。按读盘失败的既有状态报 `error`。
+        if master_unreadable(target) {
+            return json!({
+                "state": "error",
+                "path": target,
+                "method": method.as_str(),
+                "reason": "masterUnreadable",
+            });
+        }
+        return json!({ "state": "on", "path": target, "method": method.as_str() });
     }
     if meta.is_dir() {
         json!({ "state": "copy", "path": target })
@@ -360,6 +370,13 @@ fn skill_cell(lib: &Library, target: &str) -> Value {
         // 位置被一个同名文件占着：不是 skill，也不是空位。
         json!({ "state": "foreign", "path": target })
     }
+}
+
+/// 主副本的关键内容还在吗（与 `doctor::master_unreadable` 同一口径）：
+/// skill 的判定是「目录里有 SKILL.md」，rule / memory 的主副本是单文件，
+/// 目录级判定已经足够。
+fn master_unreadable(target: &str) -> bool {
+    !Path::new(target).join("SKILL.md").is_file()
 }
 
 /// 目录总字节数。**不跟随链接**：库内副本里若有一条指回上级的链接，跟随会无限
