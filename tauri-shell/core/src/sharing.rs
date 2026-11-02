@@ -55,9 +55,12 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::adapters;
+use crate::compose;
 use crate::library::Library;
 use crate::linkfs::{self, LinkCap};
-use crate::store;
+use crate::registry;
+use crate::store::{self, Op};
 
 /// 两类裁决：一份（`SingleSource`）、多份全等（`Identical`）、多份不等（`Diverged`）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1252,6 +1255,315 @@ fn implied_transport(entry: &serde_json::Map<String, Value>) -> Option<String> {
 }
 
 /* ------------------------------------------------------------------ */
+/* 规则与记忆共享（M4）                                                  */
+/* ------------------------------------------------------------------ */
+
+/// 规则共享的两种模式（`docs/SHARED-ASSETS-IMPLEMENTATION.md` §6.2）。
+///
+/// | 模式 | 盘上是什么 | 适用 |
+/// |---|---|---|
+/// | `Link` | 一条指向库内主副本的链接 | 想让各处读同一份 |
+/// | `Compose` | 文件里多一个带标记的区块 | 文件是用户自己写的，只能往里插 |
+///
+/// 两者的取舍不是风格问题：`Link` 会让 agent 侧那个路径**不再是用户的文件**
+/// （用户在自己项目里编辑它，编辑的是库内那份）；`Compose` 保住用户的文件，
+/// 但只在一个区块里生效。所以偏好由调用方显式给，本模块不猜。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RuleMode {
+    Link,
+    Compose,
+}
+
+impl RuleMode {
+    /// 写进 IPC 与审计日志的字符串，渲染层只认这两个值。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RuleMode::Link => "link",
+            RuleMode::Compose => "compose",
+        }
+    }
+
+    /// 严格匹配，未知值返回 `None` —— 与 `LinkMethod::parse` 同一立场。
+    pub fn parse(s: &str) -> Option<RuleMode> {
+        match s {
+            "link" => Some(RuleMode::Link),
+            "compose" => Some(RuleMode::Compose),
+            _ => None,
+        }
+    }
+}
+
+/// 一个 agent 上某个 scope 下某一类（rule / memory）声明的全部路径，按声明顺序。
+///
+/// 返回 `None` 表示这个 agent 根本没声明这一类（`pi` 的 `rules` 是空的）：调用方
+/// 要报可读的 code，而不是静默跳过。
+pub fn kind_patterns(agent_id: &str, kind: &str, scope: &str) -> Option<Vec<String>> {
+    let agent = adapters::by_id(agent_id)?;
+    let rels: &[&str] = match (scope == "project", kind) {
+        (true, "rule") => agent.projects.rules,
+        (true, _) => agent.projects.memory,
+        (false, "rule") => agent.globals.rules,
+        (false, _) => agent.globals.memory,
+    };
+    Some(rels.iter().map(|s| s.to_string()).collect())
+}
+
+/// 一个 agent / scope 的基准目录（全局是 agent 的 home，项目是项目根）。
+///
+/// `None` 有两种原因，调用方分不清也不必分清：agent 不在表里，或者项目没注册。
+pub fn scope_base(user_home: &str, agent_id: &str, scope: &str, project_id: Option<&str>) -> Option<String> {
+    if scope != "project" {
+        let agent = adapters::by_id(agent_id)?;
+        return adapters::resolve_home(agent.home, user_home).or_else(|| Some(agent.home.to_string()));
+    }
+    let id = project_id?;
+    registry::get(id)
+        .and_then(|p| p.get("dir").and_then(Value::as_str).map(|s| s.to_string()))
+}
+
+/// 一个**已经决定了目标文件**的规则共享请求。
+///
+/// 「目标文件」有两种给法：`rel` + 从哪个基准目录取（`base`），或者直接给
+/// `file` 绝对路径。后者是 M6 的矩阵用的 —— 它从扫描结果里拿到的是 `file`。
+pub struct RuleTarget {
+    pub base: String,
+    pub rel: Option<String>,
+    pub file: Option<String>,
+}
+
+impl RuleTarget {
+    /// 解析成绝对路径。`rel` 优先，否则用 `file`。
+    pub fn resolve(&self) -> Option<String> {
+        if let Some(rel) = self.rel.as_deref() {
+            if !rel.trim().is_empty() {
+                return Some(store::native_str(&Path::new(&self.base).join(rel)));
+            }
+        }
+        self.file
+            .as_deref()
+            .filter(|f| !f.trim().is_empty())
+            .map(|f| store::native_str(Path::new(f)))
+    }
+}
+
+/// 一次规则共享的规划结果。
+///
+/// `ops` 为空且 `code` 为 `None` 是不可能的：每条分支要么给 op，要么给 code。
+pub struct RulePlan {
+    /// 目标文件的绝对路径。
+    pub file: String,
+    pub mode: RuleMode,
+    pub ops: Vec<Op>,
+    /// 不发写入时的可读 code（`rule.foreignEdit` / `rule.noTarget` / …）。
+    pub code: Option<String>,
+    /// 与 code 一起回给渲染层的细节（三方 diff 用）。
+    pub detail: Value,
+}
+
+impl RulePlan {
+    fn refused(file: &str, mode: RuleMode, code: &str, detail: Value) -> RulePlan {
+        RulePlan {
+            file: file.to_string(),
+            mode,
+            ops: Vec::new(),
+            code: Some(code.to_string()),
+            detail,
+        }
+    }
+}
+
+/// 哪些扩展名的规则文件只能 `link`。
+///
+/// `.mdc`（Cursor）带 `alwaysApply` / `globs` frontmatter，区块拼接会让 frontmatter
+/// 不再是文件的第一段 —— 而 agent 读的正是那一段。所以本期只支持 `link`，
+/// `compose` 由调用方置灰并给出原因（§6.3）。
+pub fn compose_unsupported(file: &str) -> Option<&'static str> {
+    let low = file.to_lowercase();
+    if low.ends_with(".mdc") {
+        // 目录（`.cursor/rules`）本身没有扩展名问题，只有落到具体 `.mdc` 文件才算。
+        Some("rule.mdcLinkOnly")
+    } else {
+        None
+    }
+}
+
+/// 规则共享的两种模式，落到 op 上是什么。
+///
+/// `mode` 为空时按「能不能 compose」选：能 compose 就 compose —— 因为 `link` 会
+/// 把用户的文件变成链接，那是更重的一步，不该是缺省。`.mdc` 没有 compose，于是
+/// 缺省只能是 link。
+pub fn rule_plan(library: &Library, target: &RuleTarget, mode: Option<RuleMode>) -> RulePlan {
+    let Some(file) = target.resolve() else {
+        let m = mode.unwrap_or(RuleMode::Compose);
+        return RulePlan::refused("", m, "rule.noTarget", json!({}));
+    };
+    // 模式没给时的缺省：能 compose 就 compose，不能（`.mdc`）就只能 link。
+    //
+    // 缺省**不走** `rule.mdcLinkOnly`：那个 code 的意思是「你**要求**了一件做不到
+    // 的事」，是给 UI 把一个选项置灰用的；调用方根本没指定模式时，正确动作是挑一个
+    // 做得到的做法，而不是报错。
+    let mode = match (mode, compose_unsupported(&file)) {
+        (None, None) => RuleMode::Compose,
+        (None, Some(_)) => RuleMode::Link,
+        (Some(RuleMode::Compose), Some(code)) => {
+            return RulePlan::refused(&file, RuleMode::Compose, code, json!({ "file": file }))
+        }
+        (Some(m), _) => m,
+    };
+
+    // 库内主副本：`<root>/rules/<slug>.md`（记忆是 `<root>/memory/<slug>.md`）。
+    // 名字取自目标文件的文件名 —— 一个 agent 的 `AGENTS.md` 与另一个 agent 的
+    // `AGENTS.md` 是**同一件事的两种写法**，按文件名归一是让它们真的收敛成一份的
+    // 前提（§12 第 7 条：文件名映射按 adapter-table 的实际声明，不硬编码）。
+    let name = Path::new(&file)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let stem = name
+        .rsplit_once('.')
+        .map(|(s, _)| s.to_string())
+        .unwrap_or_else(|| name.clone());
+    let kind = if file.to_lowercase().contains("\\memory\\") || file.to_lowercase().contains("/memory/") {
+        "memory"
+    } else {
+        "rule"
+    };
+    let slug_name = crate::model::slug(&stem);
+    let keeper = store::native_str(&library.dir_for(kind).join(format!("{}.md", slug_name)));
+    let keeper_path = Path::new(&keeper);
+    let file_path = Path::new(&file);
+
+    match mode {
+        RuleMode::Link => {
+            // 目标已经是指向库内主副本的链接：零写入（幂等）。
+            if linkfs::is_link(file_path) && library.owns_target(file_path) {
+                return RulePlan {
+                    file,
+                    mode,
+                    ops: Vec::new(),
+                    code: None,
+                    detail: json!({ "alreadyLinked": true }),
+                };
+            }
+            let mut ops = Vec::new();
+            if let Some(parent) = file_path.parent() {
+                ops.push(Op::mkdir(&store::native_str(parent)));
+            }
+            // 库内还没有主副本：让**目标文件本身**成为主副本。
+            //
+            // 两件事必须同时做到，否则会静默写坏（实测踩到）：
+            //
+            // 1. 用 `Op::write` 而不是 `copy_dir` —— 后者只遍历目录，拿它拷一个
+            //    **文件**会得到一个空目录，随后 `link_file` 报 "link source is not a file"。
+            // 2. 内容在**规划期**读好、随 op 传下去（`Op::write(path, content)` 的
+            //    字面形式），**不能**用 `from` 让事务执行时再去读。原因：本事务的
+            //    第 3 条 op 就是 `linkFile(dst = 这个文件)`，而 op 是按顺序执行的 ——
+            //    等到执行 `write` 那一刻，目标已经是一条指向库内主副本的链接了。
+            //    「从 from 读」于是读回链接**自己**，主副本里落的是一串路径文本。
+            if !keeper_path.exists() {
+                if !file_path.exists() {
+                    // 目标还不存在、库里也没有：没有内容可 link。
+                    return RulePlan::refused(&file, mode, "rule.noTarget", json!({ "file": file }));
+                }
+                let body = std::fs::read_to_string(file_path).unwrap_or_default();
+                ops.push(Op::write(&keeper, &body));
+            }
+            // 目标位置：真实文件先删，再建链接（顺序不能反，§11.3）。
+            if file_path.exists() || linkfs::is_link(file_path) {
+                ops.push(Op::delete(&file));
+            }
+            ops.push(Op::link_file(&file, &keeper));
+            RulePlan {
+                file,
+                mode,
+                ops,
+                code: None,
+                detail: json!({ "keeper": keeper, "slug": slug_name }),
+            }
+        }
+        RuleMode::Compose => {
+            let raw = std::fs::read_to_string(file_path).unwrap_or_default();
+            // 区块内容 = 库内主副本的内容。库里没有主副本时退回目标文件自己，
+            // 于是第一次 compose 得到一个「原有内容被圈成受管区块」的文件
+            // （一个字节都没被改写），用户看得见它成了受管区块。
+            let body = if keeper_path.exists() {
+                std::fs::read_to_string(keeper_path).unwrap_or_default()
+            } else {
+                raw.clone()
+            };
+            // 写回闸门。
+            //
+            // 两个条件合起来才叫「我们以前生成过」，缺一不可：
+            //   ① 盘上有一个同名区块；② 它的 `rev` 既是它自己内容的指纹，又是
+            //     **库里这一份**的指纹。
+            //
+            // 只看 ① 会把「首次 compose 而库内主副本早已存在」误判成外部改动
+            // （区块当时还不存在，`is_foreign_edit` 一律回 true），于是 M4 永远
+            // 开不了头；只看 ② 又会让「用户改了区块内」蒙混过关。两条分开问，
+            // 两种情形才不会互相掩护。
+            //
+            // 区块整个不见了（① 假、② 真）**不算**外部改动：那时用户只是把标记
+            // 删了，把共享内容重新放回去正是他点这一下的意思；真正的数据风险在
+            // 「区块还在、内容被改过」，那一种必须拒。
+            let existing = compose::find_block(&raw, &slug_name);
+            if let Some(b) = &existing {
+                if compose::is_foreign_edit(&raw, &slug_name, &body) {
+                    return RulePlan::refused(
+                        &file,
+                        mode,
+                        "rule.foreignEdit",
+                        json!({
+                            "file": file,
+                            "slug": slug_name,
+                            "onDisk": b.body,
+                            "want": body,
+                        }),
+                    );
+                }
+            }
+            let next = compose::upsert_block(&raw, &slug_name, &body);
+            if next == raw {
+                // 区块已经在位且内容一致：零写入、零撤销快照（幂等的前提）。
+                return RulePlan {
+                    file,
+                    mode,
+                    ops: Vec::new(),
+                    code: None,
+                    detail: json!({ "unchanged": true, "slug": slug_name }),
+                };
+            }
+            RulePlan {
+                file: file.clone(),
+                mode,
+                ops: vec![Op::write(&file, &next)],
+                code: None,
+                detail: json!({ "keeper": keeper, "slug": slug_name }),
+            }
+        }
+    }
+}
+
+/// 去掉一个文件里的库内区块（`compose` 的「停用」）。
+///
+/// 只删区块，文件本身留着 —— `compose` 从来没有把文件变成链接，停用它就是把
+/// 我们放进去的那一截拿走。区块之外的内容一个字节都不动。
+pub fn uncompose_plan(file: &str, slug: &str) -> RulePlan {
+    let raw = std::fs::read_to_string(file).unwrap_or_default();
+    let next = compose::remove_block(&raw, slug);
+    RulePlan {
+        file: file.to_string(),
+        mode: RuleMode::Compose,
+        ops: if next == raw {
+            Vec::new()
+        } else {
+            vec![Op::write(file, &next)]
+        },
+        code: None,
+        detail: json!({ "slug": slug }),
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* 单元测试                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -1835,5 +2147,330 @@ mod tests {
         }
         out.sort();
         out
+    }
+
+    /* -------------------------------------------------------------- */
+    /* 规则共享（M4）                                                   */
+    /* -------------------------------------------------------------- */
+
+    /// 一个库 + 一个 agent 侧的规则文件。
+    fn rule_fixture(tag: &str, file_name: &str, content: &str) -> (Tmp, Library, String) {
+        let t = tmp(tag);
+        let lib = Library::at(t.0.join("library"));
+        let file = t.0.join("home").join(file_name);
+        if let Some(p) = file.parent() {
+            std::fs::create_dir_all(p).expect("home");
+        }
+        if !content.is_empty() {
+            std::fs::write(&file, content).expect("seed");
+        }
+        let path = store::native_str(&file);
+        (t, lib, path)
+    }
+
+    fn at(file: &str) -> RuleTarget {
+        RuleTarget {
+            base: String::new(),
+            rel: None,
+            file: Some(file.to_string()),
+        }
+    }
+
+    /// 模式字符串严格解析：未知值不是「猜一个」，是 `None`。
+    #[test]
+    fn rule_mode_parses_strictly() {
+        assert_eq!(RuleMode::parse("link"), Some(RuleMode::Link));
+        assert_eq!(RuleMode::parse("compose"), Some(RuleMode::Compose));
+        assert_eq!(RuleMode::parse("Link"), None);
+        assert_eq!(RuleMode::parse(""), None);
+        assert_eq!(RuleMode::Link.as_str(), "link");
+        assert_eq!(RuleMode::Compose.as_str(), "compose");
+    }
+
+    /// `rel` 优先于 `file`；两者都没有时解析不出来（调用方要报 `rule.noTarget`）。
+    #[test]
+    fn a_rule_target_prefers_rel_then_file() {
+        let t = RuleTarget {
+            base: "C:\\home".to_string(),
+            rel: Some("AGENTS.md".to_string()),
+            file: Some("C:\\other\\X.md".to_string()),
+        };
+        assert_eq!(t.resolve(), Some("C:\\home\\AGENTS.md".to_string()));
+        let only_file = RuleTarget {
+            base: String::new(),
+            rel: Some("  ".to_string()),
+            file: Some("C:\\other\\X.md".to_string()),
+        };
+        assert_eq!(only_file.resolve(), Some("C:\\other\\X.md".to_string()));
+        let none = RuleTarget {
+            base: String::new(),
+            rel: None,
+            file: None,
+        };
+        assert_eq!(none.resolve(), None);
+    }
+
+    /// 目标解析不出来时报 `rule.noTarget`，且不产生任何 op。
+    #[test]
+    fn a_target_without_a_path_is_refused_with_a_code() {
+        let t = tmp("rule-notarget");
+        let lib = Library::at(t.0.join("library"));
+        let plan = rule_plan(
+            &lib,
+            &RuleTarget {
+                base: String::new(),
+                rel: None,
+                file: None,
+            },
+            None,
+        );
+        assert_eq!(plan.code.as_deref(), Some("rule.noTarget"));
+        assert!(plan.ops.is_empty());
+    }
+
+    /// `.mdc` 只能 link：compose 被拒绝，且理由是一个 code（UI 置灰要用它）。
+    #[test]
+    fn an_mdc_file_refuses_compose_and_says_why() {
+        let (t, lib, file) = rule_fixture("rule-mdc", "a.mdc", "---\nalwaysApply: true\n---\nbody\n");
+        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        assert_eq!(plan.code.as_deref(), Some("rule.mdcLinkOnly"));
+        assert!(plan.ops.is_empty());
+        // 文件一个字节都不动。
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "---\nalwaysApply: true\n---\nbody\n"
+        );
+        drop(t);
+    }
+
+    /// link 模式：目标变成指向库内主副本的链接，内容逐字节保留。
+    #[test]
+    fn link_mode_stores_the_file_in_the_library_and_links_to_it() {
+        let (t, lib, file) = rule_fixture("rule-link", "AGENTS.md", "# team rules\n");
+        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Link));
+        assert_eq!(plan.code, None, "{:?}", plan.detail);
+        assert_eq!(plan.mode.as_str(), "link");
+        let store = store::Store::new(&store::native_str(&t.0.join("store")));
+        let tx = store.transaction(&plan.ops, &json!({ "kind": "rule" }));
+        assert_eq!(tx["ok"], json!(true), "{}", tx);
+        assert!(linkfs::is_link(Path::new(&file)), "目标应该是链接");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "# team rules\n");
+        // 库内主副本按文件名归一：`AGENTS.md` → `<root>/rules/agents.md`。
+        let keeper = lib.dir_for("rule").join("agents.md");
+        assert!(keeper.exists(), "库内主副本应在 {:?}", keeper);
+        // 主副本里是**内容**，不是一条指向自己的路径文本。
+        //
+        // 这一条钉住的是一个实测踩到的缺陷：`Op::write` 若用 `from` 让事务在执行
+        // 时去读来源，而同一个事务里随后那条 `linkFile` 又把这个来源换成了指向
+        // 主副本的链接，那么写进主副本的就是「链接自己」这个路径字符串。整个
+        // 事务成功、界面全绿、内容却已经没了。
+        assert_eq!(
+            std::fs::read_to_string(&keeper).unwrap(),
+            "# team rules\n",
+            "库内主副本必须是原文，不能是指向自己的路径"
+        );
+        drop(t);
+    }
+
+    /// link 模式幂等：已经是指向库内的链接时零写入（零撤销快照）。
+    #[test]
+    fn link_mode_writes_nothing_when_already_linked() {
+        let (t, lib, file) = rule_fixture("rule-link-twice", "AGENTS.md", "# x\n");
+        let store = store::Store::new(&store::native_str(&t.0.join("store")));
+        let first = rule_plan(&lib, &at(&file), Some(RuleMode::Link));
+        assert_eq!(store.transaction(&first.ops, &json!({}))["ok"], json!(true));
+        let second = rule_plan(&lib, &at(&file), Some(RuleMode::Link));
+        assert!(second.ops.is_empty(), "第二遍不该有 op");
+        assert_eq!(second.detail["alreadyLinked"], json!(true));
+        drop(t);
+    }
+
+    /// compose 模式：文件里出现一个带标记的区块，区块之外逐字节不动。
+    #[test]
+    fn compose_mode_wraps_the_body_and_keeps_the_users_bytes() {
+        let original = "# my own rules\r\n\r\nkeep me\r\n";
+        let (t, lib, file) = rule_fixture("rule-compose", "CLAUDE.md", original);
+        // 先放一份库内主副本：compose 的区块内容从它来。
+        let keeper = lib.dir_for("rule").join("claude.md");
+        std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
+        std::fs::write(&keeper, "shared rule one\nshared rule two\n").unwrap();
+
+        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        assert_eq!(plan.code, None);
+        assert_eq!(plan.ops.len(), 1);
+        let store = store::Store::new(&store::native_str(&t.0.join("store")));
+        assert_eq!(store.transaction(&plan.ops, &json!({}))["ok"], json!(true));
+
+        let out = std::fs::read_to_string(&file).unwrap();
+        assert!(out.starts_with(original), "前缀变了: {:?}", out);
+        let block = compose::find_block(&out, "claude").expect("区块");
+        assert!(block.body.contains("shared rule one"));
+        // CRLF 目标：区块内也是 CRLF，不出现裸 LF。
+        let bytes = out.as_bytes();
+        for (i, b) in bytes.iter().enumerate() {
+            if *b == b'\n' {
+                assert!(i > 0 && bytes[i - 1] == b'\r', "裸 LF 在 {}", i);
+            }
+        }
+        drop(t);
+    }
+
+    /// compose 幂等：同一份内容跑两遍，第二遍零写入。
+    #[test]
+    fn compose_mode_is_idempotent() {
+        let (t, lib, file) = rule_fixture("rule-compose-twice", "CLAUDE.md", "# t\n");
+        let keeper = lib.dir_for("rule").join("claude.md");
+        std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
+        std::fs::write(&keeper, "body\n").unwrap();
+        let store = store::Store::new(&store::native_str(&t.0.join("store")));
+        let first = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        assert_eq!(store.transaction(&first.ops, &json!({}))["ok"], json!(true));
+        let before = std::fs::read(&file).unwrap();
+        let second = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        assert!(second.ops.is_empty(), "第二遍不该有 op: {:?}", second.detail);
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+        drop(t);
+    }
+
+    /// 区块被用户改过 → `rule.foreignEdit`，且盘上文件零改动（这就是闸门的意义）。
+    #[test]
+    fn a_hand_edited_block_is_refused_and_the_file_is_left_alone() {
+        let (t, lib, file) = rule_fixture("rule-foreign", "CLAUDE.md", "# t\n");
+        let keeper = lib.dir_for("rule").join("claude.md");
+        std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
+        std::fs::write(&keeper, "generated body\n").unwrap();
+        let store = store::Store::new(&store::native_str(&t.0.join("store")));
+        let first = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        assert_eq!(store.transaction(&first.ops, &json!({}))["ok"], json!(true));
+
+        // 用户手改区块内一行。
+        let edited = std::fs::read_to_string(&file)
+            .unwrap()
+            .replace("generated body", "my own wording");
+        std::fs::write(&file, &edited).unwrap();
+
+        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        assert_eq!(plan.code.as_deref(), Some("rule.foreignEdit"));
+        assert!(plan.ops.is_empty(), "闸门只判不写");
+        // 三方 diff 需要的那两份内容都在 detail 里。
+        assert_eq!(plan.detail["slug"], json!("claude"));
+        assert!(plan.detail["onDisk"].as_str().unwrap().contains("my own wording"));
+        assert!(plan.detail["want"].as_str().unwrap().contains("generated body"));
+        // 盘上文件没被改动。
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), edited);
+        drop(t);
+    }
+
+    /// 库内没有主副本时，第一次 compose 取目标文件自己的内容 —— 不改一个字，
+    /// 只是把现有内容圈成受管区块。
+    #[test]
+    fn the_first_compose_wraps_the_existing_text_verbatim() {
+        let original = "# existing\nline two\n";
+        let (t, lib, file) = rule_fixture("rule-adopt", "AGENTS.md", original);
+        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        assert_eq!(plan.code, None, "首次 compose 不该被闸门拒绝: {:?}", plan.detail);
+        let store = store::Store::new(&store::native_str(&t.0.join("store")));
+        assert_eq!(store.transaction(&plan.ops, &json!({}))["ok"], json!(true));
+        let out = std::fs::read_to_string(&file).unwrap();
+        let block = compose::find_block(&out, "agents").expect("区块");
+        assert_eq!(block.body, original, "区块内容应当就是原文");
+        // 去掉区块后回到原文：一个字都没被改写。
+        assert_eq!(compose::remove_block(&out, "agents"), original);
+        drop(t);
+    }
+
+    /// 区块整个被删掉 → 不算外部改动，共享内容回到区块里（同步就是这个意思）。
+    ///
+    /// 与「区块还在、内容被改过」分开判：前者用户只是删了标记，后者用户改的是
+    /// 内容。把前者也拒掉会让「删掉标记想重新纳入」变成一条死路。
+    #[test]
+    fn a_deleted_block_comes_back_because_that_is_what_sync_means() {
+        let (t, lib, file) = rule_fixture("rule-deleted-block", "CLAUDE.md", "# mine\n");
+        let keeper = lib.dir_for("rule").join("claude.md");
+        std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
+        std::fs::write(&keeper, "shared\n").unwrap();
+        let store = store::Store::new(&store::native_str(&t.0.join("store")));
+        let first = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        assert_eq!(store.transaction(&first.ops, &json!({}))["ok"], json!(true));
+
+        // 用户把整个区块删掉，只留自己的内容。
+        std::fs::write(&file, "# mine\n").unwrap();
+        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        assert_eq!(plan.code, None, "区块被删不等于区块被改: {:?}", plan.detail);
+        assert_eq!(store.transaction(&plan.ops, &json!({}))["ok"], json!(true));
+        // 用户自己的内容原样保留，共享内容重新回到区块里。
+        let out = std::fs::read_to_string(&file).unwrap();
+        assert!(out.starts_with("# mine\n"), "{:?}", out);
+        assert_eq!(
+            compose::find_block(&out, "claude").map(|b| b.body),
+            Some("shared\n".to_string())
+        );
+        drop(t);
+    }
+
+    /// 停用 compose：只拿走我们放进去的区块，文件本身留着。
+    #[test]
+    fn uncompose_removes_only_the_block() {
+        let original = "# mine\ntail\n";
+        let (t, lib, file) = rule_fixture("rule-uncompose", "AGENTS.md", original);
+        let keeper = lib.dir_for("rule").join("agents.md");
+        std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
+        std::fs::write(&keeper, "shared\n").unwrap();
+        let store = store::Store::new(&store::native_str(&t.0.join("store")));
+        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        assert_eq!(store.transaction(&plan.ops, &json!({}))["ok"], json!(true));
+
+        let back = uncompose_plan(&file, "agents");
+        assert_eq!(store.transaction(&back.ops, &json!({}))["ok"], json!(true));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+        // 再停用一次：零写入。
+        assert!(uncompose_plan(&file, "agents").ops.is_empty());
+        drop(t);
+    }
+
+    /// 模式没给时缺省 compose（link 会把用户的文件变成链接，不该是缺省），
+    /// 但 `.mdc` 缺省只能是 link。
+    #[test]
+    fn the_default_mode_is_compose_except_for_mdc() {
+        let (t, lib, file) = rule_fixture("rule-default", "AGENTS.md", "# t\n");
+        let keeper = lib.dir_for("rule").join("agents.md");
+        std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
+        std::fs::write(&keeper, "b\n").unwrap();
+        assert_eq!(rule_plan(&lib, &at(&file), None).mode, RuleMode::Compose);
+        drop(t);
+
+        let (t2, lib2, mdc) = rule_fixture("rule-default-mdc", "a.mdc", "x\n");
+        let keeper2 = lib2.dir_for("rule").join("a.md");
+        std::fs::create_dir_all(keeper2.parent().unwrap()).unwrap();
+        std::fs::write(&keeper2, "b\n").unwrap();
+        let plan = rule_plan(&lib2, &at(&mdc), None);
+        assert_eq!(plan.code, None);
+        assert_eq!(plan.mode, RuleMode::Link, ".mdc 只能是 link");
+        drop(t2);
+    }
+
+    /// `kind_patterns` 按声明顺序给出路径；没声明这一类的 agent 返回空表而不是 `None`。
+    #[test]
+    fn kind_patterns_follow_the_adapter_table() {
+        assert_eq!(
+            kind_patterns("claude-code", "rule", "global"),
+            Some(vec!["CLAUDE.md".to_string(), "settings.json".to_string()])
+        );
+        // pi 声明了 rules（`AGENTS.md`）—— 表里是什么就是什么，不凭印象。
+        assert_eq!(
+            kind_patterns("pi", "rule", "global"),
+            Some(vec!["AGENTS.md".to_string()])
+        );
+        // 未知 agent：`None`。
+        assert_eq!(kind_patterns("nope", "rule", "global"), None);
+    }
+
+    /// 全局作用域的基准目录就是 agent 的 home（`~` 已展开）。
+    #[test]
+    fn scope_base_expands_the_agent_home() {
+        let base = scope_base("C:\\Users\\tester", "claude-code", "global", None).unwrap();
+        assert!(base.ends_with(".claude"), "{}", base);
+        // 项目作用域没有 projectId → 解析不出来。
+        assert_eq!(scope_base("C:\\Users\\tester", "claude-code", "project", None), None);
     }
 }

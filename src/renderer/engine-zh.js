@@ -42,6 +42,7 @@ const EXACT = {
   'agent has no skill directory': '该 agent 没有技能目录',
   'already exists': '同名资产已存在',
   'unresolved base dir': '基础目录未能解析',
+  'agent or project could not be resolved': '无法解析出这个 agent 或项目的目录',
   'nothing to write': '没有需要写入的内容',
   'no assets selected': '未选择任何资产',
   'target directory does not exist': '目标目录不存在',
@@ -243,6 +244,10 @@ const PATTERNS = [
   // 状态没变，是成功，不是失败。
   ['^already open$', '该 agent 的配置里这条 MCP 服务器已经是开启状态'],
   ['^already closed$', '该 agent 的配置里这条 MCP 服务器已经是关闭状态'],
+  // 共享层（M4）：规则/记忆共享里「这次本来就没事可做」的两种正常状态。
+  // 它们不是失败 —— 用户连点两下也会看到它们，文案要读得出「已经对了」。
+  ['^already shared$', '这条规则已经是共享状态，无需再次写入'],
+  ['^no managed block$', '这个文件里没有由共享库管理的区块，无需改动'],
   ['^this path is no longer a link$', '该位置已不再是链接'],
   ['^this link points outside the library$', '该链接指向共享库之外'],
   ['^op[§1] is missing an "op" field$', 'op[§1] 缺少 "op" 字段'],
@@ -429,8 +434,10 @@ const CODE_ZH = {
   'share.notLinked': '「§1」不是由共享库建立的链接，而是真实目录或文件；为安全起见不会自动删除',
   'share.foreignLink': '「§1」指向共享库之外，删除它会动到你自己的目录，已拒绝',
   'share.unknownAsset': '在共享库与扫描结果里都没有找到这个资产',
-  'share.unsupportedKind': '当前版本只支持共享 skill 类资产',
-  'rule.shareUnsupported': '规则的共享将在后续版本提供；当前版本只支持 skill',
+  'share.unsupportedKind': '当前版本不支持共享这一类资产',
+  'rule.foreignEdit': '「§1」里的共享区块被你改过了；为避免覆盖你的编辑，本次没有写入。请先处理这处差异再同步',
+  'rule.mdcLinkOnly': '「§1」是带 frontmatter 的 .mdc 规则文件，只能以链接方式共享，不能拼接区块',
+  'rule.noTarget': '没有找到可共享的规则文件：这个 agent 或项目下没有声明对应的规则路径',
   'link.ledgerDrift': '链接台账与磁盘上的实际情况不一致；请让健康检查以磁盘为准重建台账',
   'store.corruptTransaction': '事务记录已损坏',
   'store.opFieldMissing': '第 §1 项操作缺少 op 字段',

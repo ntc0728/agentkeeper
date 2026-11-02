@@ -14,13 +14,15 @@
 | 平台 | Windows 10/11 x64（仅此范围，不做 macOS/Linux） |
 | 基线 | 0.2.4，commit `24b32f4` |
 | 工期 | 14–17 个工作日（P0→P6，含测试；见 §11 的改动幅度） |
-| 当前状态 | **M1（P0+P1）、M2（P2）、M3（P3）已完成并验收**（2026-11-02）；M4 起未开始。验收记录见 §16、§17 与 §18 |
+| 当前状态 | **M1（P0+P1）、M2（P2）、M3（P3）、M4（P4）已完成并验收**（2026-11-02）；M5 起未开始。验收记录见 §16、§17、§18 与 §19 |
 | 环境 | rustc/cargo 1.99.1 · tauri-cli 2.12.4 · MSVC 14.44 · SDK 10.0.26100 · Node 22.22.1 |
 
-> **本轮之后开工的人先读 §16、§17 与 §18**：§16 是 M1 的实际交付清单与实测结论（与本手册初稿
+> **本轮之后开工的人先读 §16–§19**：§16 是 M1 的实际交付清单与实测结论（与本手册初稿
 > 不同的地方已就地改写），§17 是 M2 的交付清单、三条验收的落点、以及在实施中修掉的五个
-> 既有缺陷 —— 其中三个会直接毁数据，M4 起的人务必先看一遍；§18 是 M3（MCP 单一事实源）
-> 的交付清单、四条验收的落点，以及实施中修掉的一处 TOML 换行混写缺陷。
+> 既有缺陷 —— 其中三个会直接毁数据，务必先看一遍；§18 是 M3（MCP 单一事实源）
+> 的交付清单、四条验收的落点，以及实施中修掉的一处 TOML 换行混写缺陷；§19 是 M4
+> （规则与记忆共享）的交付清单、四条验收的落点，以及实施中修掉的三个缺陷（其中两个
+> 会静默写坏内容）。
 
 ---
 
@@ -653,7 +655,10 @@ pub struct McpDrift {
 
 ---
 
-## 6. M4 · 规则与记忆共享
+## 6. M4 · 规则与记忆共享（**已完成，见 §19**）
+
+> 本节是实施前的规格；实际交付、验收落点与实施中修掉的三个缺陷见 **§19**。
+> 与本节不同的地方（缺省模式、`.mdc` 的降级、区块不存在时不算外部改动）以 §19 为准。
 
 ### 6.1 `compose.rs`：区块标记（纯函数，最好测）
 
@@ -1478,6 +1483,9 @@ store::Op::link_file_with(&dst, &src, Some(LinkMethod::Symlink));
 1. `enable_asset` 目前只认 **skill**：`rule` / `memory` 返回 `rule.shareUnsupported`，
    其它 kind 返回 `share.unsupportedKind`。M3 加 MCP 时要么扩这个分支，要么走
    `materialize_mcp`（§5.3），**不要在 `enable_asset` 里塞第二种语义**。
+   > **M4 之后**：`rule` / `memory` 已改为分流到 `enable_rule`（§19.1），`rule.shareUnsupported`
+   > 这个 code 与 `engine-zh.js` 里的对应条目一并删除。M3 这条提醒的**结论**仍然成立 ——
+   > 每种 kind 走自己的编排入口，不要在一个分支里塞第二种语义。
 2. `remove_from_library` 读不出台账时会**拒绝**（返回 `link.ledgerDrift`），因为它无法
    确认哪些链接指向这条主副本。别把它改成「尽力而为」，那会留下悬空链接。
 3. `.trash` 的目录名是 `<slug>-<YYYYMMDDTHHMMSS>`，排序即时间序；`trashDays` 的清理
@@ -1609,3 +1617,142 @@ core::sharing::close_ops(&file, "opencode", "fetch", DisableStyle::Flag);
    「标记为独立」= 在 `allOf` 里补一个 `false`。
 3. `toml_splice::splice_server` 现在会按目标文件换行风格重写段落（§18.2）。规则共享（M4）
    若也要拼 TOML，走同一个函数，不要另写一份。
+
+---
+
+## 19. M4 实施记录（2026-11-02，已完成）
+
+M4 = §6（规则与记忆共享）+ §10 的 P4。**只做 M4**：`doctor.rs` 与其余 6 类 finding（M5）、
+共享页界面与 8 个 Tauri 命令（M6）、5 个 MCP 工具 / `ak-scan --shared` / `library_migrate`
+（M7）一概没碰。下面每一步都能用命令复现。
+
+### 19.1 交付清单
+
+| 文件 | 改动 | 说明 |
+|---|---|---|
+| `tauri-shell/core/src/compose.rs` | **新增 545 行**（含 28 条单测） | `rev_of` / `is_valid_slug` / `eol_of` / `blocks` / `find_block` / `upsert_block` / `remove_block` / `is_foreign_edit` + `Block` 结构。纯函数，不读写文件 |
+| `tauri-shell/core/src/lib.rs` | +1 | `pub mod compose;`（按字母序插在 `assets` 之后） |
+| `tauri-shell/core/src/sharing.rs` | +≈500（含 15 条单测） | `RuleMode`（`link` / `compose`）、`kind_patterns`、`scope_base`、`RuleTarget`、`RulePlan`、`compose_unsupported`、`rule_plan`、`uncompose_plan` |
+| `tauri-shell/core/src/keeper.rs` | +≈300 | `enable_asset` 按 kind 分流；新增 `enable_rule` / `disable_rule`；`disable_asset` 按 kind 分流 |
+| `tauri-shell/src-tauri/tests/rule_sharing.rs` | **新增 419 行** | 7 条集成用例：§6.4 四条验收 + `.mdc` 只 link + compose 停用 + assetId 路径 |
+| `tauri-shell/src-tauri/tests/sharing.rs` | 改 1 条 | `enabling_a_non_skill_reports_a_code` 的断言已过期（M2 时代断言 `rule` → `rule.shareUnsupported`），改成真的不支持的 kind（`plugin` → `share.unsupportedKind`），改名 `enabling_an_unsupported_kind_reports_a_code` |
+| `src/renderer/engine-zh.js` | +6 / −1 | `CODE_ZH` 删 `rule.shareUnsupported`（M4 起规则可共享，这个 code 已无来源），增 `rule.foreignEdit` / `rule.mdcLinkOnly` / `rule.noTarget`；`PATTERNS` 增 `^already shared$` / `^no managed block$`；句子表增 `agent or project could not be resolved` |
+| `tauri-shell/dist/engine-zh.js` | 重新生成 | 由 `node tauri-shell/copy-frontend.js` 生成，**没有手改** |
+| `changelog/next.json` | +1 条 | `feat：共享资产 M4 …`（27 → 28 条） |
+
+**没有做的事**（留给后面的阶段，不要以为漏了）：`doctor.rs` 与 `link.fragile`（硬链接易被
+agent 的「写临时文件 + rename」打断 —— §6.2 的注记仍然有效，但**没有**实现成 finding）、
+`compute_effective` 的 `sameInode`（M5）、共享页与 8 个命令 / 桥接（M6）、5 个 MCP 工具
+（M7）、`ak-scan --shared`（P6）、`library_migrate`（P6）、frontmatter 合并（§6.3 明确不做）。
+
+### 19.2 实施中发现并清零的三个缺陷（都在 M4 的写入路径上）
+
+**① `copy_dir` 不能搬单个文件 —— 会静默造出一个空目录。**
+`store::copy_dir` 的第一步是 `std::fs::create_dir_all(dest)`，第二步是 `read_dir(src)`；
+来源是一个**文件**时 `read_dir` 失败，函数**静默返回**。于是「把 agent 侧的规则文件搬进
+库」这一步会留下一个空目录，随后 `linkFile` 报 `link source is not a file` —— 整个事务回滚，
+但错误信息指向的是链接，不是真正的原因。改用 `Op::write(keeper, content)`。
+
+**② `Op::write` 的 `from` 在**执行期**读来源，而同一个事务里 `linkFile` 会先把它换掉。**
+这是本轮最隐蔽的一个，**实测写坏了数据**：`{ write(keeper, from=规则文件), delete(规则文件),
+linkFile(规则文件 → keeper) }` 三条 op 按顺序执行，等执行 `write` 时第 3 条还没跑，但
+`from` 这时**仍然**是规则文件本身 —— 一旦目标文件已经是链接（补启用、或事务重放），
+`write` 读回的就是「链接自己」这个路径字符串，主副本里落的是一行 `C:\...\AGENTS.md`。
+事务成功、界面全绿、内容已经没了。
+
+修法：内容在**规划期**读好，用 `Op::write(path, &content)` 的字面形式随 op 传下去。
+`rule_sharing::one_agents_md_shared_by_four_agents_takes_effect_everywhere_at_once` 里有一条
+断言专门钉住它（「库内主副本必须是原文，不能是指向自己的路径」）。
+
+**③ `is_foreign_edit` 把「区块不存在」也算外部改动 —— 会让首次 compose 永远开不了头。**
+`compose::is_foreign_edit` 的三条判据（区块没了 / `rev` 与内容对不上 / `rev` 与上次生成的不符）
+对「同步一份**已有**区块」完全正确，但**首次** compose 时区块本来就不存在，一律回 `true`。
+所以 `rule_plan` 里把闸门拆成两步：**只有区块存在**时才调 `is_foreign_edit`。
+区块整个不见 ≠ 内容被改：用户删掉标记想重新纳入，同步把内容放回去正是他的意思；
+真正的数据风险在「区块还在、里面被改过」，那一种必须拒（§6.4 验收 3 就是它）。
+
+### 19.3 §6.4 四条验收（逐条落地在哪、怎么跑）
+
+```powershell
+cd tauri-shell
+cargo test -p agentkeeper-core --lib compose        # 28 passed（纯函数：标记形态/幂等/换行/闸门）
+cargo test -p agentkeeper-core --lib sharing        # 40 passed（M2 的 9 + M3 的 16 + M4 的 15）
+cargo test -p agentkeeper-shell --test rule_sharing #  7 passed
+```
+
+| # | §6.4 验收 | 测试 | 结果 |
+|---|---|---|---|
+| 1 | `AGENTS.md` 被 4 个 agent 引用（link 模式），改库内版本 → 4 处同时生效 | `rule_sharing::one_agents_md_shared_by_four_agents_takes_effect_everywhere_at_once` | ✅ 用 `codex` / `opencode` / `amp` / `pi` 四个**真实声明了全局 `AGENTS.md`** 的 agent；四处都是指向 `<root>/rules/agents.md` 的链接；改库内一份后四处逐字节同新内容；再启用一遍零写入且台账不重复 |
+| 2 | `compose` 模式下在标记**外**追加一行 → 下次同步保留该行 | `rule_sharing::a_line_appended_outside_the_block_survives_the_next_sync` | ✅ 追加行仍在，文件头前缀逐字节不变，区块内容仍是库内那一份 |
+| 3 | `compose` 模式下改标记**内**一行 → 返回 `rule.foreignEdit`，盘上文件未被改动 | `rule_sharing::a_line_edited_inside_the_block_is_refused_and_the_disk_is_untouched` | ✅ `ok:false` + `rule.foreignEdit`；`detail.onDisk` / `detail.want` 就是三方 diff 要的两份；`assert_eq!(read(&file), edited)` |
+| 4 | CRLF 目标文件 compose 后仍是纯 CRLF（逐字节断言） | `rule_sharing::a_crlf_rule_file_stays_pure_crlf_after_compose` | ✅ 每个 `\n` 前面都是 `\r`、没有 `\r\r\n`；库内主副本刻意用 LF 写，正是最容易混写的组合 |
+| + | `.mdc` 只支持 link，compose 被拒且文件不动 | `rule_sharing::an_mdc_rule_refuses_compose_instead_of_rewriting_the_file` | ✅ `rule.mdcLinkOnly`，文件逐字节不变 |
+| + | 停用 compose 只拿走我们的区块 | `rule_sharing::disabling_a_composed_rule_leaves_the_users_own_text` | ✅ 停用后文件回到用户原文 |
+| + | 从扫描结果按 `assetId` 共享规则；种类对不上就拒绝 | `rule_sharing::a_scanned_rule_asset_can_be_shared_by_its_id` | ✅ 规则走 link，记忆/不匹配的 kind 回 `share.unsupportedKind` |
+
+### 19.4 实现口径（细节，改之前先读）
+
+1. **主副本按文件名归一**：`<root>/rules/<slug>.md`，`slug` 取自目标文件的文件名
+   （`AGENTS.md` → `agents`）。所以不同 agent 的同名规则文件天然收敛成**一份**——这正是
+   验收 1 成立的前提，也是 §12 第 7 条「按 `adapter-table.js` 的实际声明做映射，不要
+   硬编码文件名对」的落地方式。**注意**：`CLAUDE.md` 与 `AGENTS.md` 目前是**两份**主副本；
+   它们要不要合成一份，等 M6 给出「同源映射」的界面语义之后再定，本期不做隐式合并。
+2. **模式不由代码猜**：`mode` 给 `link` / `compose`；不给时按「能 compose 就 compose」，`.mdc`
+   退到 `link`。**要求**了 `.mdc` + compose 才回 `rule.mdcLinkOnly`（那是给 UI 置灰用的
+   理由，不是缺省）。
+3. **`compose` 的区块内容来源**：库内有主副本就用主副本，没有就用目标文件自己（首次
+   compose = 把现有内容圈成受管区块，**一个字节都不改写**）。`compose` 从不创建主副本。
+4. **幂等**：`link` 已指向库内 → 零 op；`compose` 算出来的文本与原文相同 → 零 op
+    （零事务 = 零撤销快照），连点两下不产生垃圾事务。
+5. **换行判据与 `toml_splice` 同一份**（`raw.contains("\r\n") → CRLF`）。区块内容先归一成
+   目标文件的风格再拼接，两个方向都不混写。
+6. **标记外逐字节不动**是字符串拼接层面的保证：`upsert_block` / `remove_block` 只替换
+   `Block.start..Block.end` 这一段，其余原样 `push_str`。
+7. **台账只记 `link`**：`compose` 没有「链接」可记，也就不往 `links.json` 里写。链接方式
+   （symlink / hardlink）从盘上 `linkfs::link_kind` 读回，不猜。
+8. **停用的三道闸沿用 M2**：不是链接且没有区块 → 零写入；链接指向库外 →
+   `share.foreignLink`（删它会动到用户自己的文件）；库内主副本永不删除。
+
+### 19.5 全量门禁（本轮最后一次运行）
+
+```text
+cargo test --workspace                  448 passed / 0 failed   （基线 404 → +44：core +37、rule_sharing +7；core 的 lib 单测 247 → 284）
+cargo clippy --workspace --all-targets  无新增 warning（compose/sharing/rule_sharing 零条；
+                                        keeper.rs 唯一一条在 export_bundle 的既有代码里）
+node scripts/check.js                   all 8 gates passed
+node scripts/ui-audit.js                total findings: 0
+node scripts/tauri-i18n.js              MISS 0 / CODE-MISS 0 / AMBIGUOUS 0
+node scripts/test-affected.js           all selected targets passed
+node scripts/comment-lang.js            英文注释 14 行（基线 17 → 14，新文件 0 行），中文覆盖率 99.8%
+node scripts/changelog.js check         ok（28 entries）
+```
+
+### 19.6 M5 / M6 可以直接接手的接口
+
+```rust
+// 1) 纯函数：区块读写（M6 的「预览」直接用它算差异，不要另写）
+let next = core::compose::upsert_block(&raw, "agents", &body);
+let same = core::compose::is_foreign_edit(&raw, "agents", &last_generated);
+for b in core::compose::blocks(&raw) { /* slug / rev / body / start..end */ }
+
+// 2) 一次共享的规划（只读，不落盘）—— M6 的矩阵拿它做预览
+let plan = core::sharing::rule_plan(&lib, &core::sharing::RuleTarget {
+    base: home_of_agent, rel: Some("AGENTS.md".into()), file: None,
+}, Some(core::sharing::RuleMode::Compose));
+// plan.code: None | "rule.foreignEdit" | "rule.mdcLinkOnly" | "rule.noTarget"
+// plan.ops 由调用方送进 store.transaction
+
+// 3) 路径解析（M6 画矩阵时要知道每个 agent / scope 声明了哪些规则路径）
+core::sharing::kind_patterns("claude-code", "rule", "global");  // Some(["CLAUDE.md", ...])
+core::sharing::scope_base(&home, "claude-code", "global", None); // Some("<home>/.claude")
+```
+
+**给 M5/M6 的三条提醒**：
+
+1. `enable_asset` / `disable_asset` 现在按 `kind` 分流：`skill` 走目录收敛，`rule` / `memory`
+   走文件级编排（`enable_rule` / `disable_rule`）。加新 kind 时**先**想清楚它属于哪一类，
+   不要把规则塞进目录那条路 —— 那会算出一个不存在的路径。
+2. `doctor` 要报 `link.fragile`（hardlink 可能被 agent 的「写临时文件 + rename」打断）时，
+   判据是 `linkfs::link_kind(p) == Some(Hardlink)`，别用 `nlink`（它对普通文件也会命中）。
+3. 规则区块的 slug 来自**文件名**（`AGENTS.md` → `agents`）。M6 若要支持「同一个文件里放多个
+   来源的区块」，slug 得带上来源前缀；在那之前一个文件只有一个受管区块。

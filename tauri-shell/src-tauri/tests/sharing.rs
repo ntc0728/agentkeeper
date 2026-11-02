@@ -550,17 +550,20 @@ fn enabling_an_asset_already_in_the_library_links_without_copying() {
     assert!(fx.ledger().links_to(&fx.library_skill("pdf")).len() == 2);
 }
 
-/// 非 skill 的启用请求给出可读的 code，而不是静默成功。
+/// 不认识的 kind 给出可读的 code，而不是静默成功。
+///
+/// （M2 时代这条测的是 `rule` → `rule.shareUnsupported`；M4 起规则与记忆可以共享，
+/// 那条断言已经过期，换成真的不支持的 kind。规则共享的验收在 `rule_sharing.rs`。）
 #[test]
-fn enabling_a_non_skill_reports_a_code() {
+fn enabling_an_unsupported_kind_reports_a_code() {
     let _lock = common::serial();
     let fx = Fixture::new("sharing-kinds");
     let r = fx.keeper().enable_asset(&json!({
         "name": "AGENTS",
-        "kind": "rule",
+        "kind": "plugin",
         "agentId": "claude-code",
         "scope": "global",
     }));
     assert_eq!(r["ok"], json!(false));
-    assert_eq!(r["code"], json!("rule.shareUnsupported"));
+    assert_eq!(r["code"], json!("share.unsupportedKind"));
 }

@@ -9,6 +9,7 @@
 
 pub mod adapters;
 pub mod assets;
+pub mod compose;
 pub mod discover;
 pub mod frontmatter;
 pub mod http;

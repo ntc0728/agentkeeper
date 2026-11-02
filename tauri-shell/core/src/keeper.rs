@@ -35,6 +35,7 @@ use super::model::{basename, js_string, js_truthy, slug};
 use super::registry;
 use super::scan;
 use super::settings;
+use super::sharing;
 use super::store::{self, Op, Store};
 use super::toml_splice;
 use super::validate;
@@ -1304,17 +1305,20 @@ impl Keeper {
     /// op 顺序不能变：目标已存在时 `linkDir` 会直接报「目标已被占用」，所以真实
     /// 目录必须先删；而删除与建链接只有在同一个事务里才可能一起回滚
     /// （`docs/SHARED-ASSETS-IMPLEMENTATION.md` §11.3）。
+    ///
+    /// **`kind` 为 `rule` / `memory` 时是另一套编排**：目标是单个文件（`link` 或
+    /// `compose`，见 [`Self::enable_rule`]），不走这里的目录收敛逻辑。
     pub fn enable_asset(&self, input: &Value) -> Value {
         let lib = self.library();
         // 用 `non_empty` 而不是 `prop`：`prop` 对缺失字段返回字符串 "undefined"
         // （它模仿 JS 的 `String(undefined)`），在这里会把「没给 kind」读成
         // 「给了个不认识的 kind」。
         let kind = non_empty(input, "kind").unwrap_or_else(|| "skill".to_string());
+        if kind == "rule" || kind == "memory" {
+            return self.enable_rule(&lib, &kind, input);
+        }
         if kind != "skill" {
-            return unsatisfied(match kind.as_str() {
-                "rule" | "memory" => "rule.shareUnsupported",
-                _ => "share.unsupportedKind",
-            });
+            return unsatisfied("share.unsupportedKind");
         }
         // 来源与名字：给了 assetId 就以扫描结果为准，否则用 name/kind 在库里找。
         let (name, from, from_agent) = match non_empty(input, "assetId") {
@@ -1454,6 +1458,252 @@ impl Keeper {
         tx
     }
 
+    /// 启用一个**规则或记忆**资产：`link` 或 `compose` 两种模式（M4，§6.2）。
+    ///
+    /// 与 skill 的区别不在于「写什么」，而在于**目标是文件不是目录**，而且它
+    /// 很可能是用户手写的东西。所以：
+    ///
+    /// | 模式 | op | 目标文件 |
+    /// |---|---|---|
+    /// | `link` | 库内主副本 + `linkFile` | 原文件被换成指向库内的链接 |
+    /// | `compose` | 一次 `write` | 原地多一个带标记的区块，外面一个字节不动 |
+    ///
+    /// 模式由 `mode` 显式给（`link` / `compose`），不给时按 `sharing::rule_plan`
+    /// 的缺省（能 compose 就 compose）。判定与 op 规划全部在 `sharing` 里做，
+    /// 本函数只负责：解析目标、校验、把 op 送进事务、成功之后记台账。
+    ///
+    /// `input`：`{ assetId?, name?, kind, agentId, scope, projectId?, mode? }`。
+    fn enable_rule(&self, lib: &library::Library, kind: &str, input: &Value) -> Value {
+        let agent_id = prop(input, "agentId");
+        let scope = {
+            let s = prop(input, "scope");
+            if s.is_empty() {
+                "global".to_string()
+            } else {
+                s
+            }
+        };
+        let project_id = input.get("projectId").and_then(|v| v.as_str());
+
+        // 目标文件：`assetId` 给定时以扫描结果的 `file` 为准（矩阵就是这么调的）；
+        // 否则用 `file` 直接路径，再否则用 agent/scope 基准目录 + 表里声明的 rel。
+        let mut target = None;
+        if let Some(id) = non_empty(input, "assetId") {
+            let Some(a) = self.index_get(&id) else {
+                return unsatisfied("share.unknownAsset");
+            };
+            // 资产种类必须对得上：拿一个 skill 的 id 来「共享规则」是无意义的，
+            // 而静默按它做点什么会写错文件。
+            if prop(&a, "kind") != kind {
+                return unsatisfied_with(
+                    "share.unsupportedKind",
+                    json!({ "want": kind, "got": prop(&a, "kind") }),
+                );
+            }
+            target = Some(sharing::RuleTarget {
+                base: String::new(),
+                rel: None,
+                file: a
+                    .get("file")
+                    .and_then(|v| v.as_str())
+                    .map(|f| store::native_str(Path::new(f))),
+            });
+        } else if let Some(file) = non_empty(input, "file") {
+            target = Some(sharing::RuleTarget {
+                base: String::new(),
+                rel: None,
+                file: Some(store::native_str(Path::new(&file))),
+            });
+        } else if let Some(rel) = non_empty(input, "rel") {
+            let Some(base) = sharing::scope_base(&self.user_home, &agent_id, &scope, project_id)
+            else {
+                return skipped("agent or project could not be resolved", input);
+            };
+            target = Some(sharing::RuleTarget {
+                base,
+                rel: Some(rel),
+                file: None,
+            });
+        }
+        let Some(target) = target else {
+            return unsatisfied("rule.noTarget");
+        };
+
+        let mode = non_empty(input, "mode")
+            .as_deref()
+            .and_then(sharing::RuleMode::parse);
+        // `mode` 给了却认不出来：报错而不是猜。猜错的后果是「把用户的文件换成
+        // 链接」和「只插一个区块」之间选错，那是两种完全不同的写作方式。
+        if mode.is_none() && non_empty(input, "mode").is_some() {
+            return unsatisfied_with(
+                "share.unsupportedKind",
+                json!({ "field": "mode", "got": prop(input, "mode") }),
+            );
+        }
+
+        let plan = sharing::rule_plan(lib, &target, mode);
+        if let Some(code) = &plan.code {
+            let mut out = unsatisfied_with(code, plan.detail.clone());
+            out["file"] = json!(plan.file);
+            out["mode"] = json!(plan.mode.as_str());
+            return out;
+        }
+        // 零写入（已经共享过、或 compose 的区块内容本来就一致）：不产生事务，
+        // 也就不会留下一条空的撤销快照。
+        if plan.ops.is_empty() {
+            return json!({
+                "ok": true,
+                "written": [],
+                "skipped": [{ "target": input, "reason": "already shared" }],
+                "file": plan.file,
+                "mode": plan.mode.as_str(),
+                "detail": plan.detail,
+            });
+        }
+
+        let mut tx = self.store.transaction(
+            &plan.ops,
+            &json!({
+                "kind": kind,
+                "action": if plan.mode == sharing::RuleMode::Link { "link" } else { "compose" },
+                "agentId": input.get("agentId").cloned().unwrap_or(Value::Null),
+                "projectId": input.get("projectId").cloned().unwrap_or(Value::Null),
+                "assetName": non_empty(input, "name").unwrap_or_default(),
+                "file": plan.file,
+                "slug": plan.detail.get("slug").cloned().unwrap_or(Value::Null),
+            }),
+        );
+        if !tx.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return tx;
+        }
+        // 台账：只有 link 模式有「链接」可记。方式从盘上读回，不猜。
+        let mut ledger_err = None;
+        if plan.mode == sharing::RuleMode::Link {
+            let keeper = plan
+                .detail
+                .get("keeper")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let slug_name = plan
+                .detail
+                .get("slug")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let method = linkfs::link_kind(Path::new(&plan.file)).unwrap_or(LinkMethod::Symlink);
+            if let Err(e) = self.record_link(lib, kind, &slug_name, &keeper, &plan.file, method) {
+                ledger_err = Some(e);
+            }
+        }
+        self.invalidate();
+        if let Value::Object(m) = &mut tx {
+            m.insert("written".to_string(), json!([plan.file]));
+            m.insert("skipped".to_string(), json!([]));
+            m.insert("file".to_string(), json!(plan.file));
+            m.insert("mode".to_string(), json!(plan.mode.as_str()));
+            m.insert("detail".to_string(), plan.detail);
+            if let Some(e) = ledger_err {
+                m.insert("ledgerWarning".to_string(), json!(e));
+            }
+        }
+        tx
+    }
+
+    /// 停用一条规则 / 记忆的共享（M4）。两种模式的收尾方式不同：
+    ///
+    /// | 盘上是什么 | 动作 | 库内主副本 |
+    /// |---|---|---|
+    /// | 指向库内的链接 | 删链接（`Op::delete`，只删链接本身） | 不动 |
+    /// | 含我们区块的文件 | 只删区块（`uncompose_plan` 算出整份新文本） | 不动 |
+    ///
+    /// `compose` 模式下**没有区块**就是零写入：说明它本来就没被共享过，不该把
+    /// 用户的文件重写一遍（重写会改掉 mtime，diff 也会动）。
+    fn disable_rule(&self, lib: &library::Library, kind: &str, input: &Value) -> Value {
+        let Some(file) = non_empty(input, "file").or_else(|| {
+            non_empty(input, "assetId").and_then(|id| {
+                self.index_get(&id)
+                    .and_then(|a| a.get("file").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            })
+        }) else {
+            return unsatisfied("rule.noTarget");
+        };
+        let file = store::native_str(Path::new(&file));
+        let file_path = Path::new(&file);
+
+        if linkfs::is_link(file_path) {
+            // 与 skill 同一条安全闸：指向库外就拒绝，删它会动到用户自己的文件。
+            if !lib.owns_target(file_path) {
+                return unsatisfied_with("share.foreignLink", json!({ "path": file }));
+            }
+            let mut tx = self.store.transaction(
+                &[Op::delete(&file)],
+                &json!({
+                    "kind": kind,
+                    "action": "disable",
+                    "agentId": input.get("agentId").cloned().unwrap_or(Value::Null),
+                    "projectId": input.get("projectId").cloned().unwrap_or(Value::Null),
+                    "file": file,
+                }),
+            );
+            if !tx.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return tx;
+            }
+            let mut ledger_err = None;
+            if let Ok(mut ledger) = lib.load_ledger() {
+                ledger.remove(&file);
+                if let Err(e) = lib.save_ledger(&ledger) {
+                    ledger_err = Some(e);
+                }
+            }
+            self.invalidate();
+            if let Value::Object(m) = &mut tx {
+                m.insert("written".to_string(), json!([file]));
+                m.insert("mode".to_string(), json!("link"));
+                if let Some(e) = ledger_err {
+                    m.insert("ledgerWarning".to_string(), json!(e));
+                }
+            }
+            return tx;
+        }
+
+        // compose：slug 与 enable 时同一套算法（目标文件名归一）。
+        let stem = Path::new(&file)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let slug_name = slug(&stem);
+        let plan = sharing::uncompose_plan(&file, &slug_name);
+        if plan.ops.is_empty() {
+            return json!({
+                "ok": true,
+                "written": [],
+                "skipped": [{ "target": input, "reason": "no managed block" }],
+                "file": file,
+                "mode": "compose",
+            });
+        }
+        let mut tx = self.store.transaction(
+            &plan.ops,
+            &json!({
+                "kind": kind,
+                "action": "disable",
+                "agentId": input.get("agentId").cloned().unwrap_or(Value::Null),
+                "projectId": input.get("projectId").cloned().unwrap_or(Value::Null),
+                "file": file,
+                "slug": slug_name,
+            }),
+        );
+        if tx.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            self.invalidate();
+            if let Value::Object(m) = &mut tx {
+                m.insert("written".to_string(), json!([file]));
+                m.insert("mode".to_string(), json!("compose"));
+            }
+        }
+        tx
+    }
+
     /// 往台账里登记（或更新）一条链接。台账读不出来时**不覆盖**，原样报错。
     fn record_link(
         &self,
@@ -1480,6 +1730,13 @@ impl Keeper {
     pub fn disable_asset(&self, input: &Value) -> Value {
         let lib = self.library();
         let kind = non_empty(input, "kind").unwrap_or_else(|| "skill".to_string());
+        // 规则 / 记忆走另一套：目标可能是链接（撤链接），也可能是一个 compose
+        // 出来的区块（只把我们放进去的那一截拿走）。两者都不是目录，所以不能
+        // 掉进下面按 slug 拼 skill 目录的那条路 —— 那条路会算出一个不存在的
+        // 路径，然后把一次**成功的**停用报成 `share.unknownAsset`。
+        if kind == "rule" || kind == "memory" {
+            return self.disable_rule(&lib, &kind, input);
+        }
         let mut name = non_empty(input, "name").unwrap_or_default();
         if name.is_empty() {
             if let Some(id) = non_empty(input, "assetId") {
