@@ -12,6 +12,7 @@ pub mod assets;
 pub mod compose;
 pub mod discover;
 pub mod doctor;
+pub mod flock;
 pub mod frontmatter;
 pub mod http;
 pub mod jsonc;

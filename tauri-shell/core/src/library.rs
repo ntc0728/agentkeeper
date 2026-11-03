@@ -162,6 +162,37 @@ impl Library {
         l.upsert(entry);
     }
 
+    /// **跨进程**的台账读-改-写：持有 `<store_root>/.lock` 期间完成
+    /// 「读 → 改 → 写」三件事。
+    ///
+    /// 为什么必须是一个整体：`load_ledger` + `save_ledger` 分开调用时，两个进程
+    /// 可以交替成「A 读 → B 读 → A 写 → B 写」，B 的那次写会把 A 刚登记的条目
+    /// 盖掉，而两边都返回成功。桌面端与 `agentkeeper-mcp` 同时启用不同资产就是
+    /// 这个形状（`keeper::record_link`、`disable_asset` 等）。
+    ///
+    /// 台账损坏时**照旧报错**、不做任何写入（与 `load_ledger` 的立场一致）：
+    /// 覆盖一本读不出来的台账等于静默丢光全部链接记录。
+    pub fn update_ledger<F>(&self, store_root: &str, f: F) -> Result<(), String>
+    where
+        F: FnOnce(&mut Ledger) -> Result<(), String>,
+    {
+        let _guard = crate::flock::StoreLock::acquire(store_root, crate::flock::DEFAULT_TIMEOUT)?;
+        let mut ledger = self.load_ledger()?;
+        f(&mut ledger)?;
+        self.save_ledger(&ledger)
+    }
+
+    /// **跨进程**的台账整本替换：持锁期间把 `ledger` 原样写盘，**不先读**。
+    ///
+    /// 只有一个调用方：`doctor` 的 `link.ledgerDrift(rebuild)`。重建的目的是
+    /// 换掉一本**读不出来**的台账 —— [`Self::update_ledger`] 会先 `load_ledger`
+    /// 并在损坏时返回 `Err`，那样重建永远开不了头。这里持锁直接写：磁盘事实
+    /// 已经算好（`rebuild_ledger`），锁只保证「写回的瞬间没有别人在动它」。
+    pub fn replace_ledger(&self, store_root: &str, ledger: &Ledger) -> Result<(), String> {
+        let _guard = crate::flock::StoreLock::acquire(store_root, crate::flock::DEFAULT_TIMEOUT)?;
+        self.save_ledger(ledger)
+    }
+
     /// 库内全部 MCP 规范形态记录（`<root>/mcp/servers/*.json`），按文件名排序。
     ///
     /// **只读**：目录不存在 = 空列表（还没有任何 MCP 进库，是正常状态，不是错）。
@@ -331,6 +362,9 @@ pub struct Migrating {
     pub from: String,
     pub to: String,
     pub done: Vec<String>,
+    /// 迁移开始时算出的顶层子项数（进度分母）。`from_json` 对旧 journal 缺省 0 ——
+    /// 读到 0 时调用方按「未知总数」呈现，不显示百分比。
+    pub total: usize,
     /// 已重指到新库根的链接 dst 列表。
     ///
     /// 顶层子项靠「磁盘事实」（源侧不在了）就能续跑，链接不行：一条链接在磁盘上
@@ -357,6 +391,7 @@ impl Migrating {
             from: v.get("from").and_then(|x| x.as_str())?.to_string(),
             to: v.get("to").and_then(|x| x.as_str())?.to_string(),
             done: list("done"),
+            total: v.get("total").and_then(Value::as_u64).unwrap_or(0) as usize,
             relinked: list("relinked"),
         })
     }
@@ -436,6 +471,7 @@ impl Ledger {
                     "from": m.from,
                     "to": m.to,
                     "done": m.done,
+                    "total": m.total,
                     "relinked": m.relinked,
                 }),
             );
@@ -699,6 +735,7 @@ mod tests {
             from: r"C:\old".to_string(),
             to: r"C:\new".to_string(),
             done: vec![r"C:\a\skills\pdf".to_string()],
+            total: 1,
             relinked: Vec::new(),
         });
         lib.save_ledger(&l).expect("save");

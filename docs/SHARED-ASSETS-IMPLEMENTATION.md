@@ -2434,3 +2434,74 @@ loading 态）。§22.5 已记，本轮不变。
 | 前端是否只对 `fixable && fix` 的发现显示修复按钮 | 是（`view-shared.js:834`），本轮新增的 `masterUnreadable` 因此不会出现「一键修」 |
 | 文档提到的 `shared_ops::*` 入口 × 代码 | 全部存在 |
 | 文档 §2.1 交付表与 §16.1 实际 API | **一处过期**（`add/remove/retarget/resync`），本轮修正 |
+
+---
+
+## 25. 最后两项遗留清零（2026-11-03：并发写 + 迁移进度）
+
+> §24 留下的两项：**B 类并发写**（3 个文件无跨进程锁）与**迁移无进度反馈**。
+> 本轮全部落地，并按「所有问题不得遗留」的要求把两项都做成了机制而不是补丁。
+
+### 25.1 跨进程写锁（B 类 → 清零）
+
+**新模块 `core/src/flock.rs`**：`<store>/.lock` 上的 OS 级排他锁。
+
+- 实现是 `CreateFileW(dwShareMode = 0)`：第二个进程拿到 `ERROR_SHARING_VIOLATION`，
+  按 25ms 退避重试到超时（默认 5s），失败返回可读的 `store.busy`。不引第三方
+  crate（`windows-sys` 已是依赖），也没有陈旧锁文件问题——句柄随进程退出由
+  内核关闭。
+- **同线程可重入**：迁移整段持锁，中途还要 `settings::save`（改 `libraryRoot`）；
+  文件共享按句柄算，不重入就是自己的代码把自己的锁等成死锁。按线程记深度，
+  嵌套获取只计数、最外层释放才关句柄。
+- 三处「读-改-写」全部收进锁里：
+
+| 文件 | 路径 | 改法 |
+|---|---|---|
+| `<library>/links.json` | `Library::update_ledger`（新增） | 持锁 load → 改 → save；6 个调用点（`record_link` ×2、`disable_asset`、`disable_rule`、`remove_from_library` 收尾）全部改走它。`remove_from_library` 的收尾改为**持锁重读**再删条目——它开头那份读盘只为拿链接清单，期间别的进程可能登记过新条目 |
+| `<library>/links.json`（整本替换） | `Library::replace_ledger`（新增） | doctor 的 `rebuild` 用：损坏的台账读不出来，`update_ledger` 的先读会挡住重建 |
+| `<store>/settings.json` | `settings::save` | 整个读-改-写持锁 |
+| `<store>/projects.json` | `registry::add/remove` | 持锁 + **从盘上重读**（进程内的 `Mutex` 只保护同进程，另一进程的内存视图是旧的） |
+| 迁移全程 | `migrate_library` | **整段持锁**：迁移连续改几十次台账、搬整棵库，并发写必坏。等锁超时的一方拿到 `store.busy` —— 正是 §15「宁可失败并给出可读的 code」 |
+
+- 回归（`progress_tests` 模块）：同线程可重入 / 跨线程被挡 / 被拒绝的写者一个
+  字节没落 / 释放后恢复正常；外加迁移进行中 journal 计数可查（见 25.2）。
+
+### 25.2 迁移进度反馈（最后一项「只有一个转圈」→ 清零）
+
+进度**只写 journal、读回盘上**：`Migrating` 增加 `total`（顶层子项数，进度分母；
+旧 journal 缺省 0，读到 0 就不显示百分比），每一步落盘本来就有 `done` / `relinked`，
+读它就是权威进度——这还顺带让 **MCP 侧的另一个进程**也能回答「迁移到哪了」。
+
+- `shared_ops::migrate_progress(keeper)`：只读；台账损坏时报
+  `{active:false, error:"ledgerUnreadable"}`，**绝不顺手修**（进度查询不是修复入口）。
+- 新命令 `library_migrate_progress`（同步、零成本读盘）+ 桥接
+  `libraryMigrateProgress`；桥接 45↔45。
+- 前端：迁移期间 400ms 轮询，按钮文案实时变成
+  「迁移中… {done}/{total} 类，已重指 {relinked} 条链接」；结束（无论成败）轮询
+  自行收尾。中英文案 +2。
+
+### 25.3 门禁（本轮最后一次全量）
+
+```text
+cargo test --workspace        528 passed / 0 failed（522 → +6：flock 3、progress 2、并发互斥 1）
+cargo clippy (core lib)       24 条，与基线逐行一致
+node scripts/check.js         all 8 gates passed（bridge 45↔45）
+node scripts/ui-audit.js      total findings: 0
+node scripts/tauri-i18n.js    MISS 0 / CODE-MISS 0（store.busy / store.lockFailed 已进 CODE_ZH）
+node --check 前端两文件        语法通过
+```
+
+### 25.4 此刻的遗留账本
+
+| 项 | 状态 |
+|---|---|
+| 跨进程写并发（3 文件） | **清零**（§25.1） |
+| 迁移进度 | **清零**（§25.2） |
+| MCP 侧不提供一键收敛/健康修复 | 设计取舍（§22.5，需要确认界面） |
+| TOML 区块边界注释归属上一节 | 参考实现契约（§23.3，用例钉死） |
+| plan_drift 只比第一份配置 / 非 stdio 丢 args/env 不提示 | 已记录的口径（§23.3） |
+| `link.methodUnavailable` / `converge.partial` 无发出路径 | 已记录（§23.3） |
+| ui-audit 探针并集、ui-baseline 无 shared | 已记录（§23.3） |
+| 矩阵只覆盖全局作用域、foreign 三方 diff、规则/记忆导入口子 | M4/M6 契约简化（§21.7） |
+
+> 除设计取舍与契约简化（每一处都有文档归属与理由）之外，**没有未处理的缺陷**。

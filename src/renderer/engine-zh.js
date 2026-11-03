@@ -490,6 +490,9 @@ const CODE_ZH = {
   'library.migrateFailed': '共享库迁移中断了：已搬完的部分不会重复搬，修复问题后重跑同一目标即可从断点继续',
   // 删库内资产时主副本进回收站没成功（跨卷拷贝不完整）：整次删除放弃，磁盘原样。
   'library.trashFailed': '移入回收站失败：内容没有完整拷进回收站，所以原位置一个字没动',
+  // 跨进程写锁（flock.rs）：另一个进程（桌面端 / agentkeeper-mcp）正握着共享状态。
+  'store.busy': '另一个进程正在修改共享数据，请稍等几秒再试一次',
+  'store.lockFailed': '共享数据锁不可用（权限或只读介质），本次写入没有执行',
   'project.duplicate': '项目已注册',
   'project.notDirectory': '所选路径不是文件夹',
   'project.directoryNotFound': '文件夹不存在',

@@ -1734,11 +1734,11 @@ impl Keeper {
                 return tx;
             }
             let mut ledger_err = None;
-            if let Ok(mut ledger) = lib.load_ledger() {
+            if let Err(e) = lib.update_ledger(self.store.root_str(), |ledger| {
                 ledger.remove(&file);
-                if let Err(e) = lib.save_ledger(&ledger) {
-                    ledger_err = Some(e);
-                }
+                Ok(())
+            }) {
+                ledger_err = Some(e);
             }
             self.invalidate();
             if let Value::Object(m) = &mut tx {
@@ -1953,12 +1953,15 @@ impl Keeper {
         dst: &str,
         method: LinkMethod,
     ) -> Result<(), String> {
-        let mut ledger = lib.load_ledger()?;
-        lib.record(
-            &mut ledger,
-            library::LinkEntry::new(kind, slug_name, src, dst, method),
-        );
-        lib.save_ledger(&ledger)
+        // 读-改-写必须在同一把跨进程锁里完成，否则并发的两个进程会互相盖掉
+        // 对方刚登记的条目（`library::update_ledger` 的文档讲了那个时序）。
+        lib.update_ledger(self.store.root_str(), |ledger| {
+            lib.record(
+                ledger,
+                library::LinkEntry::new(kind, slug_name, src, dst, method),
+            );
+            Ok(())
+        })
     }
 
     /// 停用某个 agent 上的库内链接：**只删链接，库内主副本一个字节都不动**。
@@ -2051,11 +2054,11 @@ impl Keeper {
             return tx;
         }
         let mut ledger_err = None;
-        if let Ok(mut ledger) = lib.load_ledger() {
+        if let Err(e) = lib.update_ledger(self.store.root_str(), |ledger| {
             ledger.remove(&dst);
-            if let Err(e) = lib.save_ledger(&ledger) {
-                ledger_err = Some(e);
-            }
+            Ok(())
+        }) {
+            ledger_err = Some(e);
         }
         self.invalidate();
         if let Value::Object(m) = &mut tx {
@@ -2172,7 +2175,21 @@ impl Keeper {
                 Err(reason) => failed.push(json!({ "path": dst, "reason": reason })),
             }
         }
-        let ledger_err = lib.save_ledger(&ledger).err();
+        // 收尾的台账更新走同一把跨进程锁，并且**重新读一遍**：
+        // 上面那段读盘只为拿链接清单，期间别的进程可能已经登记了新条目；
+        // 拿旧快照整份写回会把它盖掉。
+        let removed_paths: Vec<String> = removed
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        let ledger_err = lib
+            .update_ledger(self.store.root_str(), |fresh| {
+                for dst in &removed_paths {
+                    fresh.remove(dst);
+                }
+                Ok(())
+            })
+            .err();
         self.invalidate();
         json!({
             "ok": true,

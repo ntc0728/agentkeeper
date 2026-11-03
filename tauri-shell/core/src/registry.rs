@@ -39,6 +39,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::model::{hash16, iso_from_millis, js_slice, norm_str, slug};
+use super::flock;
 use super::settings;
 
 /* ------------------------------------------------------------------ */
@@ -227,6 +228,30 @@ fn save(r: &Registry) -> std::io::Result<()> {
     settings::atomic_write(&r.file, &render(&r.projects))
 }
 
+/// 取跨进程锁并**从盘上重读**当前注册表。
+///
+/// 进程内的 `Mutex` 只保护同进程的并发；桌面端与 `agentkeeper-mcp` 是两个进程，
+/// 各自内存里的 `projects` 都可能是旧的。加锁之后从磁盘重读一遍，本进程的
+/// 修改再叠在**最新**的那份上 —— 否则「GUI 注册项目 A / MCP 注册项目 B」
+/// 交替成「A 读 → B 读 → A 写 → B 写」，A 注册的项目被 B 整份写回盖掉。
+/// 拿不到锁返回 `store.busy`，让调用方把它当一次失败呈现，而不是静默覆盖。
+fn lock_and_reload(r: &mut Registry) -> Result<flock::StoreLock, String> {
+    let store_root = r
+        .file
+        .parent()
+        .map(crate::store::native_str)
+        .unwrap_or_default();
+    let guard = flock::StoreLock::acquire(&store_root, flock::DEFAULT_TIMEOUT)?;
+    if let Ok(text) = std::fs::read_to_string(&r.file) {
+        if let Ok(v) = serde_json::from_str::<Value>(&text) {
+            if let Some(list) = v.get("projects").and_then(Value::as_array) {
+                r.projects = list.clone();
+            }
+        }
+    }
+    Ok(guard)
+}
+
 /* ------------------------------------------------------------------ */
 /* 公开的注册表 API                                                       */
 /* ------------------------------------------------------------------ */
@@ -254,6 +279,11 @@ pub fn add(dir: &str, name: Option<&str>) -> Value {
         // 悄悄在进程的工作目录里创建 `projects.json` 要好。
         return json!({ "ok": false, "error": "registry not initialised" });
     }
+    // 持锁 + 从盘上重读：跨进程的「最后写者赢」在这里被挡住。
+    let _guard = match lock_and_reload(&mut r) {
+        Ok(g) => g,
+        Err(code) => return json!({ "ok": false, "code": code }),
+    };
 
     // 大小写不敏感，而且刻意跑在存在性检查之前。
     let needle = abs.to_lowercase();
@@ -305,6 +335,10 @@ pub fn remove(id: &str) -> Value {
     if r.file.as_os_str().is_empty() {
         return json!({ "ok": false, "error": "registry not initialised" });
     }
+    let _guard = match lock_and_reload(&mut r) {
+        Ok(g) => g,
+        Err(code) => return json!({ "ok": false, "code": code }),
+    };
     let before = r.projects.len();
     r.projects
         .retain(|p| p.get("id").and_then(Value::as_str) != Some(id));

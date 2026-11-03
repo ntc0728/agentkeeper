@@ -168,18 +168,18 @@ fn same_content(a: &Path, b: &Path) -> bool {
 /// 修复看起来失败（台账是索引，可以重建）。
 fn ledger_warning(
     lib: &Library,
+    store_root: &str,
     kind: &str,
     name: &str,
     src: &str,
     dst: &str,
 ) -> Option<String> {
     let method = linkfs::link_kind(Path::new(dst)).unwrap_or(LinkMethod::Symlink);
-    let mut ledger = match lib.load_ledger() {
-        Ok(l) => l,
-        Err(e) => return Some(e),
-    };
-    lib.record(&mut ledger, LinkEntry::new(kind, name, src, dst, method));
-    lib.save_ledger(&ledger).err()
+    lib.update_ledger(store_root, |ledger| {
+        lib.record(ledger, LinkEntry::new(kind, name, src, dst, method));
+        Ok(())
+    })
+    .err()
 }
 
 /* ------------------------------------------------------------------ */
@@ -552,7 +552,7 @@ fn fix_dangling(keeper: &Keeper, path: &str, detail: &Value, fix: &str) -> Value
     if !tx_ok(&tx) {
         return tx_failure(tx);
     }
-    let warning = ledger_warning(&lib, &kind, &name, &src, &dst);
+    let warning = ledger_warning(&lib, keeper.store.root_str(), &kind, &name, &src, &dst);
     keeper.invalidate();
     let mut out = json!({
         "ok": true,
@@ -640,7 +640,7 @@ fn fix_hijacked(keeper: &Keeper, path: &str, detail: &Value, fix: &str) -> Value
     if !tx_ok(&tx) {
         return tx_failure(tx);
     }
-    let warning = ledger_warning(&lib, &kind, &name, &src, &dst);
+    let warning = ledger_warning(&lib, keeper.store.root_str(), &kind, &name, &src, &dst);
     keeper.invalidate();
     let mut out = json!({
         "ok": true,
@@ -665,7 +665,9 @@ fn fix_ledger_drift(keeper: &Keeper, fix: &str) -> Value {
     }
     let lib = keeper.library();
     let ledger = rebuild_ledger(keeper, &lib);
-    if let Err(e) = lib.save_ledger(&ledger) {
+    // 整本替换必须持锁（`replace_ledger`）：写回的瞬间可能恰好有另一个进程在
+    // 登记链接 —— 无锁的「算好整本再写」会把那条登记盖掉。
+    if let Err(e) = lib.replace_ledger(keeper.store.root_str(), &ledger) {
         return fail_with("write.failed", json!({ "error": e }));
     }
     keeper.invalidate();
@@ -908,7 +910,7 @@ fn fix_unmanaged(keeper: &Keeper, path: &str, detail: &Value, fix: &str) -> Valu
     if !tx_ok(&tx) {
         return tx_failure(tx);
     }
-    let warning = ledger_warning(&lib, "skill", &slug_name, &keeper_str, &dst);
+    let warning = ledger_warning(&lib, keeper.store.root_str(), "skill", &slug_name, &keeper_str, &dst);
     keeper.invalidate();
     let mut out = json!({
         "ok": true,
@@ -1181,6 +1183,31 @@ fn transport_of(entry: &Value) -> String {
 /// 动作本身是幂等的（已搬过的看磁盘就知道、已重指过的链接读目标就知道），
 /// 所以中断后重跑会从磁盘事实继续，最终状态与一次跑完一致。事务的「失败即回滚」
 /// 在这里由「失败即留 journal、重跑收敛」替代。
+///
+/// 进度**只写 journal、读回盘上**（[`migrate_progress`]）：迁移跑在
+/// `spawn_blocking` 里，命令层不想在它和窗口之间再架一条事件通道——journal
+/// 本来就每一步落盘，读它就是权威进度，还顺便让**另一个进程**（MCP 侧）也能
+/// 回答「迁移到哪了」。
+pub fn migrate_progress(keeper: &Keeper) -> Value {
+    let lib = keeper.library();
+    let Ok(ledger) = lib.load_ledger() else {
+        // 台账读不出来时进度查询保持只读立场：报告未知，绝不顺手修。
+        return json!({ "active": false, "error": "ledgerUnreadable" });
+    };
+    match &ledger.migrating {
+        Some(m) => json!({
+            "active": true,
+            "from": m.from,
+            "to": m.to,
+            "done": m.done.len(),
+            "total": m.total,
+            "relinked": m.relinked.len(),
+            "links": ledger.entries.len(),
+        }),
+        None => json!({ "active": false }),
+    }
+}
+
 pub fn migrate_library(keeper: &Keeper, input: &Value) -> Value {
     let lib = keeper.library();
     let from = store::native_str(lib.root());
@@ -1213,6 +1240,20 @@ pub fn migrate_library(keeper: &Keeper, input: &Value) -> Value {
             return fail_with("link.ledgerDrift", json!({ "error": e }));
         }
     };
+    // **整段迁移持锁**：迁移要连续改几十次台账、搬整棵库，中途任何别的进程
+    // 登记/停用链接都会落进一份即将被搬走的台账里。锁在同一线程内可重入
+    // （`flock` 模块注释），所以末尾改 `settings.libraryRoot` 的那次
+    // `settings::save` 不会死锁。等锁超时的另一边拿到的是 `store.busy`——
+    // 这正是想要的：迁移期间拒绝并发写，而不是让两边各写各的。
+    let _migration_guard = match crate::flock::StoreLock::acquire(
+        keeper.store.root_str(),
+        crate::flock::DEFAULT_TIMEOUT,
+    ) {
+        Ok(g) => g,
+        // 拿不到锁说明有别的进程正在写共享状态（更可能就是另一条迁移）：
+        // `store.busy` 比静默开始一次注定冲突的迁移诚实得多。
+        Err(code) => return fail_with(&code, json!({ "action": "library_migrate" })),
+    };
     // 续跑：journal 的目标一致才继续；指向别处的 journal 说明另一个迁移没做完，
     // 覆盖它会让那批链接永久指错。
     let (resumed, mut done, mut relinked) = match &ledger.migrating {
@@ -1226,13 +1267,22 @@ pub fn migrate_library(keeper: &Keeper, input: &Value) -> Value {
         None => (false, Vec::new(), Vec::new()),
     };
     // 1) journal 落盘（写在当前库根的台账里）。
-    let journal = |done: &[String], relinked: &[String]| Migrating {
+    // `total` 要等第 2 步算出并集才知道；闭包按参数接，别处调用（循环内每次
+    // 刷 journal）传同一个值。
+    let journal = |total: usize, done: &[String], relinked: &[String]| Migrating {
         from: from.clone(),
         to: to.clone(),
         done: done.to_vec(),
+        total,
         relinked: relinked.to_vec(),
     };
-    ledger.migrating = Some(journal(&done, &relinked));
+    // 首次落盘时顶层并集还没算，先记 from 侧的数量；第 2 步算出 `total` 后，
+    // 每一项的进度刷新都会带正确的分母。
+    ledger.migrating = Some(journal(
+        top_level_names(Path::new(&from)).len(),
+        &done,
+        &relinked,
+    ));
     if let Err(e) = lib.save_ledger(&ledger) {
         return fail_with("write.failed", json!({ "error": e }));
     }
@@ -1295,7 +1345,7 @@ pub fn migrate_library(keeper: &Keeper, input: &Value) -> Value {
         }
         // 每搬一项就刷新一次进度。写失败不中断：磁盘状态本身已经能回答
         // 「这一项在哪」，journal 只是让人更快看出来的记录。
-        ledger.migrating = Some(journal(&done, &relinked));
+        ledger.migrating = Some(journal(total, &done, &relinked));
         let _ = lib.save_ledger(&ledger);
         settings::audit(
             keeper.store.root_str(),
@@ -1344,7 +1394,7 @@ pub fn migrate_library(keeper: &Keeper, input: &Value) -> Value {
             // 不是链接（被顶掉 / 已删）：没有可重指的对象，只更新台账 src，
             // 让下一次 doctor 以正确的 src 判定这一条。
             ledger.entries[i].src = new_src;
-            ledger.migrating = Some(journal(&done, &relinked));
+            ledger.migrating = Some(journal(total, &done, &relinked));
             let _ = lib.save_ledger(&ledger);
             continue;
         }
@@ -1356,7 +1406,7 @@ pub fn migrate_library(keeper: &Keeper, input: &Value) -> Value {
         {
             ledger.entries[i].src = new_src;
             relinked.push(dst);
-            ledger.migrating = Some(journal(&done, &relinked));
+            ledger.migrating = Some(journal(total, &done, &relinked));
             let _ = lib.save_ledger(&ledger);
             continue;
         }
@@ -1375,7 +1425,7 @@ pub fn migrate_library(keeper: &Keeper, input: &Value) -> Value {
                 ledger.entries[i].src = new_src.clone();
                 links += 1;
                 relinked.push(dst.clone());
-                ledger.migrating = Some(journal(&done, &relinked));
+                ledger.migrating = Some(journal(total, &done, &relinked));
                 let _ = lib.save_ledger(&ledger);
                 settings::audit(
                     keeper.store.root_str(),
@@ -2216,6 +2266,7 @@ mod tests {
             from: store::native_str(&old_root),
             to: new_str.clone(),
             done: vec!["skills".to_string()],
+            total: 2,
             relinked: Vec::new(),
         });
         lib.save_ledger(&ledger).unwrap();
@@ -2287,6 +2338,7 @@ mod tests {
             from: store::native_str(&old_root),
             to: new_str.clone(),
             done: vec!["skills".to_string()],
+            total: 2,
             relinked: relinked.clone(),
         });
         Library::at(&old_root).save_ledger(&ledger).unwrap();
@@ -2322,5 +2374,150 @@ mod tests {
             assert!(Path::new(&e.dst).exists(), "{} 不再是可用的链接", e.dst);
         }
         cleanup(&root, &home);
+    }
+}
+
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    use crate::keeper::Keeper;
+    use crate::library::Library;
+    use crate::library::Migrating;
+    use crate::store::Store;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn temp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "ak-prog-{}-{}-{:?}",
+            tag,
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("temp dir");
+        d
+    }
+
+    fn keeper_at(root: &std::path::Path, home: &std::path::Path) -> Keeper {
+        let k = Keeper::new(
+            Store::new(&crate::store::native_str(root)),
+            &crate::store::native_str(home),
+        );
+        crate::settings::ensure_store(k.store.root_str()).expect("ensure_store");
+        k
+    }
+
+    /// 进度查询是**只读**的：没有迁移时 `active:false`；journal 在场时报告
+    /// journal 里的计数（这正是迁移期间另一条命令/另一个进程读到的东西）。
+    #[test]
+    fn progress_reports_the_journal_while_it_is_in_flight() {
+        let root = temp("journal");
+        let home = root.join("home");
+        let store = root.join("store");
+        std::fs::create_dir_all(&home).expect("home");
+        let k = keeper_at(&store, &home);
+        let lib = k.library();
+
+        let idle = migrate_progress(&k);
+        assert_eq!(idle["active"], serde_json::json!(false), "{idle}");
+
+        // 手工写一份进行中的 journal（与迁移第 1 步落盘的形态一致）。
+        let mut ledger = lib.load_ledger().unwrap();
+        ledger.migrating = Some(Migrating {
+            from: crate::store::native_str(&home.join(".agents")),
+            to: crate::store::native_str(&store.join("library")),
+            done: vec!["skills".to_string()],
+            total: 2,
+            relinked: vec![
+                crate::store::native_str(&home.join(".claude").join("skills").join("pdf")),
+                crate::store::native_str(&home.join(".codex").join("skills").join("pdf")),
+                crate::store::native_str(&home.join(".cursor").join("skills").join("pdf")),
+            ],
+        });
+        lib.save_ledger(&ledger).unwrap();
+
+        let prog = migrate_progress(&k);
+        assert_eq!(prog["active"], serde_json::json!(true), "{prog}");
+        assert_eq!(prog["done"], serde_json::json!(1), "{prog}");
+        assert_eq!(prog["total"], serde_json::json!(2), "{prog}");
+        assert_eq!(prog["relinked"], serde_json::json!(3), "{prog}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 台账读不出来时进度查询保持只读立场：报告未知，**不**顺手修。
+    #[test]
+    fn progress_does_not_repair_a_corrupt_ledger() {
+        let root = temp("corrupt");
+        let home = root.join("home");
+        let store = root.join("store");
+        std::fs::create_dir_all(&home).expect("home");
+        let k = keeper_at(&store, &home);
+        std::fs::create_dir_all(home.join(".agents")).unwrap();
+        std::fs::write(home.join(".agents").join("links.json"), "{").unwrap();
+
+        let prog = migrate_progress(&k);
+        assert_eq!(prog["active"], serde_json::json!(false), "{prog}");
+        assert_eq!(prog["error"], serde_json::json!("ledgerUnreadable"), "{prog}");
+        assert_eq!(
+            std::fs::read_to_string(home.join(".agents").join("links.json")).unwrap(),
+            "{"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 跨进程锁的端到端证明：锁被持有期间，另一个写者（另一条线程，内核层面
+    /// 与另一进程同属「按句柄互斥」）拿 `store.busy`、台账零损坏；释放后一切
+    /// 恢复正常。
+    #[test]
+    fn concurrent_writers_serialize_on_the_store_lock() {
+        let root = temp("lock");
+        let home = root.join("home");
+        let store = root.join("store");
+        std::fs::create_dir_all(&home).expect("home");
+        let k = keeper_at(&store, &home);
+        let lib = k.library();
+
+        let guard =
+            crate::flock::StoreLock::acquire(k.store.root_str(), Duration::from_secs(5))
+                .expect("hold the lock");
+
+        let store_str = crate::store::native_str(&store);
+        let home_str = crate::store::native_str(&home);
+        let agents_str = crate::store::native_str(&home.join(".agents"));
+        let store_for_child = store_str.clone();
+        let child = std::thread::spawn(move || {
+            // 另一个写者的取锁路径（与 update_ledger 相同），预算收紧到
+            // 150ms：锁被主线程持有时，它只可能拿到 busy。
+            crate::flock::StoreLock::acquire(&store_for_child, Duration::from_millis(150)).err()
+        });
+        // 让子线程真的撞上锁（而不是在 guard 释放之后才开始）。
+        std::thread::sleep(Duration::from_millis(300));
+        drop(guard);
+        let refused = child.join().expect("child thread");
+        assert_eq!(
+            refused.as_deref(),
+            Some("store.busy"),
+            "the second writer must be refused while the first holds the lock"
+        );
+        let ledger = lib.load_ledger().unwrap();
+        assert!(
+            ledger.entries.iter().all(|e| e.name != "intruder"),
+            "a refused writer must not have touched the ledger"
+        );
+        // 释放后一切恢复正常。
+        lib.update_ledger(k.store.root_str(), |ledger| {
+            ledger.upsert(crate::library::LinkEntry::new(
+                "skill",
+                "latecomer",
+                "/somewhere",
+                "/elsewhere",
+                crate::linkfs::LinkMethod::Symlink,
+            ));
+            Ok(())
+        })
+        .expect("after release the lock is available again");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

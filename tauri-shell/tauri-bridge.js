@@ -53,6 +53,7 @@
     sharedDoctor: function () { return call('shared_doctor'); },
     applyFindingFix: function (payload) { return call('apply_finding_fix', { payload: payload }); },
     libraryMigrate: function (payload) { return call('library_migrate', { payload: payload }); },
+    libraryMigrateProgress: function () { return call('library_migrate_progress'); },
 
     deleteMcp: function (assetId) { return call('delete_mcp', { args: { assetId: assetId } }); },
     deleteAsset: function (assetId) { return call('delete_asset', { args: { assetId: assetId } }); },

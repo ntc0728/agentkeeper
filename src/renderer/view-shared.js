@@ -44,7 +44,9 @@
     // 探测只在每次打开共享页时跑一次（bootstrap 刻意不把候选数算进启动路径）。
     hintProbed: false,
     // 库位置迁移正在跑（按钮禁用，避免连点两次）。
-    migrateBusy: false
+    migrateBusy: false,
+    // 轮询回来的最新进度（{done,total,relinked,links}）；null = 没在迁移。
+    migrateProgress: null
   };
 
   const TABS = ['skills', 'mcp', 'rules', 'memory', 'health'];
@@ -1180,6 +1182,20 @@
     stepOne();
   }
 
+  /** 迁移按钮的文案：空闲时是「迁移库…」，迁移中带上 journal 里的实时进度。 */
+  function migrateLabel() {
+    const p = S.migrateProgress;
+    if (!p || !p.active) return t('shared.migrate');
+    const moved = typeof p.done === 'number' ? p.done : 0;
+    const total = typeof p.total === 'number' ? p.total : 0;
+    const relinked = typeof p.relinked === 'number' ? p.relinked : 0;
+    return t('shared.migrateProgress', {
+      done: moved,
+      total: total,
+      relinked: relinked
+    });
+  }
+
   /**
    * 库位置迁移对话框（§9.3）。
    *
@@ -1200,6 +1216,19 @@
       if (typeof closeModal === 'function') closeModal();
       S.migrateBusy = true;
       paint();
+      // 迁移跑在阻塞池里（spawn_blocking），本页通过轮询 journal 的进度标记
+      // 把「第几类 / 重指到第几条」画到按钮上；journal 每一步都落盘，
+      // 所以进度对 MCP 侧同样可读。迁移结束（无论成败）轮询自行收尾。
+      const poll = setInterval(() => {
+        void (async () => {
+          try {
+            const p = await call('libraryMigrateProgress');
+            if (!p || !p.active) return;
+            S.migrateProgress = p;
+            paint();
+          } catch (e) { /* 一次轮询失败不值得打扰迁移 */ }
+        })();
+      }, 400);
       try {
         const r = await call('libraryMigrate', { to: to });
         if (!r || r.ok === false) {
@@ -1213,6 +1242,8 @@
         reportUiError('error', e);
         toast(t('shared.migrateFailed', { msg: zhError(e) }), 'err');
       } finally {
+        clearInterval(poll);
+        S.migrateProgress = null;
         S.migrateBusy = false;
         paint();
       }
@@ -1276,7 +1307,7 @@
         disabled: S.migrateBusy,
         'data-focus-key': 'shared-migrate',
         onclick: () => void openMigrate()
-      }, t('shared.migrate'))));
+      }, migrateLabel())));
     if (libraryEmpty(d)) {
       box.appendChild(el('div', { class: 'card' },
         el('div', { class: 'empty' },

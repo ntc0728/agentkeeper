@@ -777,6 +777,16 @@ async fn library_migrate(payload: Value) -> Result<Value, String> {
     .map_err(|e| format!("library_migrate task failed: {}", e))
 }
 
+/// `library_migrate_progress` —— 迁移进行到哪了（**同步**命令）。
+///
+/// 读台账的 `migrating` 标记（journal 每一步都落盘），所以进度对另一个进程
+/// （MCP 侧）同样可读。渲染层在迁移期间轮询它（400 ms），界面从「只有一个
+/// 转圈」变成「第几类 / 重指到第几条」。
+#[tauri::command]
+fn library_migrate_progress() -> Value {
+    core::shared_ops::migrate_progress(&open_keeper())
+}
+
 // --- 更新通道 -------------------------------------------------------------
 //
 // 状态机住在 `core::update::manager` 里；这些命令是渲染层
@@ -1309,6 +1319,7 @@ pub fn run() {
             shared_doctor,
             apply_finding_fix,
             library_migrate,
+            library_migrate_progress,
             update_status,
             update_check,
             update_releases,

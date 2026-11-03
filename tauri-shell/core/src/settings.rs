@@ -216,6 +216,15 @@ pub fn read(root: &str) -> Value {
 /// 成功路径完全一致。错误以 `{ ok: false, error }` 的形式浮现，而不是一次悄悄的
 /// 成功：一次没有到达磁盘的设置变更绝不能看起来像是成功了。
 pub fn save(root: &str, patch: &Value) -> Value {
+    // 读-改-写必须在跨进程锁里完成：桌面端与 `agentkeeper-mcp` 同时保存设置时，
+    // 后写的会整份盖掉先写的补丁（两个进程各持一份旧快照，谁也不知道对方改过
+    // 哪个键）。锁在同线程可重入（迁移期间改 `libraryRoot` 的那一次）。
+    let _guard = match crate::flock::StoreLock::acquire(root, crate::flock::DEFAULT_TIMEOUT) {
+        Ok(g) => g,
+        Err(code) => {
+            return json!({ "ok": false, "code": code });
+        }
+    };
     let current = read(root);
     let d = defaults();
     let mut next = current.as_object().cloned().unwrap_or_default();
