@@ -1447,7 +1447,13 @@ pub fn compose_unsupported(file: &str) -> Option<&'static str> {
 /// `mode` 为空时按「能不能 compose」选：能 compose 就 compose —— 因为 `link` 会
 /// 把用户的文件变成链接，那是更重的一步，不该是缺省。`.mdc` 没有 compose，于是
 /// 缺省只能是 link。
-pub fn rule_plan(library: &Library, target: &RuleTarget, mode: Option<RuleMode>) -> RulePlan {
+pub fn rule_plan(
+    library: &Library,
+    target: &RuleTarget,
+    mode: Option<RuleMode>,
+    force: bool,
+) -> RulePlan {
+    let _ = force;
     let Some(file) = target.resolve() else {
         let m = mode.unwrap_or(RuleMode::Compose);
         return RulePlan::refused("", m, "rule.noTarget", json!({}));
@@ -1574,7 +1580,10 @@ pub fn rule_plan(library: &Library, target: &RuleTarget, mode: Option<RuleMode>)
             // 「区块还在、内容被改过」，那一种必须拒。
             let existing = compose::find_block(&raw, &slug_name);
             if let Some(b) = &existing {
-                if compose::is_foreign_edit(&raw, &slug_name, &body) {
+                if compose::is_foreign_edit(&raw, &slug_name, &body) && !force {
+                    // 闸门：区块被外部改过时拒绝。`force`（用户在两方 diff 里显式
+                    // 选了「以库内为准」）是唯一绕过方式 —— 它是人对着 diff 做的
+                    // 决定，不是调用方图省事的开关。
                     return RulePlan::refused(
                         &file,
                         mode,
@@ -1589,8 +1598,15 @@ pub fn rule_plan(library: &Library, target: &RuleTarget, mode: Option<RuleMode>)
                 }
             }
             let next = compose::upsert_block(&raw, &slug_name, &body);
-            if next == raw {
-                // 区块已经在位且内容一致：零写入、零撤销快照（幂等的前提）。
+            if next == raw && keeper_path.exists() {
+                // 区块已经在位、内容一致、库里也有主副本：零写入、零撤销快照
+                //（幂等的前提）。
+                //
+                // `keeper_path.exists()` 是 §26.2 补的条件：compose 分支此前
+                // **从不写库内主副本**——首次 compose 后库里什么都没有，于是
+                // 每次同步都退回「拿盘上自己的内容当库内版本」，区块被外部
+                // 改过后 force 重建会得到嵌套区块（区块里套区块）。「单一
+                // 事实源」对 compose 也必须成立：第一次启用就把主副本落进库。
                 return RulePlan {
                     file,
                     mode,
@@ -1599,10 +1615,21 @@ pub fn rule_plan(library: &Library, target: &RuleTarget, mode: Option<RuleMode>)
                     detail: json!({ "unchanged": true, "slug": slug_name }),
                 };
             }
+            let mut ops = vec![Op::write(&file, &next)];
+            if !keeper_path.exists() {
+                // 首次 compose：库内主副本 = 区块 body（此刻与用户原文一致）。
+                // 与目标文件的写入在**同一个事务**里，要么都落、要么都不落。
+                ops.push(Op::write(
+                    &keeper,
+                    &compose::find_block(&next, &slug_name)
+                        .map(|b| b.body)
+                        .unwrap_or_else(|| body.clone()),
+                ));
+            }
             RulePlan {
                 file: file.clone(),
                 mode,
-                ops: vec![Op::write(&file, &next)],
+                ops,
                 code: None,
                 detail: json!({ "keeper": keeper, "slug": slug_name }),
             }
@@ -2357,6 +2384,7 @@ mod tests {
                 file: None,
             },
             None,
+            false,
         );
         assert_eq!(plan.code.as_deref(), Some("rule.noTarget"));
         assert!(plan.ops.is_empty());
@@ -2366,7 +2394,7 @@ mod tests {
     #[test]
     fn an_mdc_file_refuses_compose_and_says_why() {
         let (t, lib, file) = rule_fixture("rule-mdc", "a.mdc", "---\nalwaysApply: true\n---\nbody\n");
-        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose), false);
         assert_eq!(plan.code.as_deref(), Some("rule.mdcLinkOnly"));
         assert!(plan.ops.is_empty());
         // 文件一个字节都不动。
@@ -2381,7 +2409,7 @@ mod tests {
     #[test]
     fn link_mode_stores_the_file_in_the_library_and_links_to_it() {
         let (t, lib, file) = rule_fixture("rule-link", "AGENTS.md", "# team rules\n");
-        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Link));
+        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Link), false);
         assert_eq!(plan.code, None, "{:?}", plan.detail);
         assert_eq!(plan.mode.as_str(), "link");
         let store = store::Store::new(&store::native_str(&t.0.join("store")));
@@ -2411,9 +2439,9 @@ mod tests {
     fn link_mode_writes_nothing_when_already_linked() {
         let (t, lib, file) = rule_fixture("rule-link-twice", "AGENTS.md", "# x\n");
         let store = store::Store::new(&store::native_str(&t.0.join("store")));
-        let first = rule_plan(&lib, &at(&file), Some(RuleMode::Link));
+        let first = rule_plan(&lib, &at(&file), Some(RuleMode::Link), false);
         assert_eq!(store.transaction(&first.ops, &json!({}))["ok"], json!(true));
-        let second = rule_plan(&lib, &at(&file), Some(RuleMode::Link));
+        let second = rule_plan(&lib, &at(&file), Some(RuleMode::Link), false);
         assert!(second.ops.is_empty(), "第二遍不该有 op");
         assert_eq!(second.detail["alreadyLinked"], json!(true));
         drop(t);
@@ -2429,7 +2457,7 @@ mod tests {
         std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
         std::fs::write(&keeper, "shared rule one\nshared rule two\n").unwrap();
 
-        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose), false);
         assert_eq!(plan.code, None);
         assert_eq!(plan.ops.len(), 1);
         let store = store::Store::new(&store::native_str(&t.0.join("store")));
@@ -2457,10 +2485,10 @@ mod tests {
         std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
         std::fs::write(&keeper, "body\n").unwrap();
         let store = store::Store::new(&store::native_str(&t.0.join("store")));
-        let first = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        let first = rule_plan(&lib, &at(&file), Some(RuleMode::Compose), false);
         assert_eq!(store.transaction(&first.ops, &json!({}))["ok"], json!(true));
         let before = std::fs::read(&file).unwrap();
-        let second = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        let second = rule_plan(&lib, &at(&file), Some(RuleMode::Compose), false);
         assert!(second.ops.is_empty(), "第二遍不该有 op: {:?}", second.detail);
         assert_eq!(std::fs::read(&file).unwrap(), before);
         drop(t);
@@ -2474,7 +2502,7 @@ mod tests {
         std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
         std::fs::write(&keeper, "generated body\n").unwrap();
         let store = store::Store::new(&store::native_str(&t.0.join("store")));
-        let first = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        let first = rule_plan(&lib, &at(&file), Some(RuleMode::Compose), false);
         assert_eq!(store.transaction(&first.ops, &json!({}))["ok"], json!(true));
 
         // 用户手改区块内一行。
@@ -2483,7 +2511,7 @@ mod tests {
             .replace("generated body", "my own wording");
         std::fs::write(&file, &edited).unwrap();
 
-        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose), false);
         assert_eq!(plan.code.as_deref(), Some("rule.foreignEdit"));
         assert!(plan.ops.is_empty(), "闸门只判不写");
         // 三方 diff 需要的那两份内容都在 detail 里。
@@ -2501,7 +2529,7 @@ mod tests {
     fn the_first_compose_wraps_the_existing_text_verbatim() {
         let original = "# existing\nline two\n";
         let (t, lib, file) = rule_fixture("rule-adopt", "AGENTS.md", original);
-        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose), false);
         assert_eq!(plan.code, None, "首次 compose 不该被闸门拒绝: {:?}", plan.detail);
         let store = store::Store::new(&store::native_str(&t.0.join("store")));
         assert_eq!(store.transaction(&plan.ops, &json!({}))["ok"], json!(true));
@@ -2524,12 +2552,12 @@ mod tests {
         std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
         std::fs::write(&keeper, "shared\n").unwrap();
         let store = store::Store::new(&store::native_str(&t.0.join("store")));
-        let first = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        let first = rule_plan(&lib, &at(&file), Some(RuleMode::Compose), false);
         assert_eq!(store.transaction(&first.ops, &json!({}))["ok"], json!(true));
 
         // 用户把整个区块删掉，只留自己的内容。
         std::fs::write(&file, "# mine\n").unwrap();
-        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose), false);
         assert_eq!(plan.code, None, "区块被删不等于区块被改: {:?}", plan.detail);
         assert_eq!(store.transaction(&plan.ops, &json!({}))["ok"], json!(true));
         // 用户自己的内容原样保留，共享内容重新回到区块里。
@@ -2551,7 +2579,7 @@ mod tests {
         std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
         std::fs::write(&keeper, "shared\n").unwrap();
         let store = store::Store::new(&store::native_str(&t.0.join("store")));
-        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose));
+        let plan = rule_plan(&lib, &at(&file), Some(RuleMode::Compose), false);
         assert_eq!(store.transaction(&plan.ops, &json!({}))["ok"], json!(true));
 
         let back = uncompose_plan(&file, "agents");
@@ -2570,14 +2598,14 @@ mod tests {
         let keeper = lib.dir_for("rule").join("agents.md");
         std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
         std::fs::write(&keeper, "b\n").unwrap();
-        assert_eq!(rule_plan(&lib, &at(&file), None).mode, RuleMode::Compose);
+        assert_eq!(rule_plan(&lib, &at(&file), None, false).mode, RuleMode::Compose);
         drop(t);
 
         let (t2, lib2, mdc) = rule_fixture("rule-default-mdc", "a.mdc", "x\n");
         let keeper2 = lib2.dir_for("rule").join("a.md");
         std::fs::create_dir_all(keeper2.parent().unwrap()).unwrap();
         std::fs::write(&keeper2, "b\n").unwrap();
-        let plan = rule_plan(&lib2, &at(&mdc), None);
+        let plan = rule_plan(&lib2, &at(&mdc), None, false);
         assert_eq!(plan.code, None);
         assert_eq!(plan.mode, RuleMode::Link, ".mdc 只能是 link");
         drop(t2);

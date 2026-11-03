@@ -1624,7 +1624,13 @@ impl Keeper {
             );
         }
 
-        let plan = sharing::rule_plan(lib, &target, mode);
+        // `force`（用户在两方 diff 里显式选了「以库内为准」）是 foreignEdit 闸门
+        // 的唯一绕过方式；桌面端与 MCP 传的是同一个入参。
+        let force = input
+            .get("force")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let plan = sharing::rule_plan(lib, &target, mode, force);
         if let Some(code) = &plan.code {
             let mut out = unsatisfied_with(code, plan.detail.clone());
             out["file"] = json!(plan.file);

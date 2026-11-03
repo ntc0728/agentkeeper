@@ -13,6 +13,7 @@ use agentkeeper_shell_lib::core::keeper::Keeper;
 use agentkeeper_shell_lib::core::linkfs;
 use agentkeeper_shell_lib::core::settings;
 use agentkeeper_shell_lib::core::store::{self, Store};
+use agentkeeper_shell_lib::core::sharing;
 use agentkeeper_shell_lib::core::{library, registry, scan};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -496,4 +497,69 @@ fn a_foreign_hardlink_is_still_refused() {
     assert_eq!(r["ok"], json!(false), "{r}");
     assert_eq!(r["code"], json!("share.foreignLink"), "{r}");
     assert!(std::path::Path::new(&dst).exists(), "nothing must be deleted");
+}
+
+/// §26.2 的两方 diff 出口：区块被外部改过时，`force: true`（用户对着 diff 显式
+/// 选了「以库内为准」）是 foreignEdit 闸门的唯一绕过方式；不带 force 的第二次
+/// 尝试仍然被拒——它是人对着 diff 做出的决定，不是调用方图省事的开关。
+#[test]
+fn force_overrides_a_foreign_edit_and_the_gate_stays_closed_without_it() {
+    let _lock = common::serial();
+    let fx = Fixture::new("rule-force-diff");
+    let agents_md = agent_agents_md(&fx.home, "codex");
+    write(&agents_md, "# mine
+
+local edit
+");
+
+    // 真实启用路径：compose 把原文件圈成受管区块。
+    let k = fx.keeper();
+    let r = k.enable_asset(&json!({
+        "name": "AGENTS",
+        "kind": "rule",
+        "agentId": "codex",
+        "scope": "global",
+        "file": agents_md,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let after_first = read(&agents_md);
+    assert!(after_first.contains("agentkeeper:begin"), "{after_first:?}");
+
+    // 用户手改区块内一行 → 外部改动。
+    write(&agents_md, after_first.replace("local edit", "hacked edit").as_str());
+
+    let lib = library::Library::at(fx.library_root());
+    let target = sharing::RuleTarget {
+        base: String::new(),
+        rel: None,
+        file: Some(agents_md.clone()),
+    };
+
+    // 不带 force：拒绝，盘上保持被改的样子。
+    let refused = sharing::rule_plan(&lib, &target, None, false);
+    assert_eq!(refused.code.as_deref(), Some("rule.foreignEdit"), "{:?}", refused.code);
+    assert!(
+        refused.detail["onDisk"].as_str().unwrap_or_default().contains("hacked edit"),
+        "{:?}",
+        refused.detail
+    );
+
+    // force：库内版本写回（diff 对话框里「以库内为准」的动作）。
+    let forced = sharing::rule_plan(&lib, &target, None, true);
+    assert_eq!(forced.code, None, "{:?}", forced.code);
+    let tx2 = k.store.transaction(&forced.ops, &json!({ "action": "compose", "force": true }));
+    assert_eq!(tx2["ok"], json!(true), "{tx2}");
+    // force 只恢复**区块内**的内容（那是共享的部分）；区块外是用户自己的
+    // 原文，compose 从来不动它（§6.1）。区块内恢复为库内版本、区块外保留
+    // 用户的行，两者同时成立才算对。
+    let after = read(&agents_md);
+    assert!(
+        after.contains("agentkeeper:begin") && after.contains("local edit"),
+        "the block must be restored to the library version: {after:?}"
+    );
+    let block_body = compose::find_block(&after, "agents").expect("block").body;
+    assert!(
+        !block_body.contains("hacked"),
+        "block body must be the library copy: {block_body:?}"
+    );
 }

@@ -2553,3 +2553,76 @@ node scripts/check.js         all 8 gates passed
 node scripts/ui-audit.js      total findings: 0
 node scripts/tauri-i18n.js    OK（新句子走 PATTERNS 数组，C4 教科书式补法）
 ```
+
+---
+
+## 27. 「依赖产品决策」三项的评审与裁决（2026-11-03）
+
+> §26.2 把三项归档为「依赖产品决策」。本轮逐项重新裁决，用代码事实代替推断：
+> **1 项做成、1 项维持不做（理由经事实加强）、1 项降级后做成——并顺带清零一个
+> 藏在它下面的实现缺陷。**
+
+### 27.1 MCP 健康修复 → **做成**（第 21 个工具）
+
+当初不做的理由（「没有确认界面」「agent 决定信谁没意义」）经事实核对不成立：
+
+1. **不对称已经存在**：`delete_asset` 一直在工具列表里——agent 早就能删掉一份
+   skill，却不让它修一条悬空链接，保护的不是用户，是故障现场；
+2. **每个动作都是桌面端跑了很久的同一条 `apply_finding_fix`**：`relink` 校验
+   内容一致、`adopt`/`rebuild` 走事务、`mcp.drift` 的三选一由用户在对话里说
+   （「以库为准」= 用户确认），没有新的写路径；
+3. **确认发生在调用侧**：agent 是被用户指挥的（「把那条链接修好」），与桌面端
+   点按钮等价。
+
+**唯一保留的边界**：`asset.duplicated`（批量收敛，一次写几十个位置）显式拒绝，
+回 `doctor.notFixable` + 指引桌面向导。`TOOLS` 20 → 21（末尾追加），三处钉死
+断言同步。+1 回归：MCP relink 一条悬空链接真被接回、converge 被拒。
+
+### 27.2 矩阵 project 作用域 → **维持不做（理由从「契约」升级为「事实」）**
+
+17 个 agent **全部**声明了 projects——project 列不是「多几列」，是矩阵宽度
+翻倍（17 → 34+），而 project 资产已有正确的归属（skills 的 `external[]` 行、
+doctor 全程可见）。把「哪里能看到」升级成「为什么矩阵不该是那张全量表」：
+矩阵回答的是「全局启用关系」，project 遮蔽关系由扫描的 `effective` 承载，
+两者塞进一张表会破坏 M6 的单元格状态机。**裁决：不做，且不是等产品决策，
+是设计定论。**
+
+### 27.3 `foreign` 三方 diff → **降级为两方 diff 并做成**（发现 rev 不可逆）
+
+原设想的三方（库内 / 盘上 / 上次生成）**前提不成立**：`rev` 是内容指纹
+（`hash16`），不可逆——「上次生成的版本」无法复原。降级为两方：
+
+- **数据面本就齐全**：`rule.foreignEdit` 的 detail 一直带着 `onDisk` / `want`；
+- **后端补一个显式出口**：`rule_plan` 加 `force`——用户对着 diff 选「以库内
+  为准」是唯一绕过 foreignEdit 闸门的方式（人看过的 diff，不是调用方的开关）；
+- **前端**：`adoptForeign` 收到 foreignEdit 时弹并排两方 diff 对话框
+  （保留我的版本 / 以库内为准），中英各 8 条文案 + CSS。
+
+**顺带清零的缺陷**：force 重建在旧代码下会产生**嵌套区块**（区块里套区块）。
+根因：compose 分支**从不写库内主副本**——首次 compose 后库里什么都没有，
+每次同步都拿「盘上自己的内容」当库内版本，force 重建时区块内再套一层。
+这正是 §21.7「keeper-absent compose 分支没有实现成口子」的实现级后果：
+「单一事实源」对 compose 也必须成立，首次启用就把主副本落进库（同一事务）。
++1 回归：force 恢复区块内内容、区块外用户原文保留（§6.1）、闸门不带 force 仍关。
+
+### 27.4 门禁
+
+```text
+cargo test --workspace        532 passed / 0 failed（530 → +2：MCP fix、force diff）
+TOOLS                         21 个（末尾追加，三处断言同步）
+node scripts/check.js         all 8 gates passed（bridge 45↔45）
+node scripts/tauri-i18n.js    MISS 0（diff 应答无新句子；前端文案双语齐）
+node scripts/ui-audit.js      total findings: 0
+```
+
+### 27.5 遗留账本终版
+
+| 项 | 状态 |
+|---|---|
+| 并发写 / 迁移进度 | 清零（§25） |
+| drift 多配置 / dropped 反馈 / ui-baseline shared | 清零（§26） |
+| MCP 健康修复 / 两方 diff（含 compose 主副本缺陷） | 清零（本轮） |
+| 矩阵 project 作用域 | 设计定论：不做（§27.2） |
+| TOML 区块边界 / ui-audit 探针 / 无发出路径的 code | 条件归档（§26.3） |
+| 规则/记忆导入口子 | 与 enable 语义重叠，维持不做（§26.4） |
+| `foreign` 的 link 模式 + 有库内主副本时的差异提示 | 已由两方 diff 覆盖主要场景 |

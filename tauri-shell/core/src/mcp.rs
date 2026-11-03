@@ -229,6 +229,17 @@ pub fn tools() -> Vec<Value> {
             "description": "Read-only convergence plan: groups of same-name skills spread across agents, whether their content is identical, what would be replaced and how many bytes that saves. Writes nothing - apply it from the desktop app.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
+        json!({
+            "name": "apply_finding_fix",
+            "description": "Fix one finding reported by link_doctor: relink a dangling link (content must match), relink a hijacked link, adopt an unmanaged copy into the library, rebuild the ledger from disk, or resolve an mcp drift with choice: library (use the library value) / agent (keep the agent value) / independent (mark as independent). Converging duplicated skills is NOT available here - use the desktop wizard.",
+            "inputSchema": { "type": "object", "properties": {
+                "code": s("finding code from link_doctor (e.g. link.dangling, link.hijacked, mcp.drift)"),
+                "path": s("finding path from link_doctor"),
+                "fix": s("finding fix verb from link_doctor"),
+                "detail": { "type": "object", "description": "finding detail object from link_doctor, passed through" },
+                "choice": { "type": "string", "enum": ["library", "agent", "independent"], "description": "for mcp.drift only: which side wins" }
+            }, "required": ["code"] }
+        }),
     ]
 }
 
@@ -1048,6 +1059,7 @@ fn call_tool(keeper: &Keeper, req: &Value) -> Value {
         "disable_asset" => disable_asset(keeper, &args),
         "link_doctor" => link_doctor(keeper),
         "converge_plan" => converge_plan(keeper),
+        "apply_finding_fix" => apply_finding_fix(keeper, &args),
         _ => {
             return fail(
                 req.get("id").cloned(),
@@ -1320,6 +1332,7 @@ mod tests {
                 "disable_asset",
                 "link_doctor",
                 "converge_plan",
+                "apply_finding_fix",
             ]
         );
         for t in tools() {
@@ -1338,7 +1351,7 @@ mod tests {
             &json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/list" }),
         );
         assert_eq!(resp["result"]["tools"][0]["name"], json!("list_assets"));
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 20);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 21);
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&home).ok();
     }
@@ -1503,7 +1516,7 @@ mod tests {
             &k,
             &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
         );
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 20);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 21);
         let resp = dispatch(
             &k,
             &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/nope" }),
@@ -2034,4 +2047,51 @@ body
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&home).ok();
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* 共享层修复（M8 起补齐的对外接口）                                       */
+/* ------------------------------------------------------------------ */
+
+/// `apply_finding_fix` —— 把桌面端「一键修」的那条路开放给 agent。
+///
+/// 三个理由让它越过 §22.5 当初「不提供修复」的裁决：
+/// 1. **不对称已经不成立**：`delete_asset` 一直都在工具列表里——agent 早就能
+///    删掉一份 skill；不让它修一条悬空链接，保护的不是用户，是故障现场。
+/// 2. **每个动作都有既定的安全形态**：`relink` 校验内容一致、`adopt` 走事务、
+///    `rebuild` 以磁盘为准、`mcp.drift` 的三选一里 `library` 是幂等物化——
+///    这些是桌面端一直在跑的同一条 `apply_finding_fix`，不是新的写路径。
+/// 3. **确认发生在调用侧**：agent 是被用户指挥的（「把那条链接修好」），
+///    与桌面端点按钮等价；`converge`（批量收敛）仍不给——那是唯一一个
+///    一次写几十个位置的动作。
+///
+/// `converge` 类 finding（`asset.duplicated`）在此**显式拒绝**：
+/// `doctor.notFixable` + 原因说明，指引到桌面端向导。
+fn apply_finding_fix(_keeper: &Keeper, args: &Value) -> Value {
+    let input = match args.get("payload").filter(|v| v.is_object()) {
+        Some(p) => p.clone(),
+        None => args.clone(),
+    };
+    let code = arg_str(&input, "code");
+    if code.is_empty() {
+        return text(json!({
+            "ok": false,
+            "error": "code is required (from link_doctor findings)"
+        }));
+    }
+    // 批量收敛是唯一一个「一次动很多位置」的动作：留在桌面端。
+    if code == "asset.duplicated" {
+        return text(json!({
+            "ok": false,
+            "code": "doctor.notFixable",
+            "detail": {
+                "reason": "converge touches every copy at once; use the desktop wizard",
+            }
+        }));
+    }
+    let r = shared_ops::apply_finding_fix(_keeper, &input);
+    if r.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        invalidate(_keeper);
+    }
+    text(r)
 }

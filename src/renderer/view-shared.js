@@ -612,6 +612,12 @@
         mode: mode
       });
       if (r && r.ok === false) {
+        if (r.code === 'rule.foreignEdit' && r.detail && r.detail.onDisk !== undefined) {
+          // 区块被外部改过：服务端拒绝并带来了两个版本（§26.2 的两方 diff）。
+          // 「上次生成版本」复原不了（rev 是指纹不是内容），所以是两方不是三方。
+          showForeignDiff(r, mode, agent);
+          return;
+        }
         toast(failText(r, 'matrix.cellFailed'), 'err');
         return;
       }
@@ -626,6 +632,60 @@
       reportUiError('error', e);
       toast(t('matrix.cellFailed', { msg: zhError(e) }), 'err');
     }
+  }
+
+  /**
+   * `rule.foreignEdit` 的两方 diff（§26.2）。
+   *
+   * 并排展示「盘上被改过的版本」与「库内主副本」，两个出口：
+   * 保留我的版本（什么都不写、对话框关闭即结束）/ 以库内为准（带 `force` 重发
+   * 同一次 enable——那是用户对着 diff 做出的显式决定，服务端唯一的绕过通道）。
+   */
+  function showForeignDiff(r, mode, agent) {
+    const d = r.detail || {};
+    const side = (label, text) => el('div', { class: 'stack-6' },
+      el('div', { class: 'muted fs-11' }, label),
+      el('pre', { class: 'mono fs-11 cv-diff-side' }, String(text || '')));
+    const body = el('div', { class: 'stack-12' },
+      el('div', { class: 'muted fs-12' }, t('matrix.foreignEditBody', { file: String(d.file || '') })),
+      el('div', { class: 'cv-diff-row' },
+        side(t('matrix.foreignEditMine'), d.onDisk),
+        side(t('matrix.foreignEditLibrary'), d.want)));
+    openModal(t('matrix.foreignEditTitle'), body, [
+      el('button', {
+        class: 'btn',
+        type: 'button',
+        onclick: () => { if (typeof closeModal === 'function') closeModal(); }
+      }, t('matrix.foreignEditKeepMine')),
+      el('button', {
+        class: 'btn primary',
+        type: 'button',
+        onclick: async () => {
+          if (typeof closeModal === 'function') closeModal();
+          try {
+            const r2 = await call('enableAsset', {
+              name: String(d.slug || ''),
+              kind: 'rule',
+              agentId: agent.id,
+              scope: 'global',
+              file: String(d.file || ''),
+              mode: mode,
+              force: true
+            });
+            if (r2 && r2.ok === false) {
+              toast(failText(r2, 'matrix.cellFailed'), 'err');
+              return;
+            }
+            toast(t('matrix.foreignEditApplied'), 'ok');
+            S.doctor = null;
+            await reload();
+          } catch (e) {
+            reportUiError('error', e);
+            toast(t('matrix.cellFailed', { msg: zhError(e) }), 'err');
+          }
+        }
+      }, t('matrix.foreignEditUseLibrary'))
+    ], { width: 'form' });
   }
 
   async function toggleCell(tab, kind, row, agent, cell, st) {

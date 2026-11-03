@@ -23,7 +23,7 @@ mod common;
 
 use agentkeeper_core::keeper::Keeper;
 use agentkeeper_core::store::Store;
-use agentkeeper_core::{mcp, settings};
+use agentkeeper_core::{mcp, settings, store};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -398,7 +398,7 @@ fn set_baseline_answers_an_object_and_a_write_leaves_no_backup_tree() {
 /* ------------------------------------------------------------------ */
 /// `tools/list` 必须按顺序返回的每一个工具名。改名对已经记住该名字的 agent
 /// 是破坏性变更，所以这里把它钉死。**只能追加**（共享层五个工具是 M7 追加的）。
-const TOOLS: [&str; 20] = [
+const TOOLS: [&str; 21] = [
     "list_assets",
     "read_asset",
     "scan",
@@ -419,6 +419,7 @@ const TOOLS: [&str; 20] = [
     "disable_asset",
     "link_doctor",
     "converge_plan",
+    "apply_finding_fix",
 ];
 
 struct Session {
@@ -816,4 +817,81 @@ fn enable_mcp_with_config_records_it_into_the_library_first() {
         })
         .unwrap_or_else(|| panic!("no mcp row for github: {view}"));
     assert_eq!(row["cells"]["workbuddy"]["state"], json!("on"), "{row}");
+}
+
+/// MCP 修复工具的契约（§26 评审裁决）：`relink` 走与桌面端同一条
+/// `apply_finding_fix`（内容一致才连回），批量收敛显式拒绝并指引到向导。
+#[test]
+fn apply_finding_fix_relinks_a_dangling_link_and_refuses_converge() {
+    let fx = Fixture::new("mcp-shared-fix");
+    let skill = join(&fx.home, &[".workbuddy", "skills", "notes"]);
+    write(
+        &join(&skill, &["SKILL.md"]),
+        "---\nname: notes\ndescription: Keep notes\n---\n\n# notes\n\nbody\n",
+    );
+    let keeper = fx.keeper();
+
+    // 启用（只给名字——agent 最常见的调用方式）→ 库内主副本。
+    let (_, enabled) = call(
+        &keeper,
+        "enable_asset",
+        json!({ "name": "notes", "kind": "skill", "agentId": "workbuddy", "scope": "global" }),
+    );
+    assert_eq!(enabled["ok"], json!(true), "{enabled}");
+    // 让链接悬空但**源还在**（relink 的前提，形态与 shared_ui 的同名验收一致）：
+    // 库内主副本挪到同级另一个名字，台账 src 跟着更新 —— agent 侧链接仍指旧路径。
+    let keeper_dir = enabled["keeper"].as_str().unwrap_or_default().to_string();
+    let moved = join(&fx.home, &[".agents", "skills", "notes-moved"]);
+    std::fs::rename(&keeper_dir, &moved).expect("move master copy");
+    let ledger_path = join(&fx.home, &[".agents", "links.json"]);
+    let mut ledger: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&ledger_path).expect("ledger readable"),
+    )
+    .expect("ledger JSON");
+    for entry in ledger["entries"].as_array_mut().expect("entries") {
+        entry["src"] = serde_json::json!(store::native_str(std::path::Path::new(&moved)));
+    }
+    std::fs::write(
+        &ledger_path,
+        serde_json::to_string_pretty(&ledger).unwrap(),
+    )
+    .expect("save ledger");
+
+    // doctor 报 dangling；fix 是 relink。
+    let (_, doctor) = call(&keeper, "link_doctor", json!({}));
+    let f = doctor["findings"]
+        .as_array()
+        .and_then(|a| {
+            a.iter()
+                .find(|f| f["code"] == json!("link.dangling"))
+        })
+        .unwrap_or_else(|| panic!("dangling expected: {doctor}"))
+        .clone();
+    assert_eq!(f["fixable"], json!(true), "{f}");
+
+    // MCP 修复：与桌面端同一条 apply_finding_fix。
+    let (_, fixed) = call(
+        &keeper,
+        "apply_finding_fix",
+        json!({
+            "code": f["code"],
+            "path": f["path"],
+            "fix": f["fix"],
+            "detail": f["detail"]
+        }),
+    );
+    assert_eq!(fixed["ok"], json!(true), "{fixed}");
+    assert!(
+        std::path::Path::new(&skill).join("SKILL.md").is_file(),
+        "the link must resolve again: {skill}"
+    );
+
+    // 批量收敛被显式拒绝（唯一一次写几十个位置的动作留在桌面端）。
+    let (_, refused) = call(
+        &keeper,
+        "apply_finding_fix",
+        json!({ "code": "asset.duplicated", "path": "/x", "fix": "converge" }),
+    );
+    assert_eq!(refused["ok"], json!(false), "{refused}");
+    assert_eq!(refused["code"], json!("doctor.notFixable"), "{refused}");
 }

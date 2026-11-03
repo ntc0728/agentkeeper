@@ -2017,3 +2017,12 @@ details > summary { cursor: pointer; user-select: none; }
   .shared-tools { margin-left: 0; width: 100%; }
   .mx-search { width: 100%; max-width: none; }
 }
+
+/* 两方 diff（matrix.foreignEdit*）：并排的盘上版本与库内版本。只读 pre，
+   滚动区域限高，让两个版本的对齐关系一眼可见。 */
+.cv-diff-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; min-width: 0; }
+.cv-diff-side {
+  margin: 0; padding: 8px 10px; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--surface-2);
+  max-height: 30vh; overflow: auto; white-space: pre-wrap; word-break: break-word;
+}
