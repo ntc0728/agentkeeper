@@ -116,7 +116,7 @@ npm run changelog:add -- feat "一句话说清用户能感知的变化"
 | 文件 | 行数估计 | 模块 | 职责 |
 |---|---|---|---|
 | `tauri-shell/core/src/linkfs.rs` | ~420 | M1 | 链接原语 + 能力探测（junction 需 FSCTL） |
-| `tauri-shell/core/src/library.rs` | ~700 | M1 | 库根、`links.json` 台账、add/remove/retarget/resync |
+| `tauri-shell/core/src/library.rs` | 742 | M1 | 库根解析、`links.json` 台账（`resolve/root/dir_for/skill_dir/mcp_record_path/ledger_path/load_ledger/save_ledger/record/owns_target/owns_skill_dir/capability`）。**本行初稿写的 `add/remove/retarget/resync` 四个方法没有这样实现**：写盘一律由调用方组织成 Op 走事务，登记只经 `record`，实际 API 见 §16.1 |
 | `tauri-shell/core/src/compose.rs` | ~260 | M4 | 规则区块标记的插入/替换/剥离（纯函数） |
 | `tauri-shell/core/src/sharing.rs` | ~900 | M2/M3/M4 | 收敛探测、MCP 物化、规则共享的事务编排 |
 | `tauri-shell/core/src/doctor.rs` | ~450 | M5 | 7 类 finding 的检测（只读） |
@@ -2375,3 +2375,62 @@ node scripts/test-affected.js 连跑 3 次全绿（此前一次失败为 §11.2 
 单个文件，目录级判定对它们已经足够。`library_view::skill_cell` 与 doctor 用同一
 判据（两处实现，注释互指），「修内容」没有一键动作——内容回不来是事实，如实
 呈现比假装可修诚实。
+
+---
+
+## 24. 「还有其他遗留吗」复核（2026-11-03）
+
+> 提问是「现在只剩下 B 项跨进程台账锁吗」。按四个角度重新扫了一遍代码与文档，
+> 结论：**B 不是一条，是一类；另有一条被承诺过但没交付的界面**（已补），
+> 外加一处文档陈述过期。
+
+### 24.1 B 是一类，不是一条（3 个文件、零 OS 级锁）
+
+全仓 `grep 'flock|LockFileEx|create_new'` 为空 —— **没有任何跨进程文件锁**，
+`registry` 只有进程内 `Mutex`。三处「读-改-写」因此都可能在 GUI 与
+`agentkeeper-mcp` 同时写时丢更新：
+
+| 文件 | 读改写位置 | 后果 |
+|---|---|---|
+| `<library>/links.json` | `Library::save_ledger`（`library.rs:147`） | 丢台账条目 → doctor 报 `link.ledgerDrift` |
+| `<store>/settings.json` | `settings::save`（`settings.rs:218`） | 丢一次设置补丁（`libraryRoot`/`theme`/…） |
+| `<store>/projects.json` | `registry::add/remove` | 丢一个已注册项目 |
+
+三处都是「最后写者赢」，且都不会损坏文件本身（`atomic_write` 保证不出现半份）。
+修法统一：一把 `<store>/.lock` 上的 OS 级排他锁（或 `create_new` 锁文件 + 退避），
+套住三处 RMW。**本轮不做**：它改的是写入层的并发语义，超出共享资产特性范围，
+且需要与「多实例桌面端」的产品决定一起定（§15 的「宁可失败」在这里会变成
+「第二个实例直接报错」，那是产品行为，不是实现细节）。
+
+### 24.2 迁移界面：曾点名给 P6，没交付、也没记录（本轮补上）
+
+§21.7 写着「`library_migrate` 的**界面**与 200-skill 强杀验收 = M7/P6」，M7 做了
+CLI/MCP/强杀验收，**界面没做**，而 §22.5 只记了「没有进度回调」——没有记「没有入口」。
+证据：`tauri-bridge.js` 暴露了 `libraryMigrate`，但渲染层零引用（本轮修复前，
+45 个桥接函数里它是唯一的孤儿）。
+
+已补（与另外 7 个共享命令的交付形态一致）：
+
+- 共享页库根那一行加「迁移库…」按钮；对话框说明当前位置与「逐条重指、可中断续跑」，
+  两个目标是后端认识的枚举（`default` = `~/.agents`、`store` = 应用私有目录），
+  自定义绝对路径仍留给设置文件（没有目录选择器时，手打路径只会打错）；
+- 成功后 `reload()` + `rescan(true)`：库根、台账、各 agent 的链接都换了位置，
+  缓存里那份立刻是陈的；
+- 中英各 8 条文案；`ui-audit` / `lint-renderer` / `i18n` 全绿，`node --check` 通过；
+- 桥接孤儿数从 1 降到 0（`node` 脚本按 token 比对 45 个桥接函数 × 渲染层）。
+
+**仍未做**：迁移进度（命令是同步的，几百份 skill 期间只有一个「迁移库…」按钮的
+loading 态）。§22.5 已记，本轮不变。
+
+### 24.3 其他确认为「无遗留」的检查
+
+| 检查 | 结果 |
+|---|---|
+| `TODO` / `FIXME` / `unimplemented!`（core + 壳 + 共享页） | 0 |
+| 渲染层 `call('x')` × 桥接暴露 | 7 个调用全部命中 |
+| 桥接 45 个函数 × 渲染层引用 | 全部有入口（补完迁移界面后） |
+| `apply_finding_fix` × doctor 的 7 类 code | 7/7 覆盖（`link.fragile` 按设计回 `doctor.notFixable`） |
+| `settings` 三个新键（`linkMethod`/`libraryRoot`/`trashDays`） | 三个都有读者（`keeper::link_prefer`、`Library::resolve`、`remove_expired_trash`），**没有死设置** |
+| 前端是否只对 `fixable && fix` 的发现显示修复按钮 | 是（`view-shared.js:834`），本轮新增的 `masterUnreadable` 因此不会出现「一键修」 |
+| 文档提到的 `shared_ops::*` 入口 × 代码 | 全部存在 |
+| 文档 §2.1 交付表与 §16.1 实际 API | **一处过期**（`add/remove/retarget/resync`），本轮修正 |

@@ -42,7 +42,9 @@
     hintGroups: 0,
     hintDismissed: false,
     // 探测只在每次打开共享页时跑一次（bootstrap 刻意不把候选数算进启动路径）。
-    hintProbed: false
+    hintProbed: false,
+    // 库位置迁移正在跑（按钮禁用，避免连点两次）。
+    migrateBusy: false
   };
 
   const TABS = ['skills', 'mcp', 'rules', 'memory', 'health'];
@@ -1178,6 +1180,54 @@
     stepOne();
   }
 
+  /**
+   * 库位置迁移对话框（§9.3）。
+   *
+   * 两个目标都是后端认识的枚举值（`default` = `~/.agents`，`store` = 应用私有
+   * 目录），自定义绝对路径留给设置文件 —— 一个没有目录选择器的输入框只会让
+   * 用户手打路径打错。迁移是**幂等**的：选到当前位置时后端回 `moved: 0`，
+   * 不是错误，所以这里不预判「你已经在那个位置」。
+   *
+   * 迁移会改 `settings.libraryRoot`，所以成功后要重新扫描：矩阵、台账与
+   * 各 agent 的链接都换了根，缓存里的那一份立刻就是陈的。
+   */
+  async function openMigrate() {
+    if (S.migrateBusy) return;
+    const root = (S.data && S.data.root) || '—';
+    const pick = async (to) => {
+      // `openModal` 没有返回值，关闭走 app.js 的全局 `closeModal`
+      //（它同时把 return-focus 还回去，Esc/遮罩路径也走同一条）。
+      if (typeof closeModal === 'function') closeModal();
+      S.migrateBusy = true;
+      paint();
+      try {
+        const r = await call('libraryMigrate', { to: to });
+        if (!r || r.ok === false) {
+          toast(r && r.code ? (zhCode(r.code) || String(r.code)) : failText(r, 'shared.migrateFailed'), 'err');
+          return;
+        }
+        toast(t('shared.migrateDone', { to: String(r.to || to), n: r.links || 0 }), 'ok');
+        await reload();
+        if (typeof rescan === 'function') await rescan(true);
+      } catch (e) {
+        reportUiError('error', e);
+        toast(t('shared.migrateFailed', { msg: zhError(e) }), 'err');
+      } finally {
+        S.migrateBusy = false;
+        paint();
+      }
+    };
+    const body = el('div', { class: 'stack-12' },
+      el('div', { class: 'muted fs-12' }, t('shared.migrateBody', { root: String(root) })),
+      el('div', { class: 'muted fs-11' }, t('shared.migrateHint')));
+    const foot = [
+      el('button', { class: 'btn', type: 'button', onclick: () => { if (typeof closeModal === 'function') closeModal(); } }, t('common.cancel')),
+      el('button', { class: 'btn', type: 'button', onclick: () => void pick('store') }, t('shared.migrateStore')),
+      el('button', { class: 'btn primary', type: 'button', onclick: () => void pick('default') }, t('shared.migrateDefault'))
+    ];
+    openModal(t('shared.migrateTitle'), body, foot, { width: 'form' });
+  }
+
   /* ---------------------------------------------------------------- */
   /* 视图骨架                                                          */
   /* ---------------------------------------------------------------- */
@@ -1217,7 +1267,16 @@
     }
     box.appendChild(el('div', { class: 'shared-meta' },
       el('span', { class: 'muted fs-11' }, t('shared.root')),
-      el('span', { class: 'mono fs-11 shared-root' }, String(d.root || '—'))));
+      el('span', { class: 'mono fs-11 shared-root' }, String(d.root || '—')),
+      // 库位置迁移（§9.3 / §21.7 点名给 P6 的界面入口）。命令一直在、桥接也
+      // 一直在，缺的就是这个按钮：不给入口时用户只能手工改 settings.json。
+      el('button', {
+        class: 'btn sm' + (S.migrateBusy ? ' loading' : ''),
+        type: 'button',
+        disabled: S.migrateBusy,
+        'data-focus-key': 'shared-migrate',
+        onclick: () => void openMigrate()
+      }, t('shared.migrate'))));
     if (libraryEmpty(d)) {
       box.appendChild(el('div', { class: 'card' },
         el('div', { class: 'empty' },
