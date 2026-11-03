@@ -1015,7 +1015,7 @@ fn scan_payload_carries_exactly_the_keys_the_renderer_reads() {
     }
 
     // 精简后的 `effective` 位于载荷一侧那个平行的 `effective` 数组上：
-    // 恰好四个键（M5 起多了 `sameInode`），别的什么都活不下来。
+    // 恰好四个键（后来多了 `sameInode`），别的什么都活不下来。
     for a in payload["effective"].as_array().unwrap() {
         assert!(
             a.get("raw").is_none(),

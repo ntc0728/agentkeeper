@@ -627,7 +627,7 @@ mod tests {
         let lib = Library::at(&root);
         assert_eq!(lib.load_ledger().expect("absent ledger is empty"), Ledger::default());
 
-        // 这是 M1 验收 4：写个 `{` 进去，必须 Err，而且不碰磁盘。
+        // 这是链接内核的一条验收：写个 `{` 进去，必须 Err，而且不碰磁盘。
         std::fs::write(lib.ledger_path(), "{").expect("seed garbage");
         let err = lib.load_ledger().expect_err("corrupt ledger must be an error");
         assert!(err.contains("not valid JSON"), "{err}");
@@ -662,7 +662,7 @@ mod tests {
 
     /// 两条**指向同一目标**的链接是台账里的两条，不是一条。
     ///
-    /// 这是 M2 收敛时踩到的问题：`normalize` 曾经用 `canonicalize` 归一，于是每条
+    /// 这是 Skills 收敛时踩到的问题：`normalize` 曾经用 `canonicalize` 归一，于是每条
     /// agent 侧链接的键都变成库内主副本的路径，五条链接被 `upsert` 折叠成一条。
     #[test]
     fn two_links_to_one_target_stay_two_entries() {

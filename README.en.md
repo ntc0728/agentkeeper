@@ -21,7 +21,13 @@ DOM app (`src/renderer`) with no frontend build step.
   for confirmation and lists the real paths it will touch
 - **Distribute and audit** — copy assets to other agents or projects; append-only journal and
   baseline fingerprints that report silent edits
-- **Agents manage themselves** — the same core ships as a 20-tool stdio MCP server
+- **Shared assets** — one copy of each skill / MCP server / rule / memory in the library, with
+  every agent pointed at it: a directory link, a config entry or a rules block. Duplicate skills
+  can be converged; anything whose content differs is only reported, never touched
+- **Health check** — seven read-only findings (dangling links, links replaced by an agent's own
+  copy, links outside the library, fragile hardlinks, duplicated content, MCP drift, ledger
+  drift), each fixable individually
+- **Agents manage themselves** — the same core ships as a 21-tool stdio MCP server
 
 ## Install
 
@@ -38,7 +44,9 @@ Requires Windows 10/11 with the WebView2 runtime (bundled with Windows 11).
 
 1. Open the app — it scans your agents and projects automatically
 2. Search, filter, validate and edit on the **Assets** page
-3. Every write asks first, a failed write reverts itself, and each change lands in **Activity**
+3. On the **Shared** page, pull duplicates into one library and use the matrix to decide which
+   agent uses which asset
+4. Every write asks first, a failed write reverts itself, and each change lands in **Activity**
 
 ## MCP server
 
@@ -54,9 +62,10 @@ Requires Windows 10/11 with the WebView2 runtime (bundled with Windows 11).
 }
 ```
 
-20 tools cover listing, validation, writes, distribution, bundle migration and the shared library
-(one master copy in the library, linked / configured / composed into each agent), behind the same
-validation and transactional write path as the GUI. See [docs/MCP-SERVER.md](docs/MCP-SERVER.md).
+21 tools cover listing, validation, writes, distribution, bundle migration, the shared library
+(one master copy in the library, linked / configured / composed into each agent) and shared health
+fixes, behind the same validation and transactional write path as the GUI.
+See [docs/MCP-SERVER.md](docs/MCP-SERVER.md).
 
 ## Build from source
 
@@ -94,7 +103,7 @@ npm run test:all     # everything
 
 | Doc | Contents |
 |---|---|
-| [docs/DESIGN.md](docs/DESIGN.md) | asset model, scanner, write transaction, UI structure |
+| [docs/DESIGN.md](docs/DESIGN.md) | asset model, scanner, write transaction, UI structure, shared layer (§8) |
 | [docs/MCP-SERVER.md](docs/MCP-SERVER.md) | MCP server setup |
 | [docs/UPDATE.md](docs/UPDATE.md) | in-app updates (check, download, install, token) |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | release notes and the repo-local change record |

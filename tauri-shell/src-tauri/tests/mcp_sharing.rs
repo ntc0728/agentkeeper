@@ -1,6 +1,6 @@
-//! MCP 单一事实源（M3）的端到端验收。
+//! MCP 单一事实源的端到端验收。
 //!
-//! 覆盖 `docs/SHARED-ASSETS-IMPLEMENTATION.md` §5.5 的四条：
+//! 覆盖 `docs/DESIGN.md` §8.9 MCP 单一事实源 的四条：
 //!
 //! 1. Codex（TOML）与 Claude Code（JSON）同时开启同一个 server：TOML 里注释与
 //!    小节顺序完全不变，JSON 里兄弟 server 与键序保留；
@@ -418,7 +418,7 @@ fn materialize_mcp_picks_the_agent_config_file() {
     assert_eq!(plan["style"], json!("remove"));
 }
 
-/// 审核记录（§23.3）的口径修正：`plan_drift` 此前只比**第一份**含该名字的
+/// 口径修正：`plan_drift` 此前只比**第一份**含该名字的
 /// 配置。codex 与 opencode 都声明了两份可物化配置（config.toml + mcp.json），
 /// 只比第一份意味着第二份里的漂移永远不会被发现——用户手改过 `mcp.json`
 /// 这件事静默存在，直到某次启用把它覆盖。现在每一份含该服务器的配置都
@@ -468,7 +468,7 @@ args = ["mcp-server-fetch"]
     );
 }
 
-/// §23.3 口径升级：非 stdio 记录里的 `args`/`env`（stdio 专属字段）此前被
+/// 口径升级：非 stdio 记录里的 `args`/`env`（stdio 专属字段）此前被
 /// **静默丢弃**——用户以为记录里的每一样都到了 agent 配置里。现在
 /// `materialize_entry` 记下被丢的非空字段，`operate_mcp` 把它带进应答的
 /// `skipped`，让「没有物化的内容」可见。

@@ -1,6 +1,6 @@
-//! 健康检查（M5）的端到端验收。
+//! 健康检查的端到端验收。
 //!
-//! 覆盖 `docs/SHARED-ASSETS-IMPLEMENTATION.md` §7.4 的三条验收：
+//! 覆盖 `docs/DESIGN.md` §8.11 扫描与健康检查 的三条验收：
 //!
 //! 1. 把一条受管链接手工换成真实目录 → `link.hijacked` 出现且 `fixable: true`
 //!    （内容一致才允许 relink）；

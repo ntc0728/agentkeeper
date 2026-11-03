@@ -1,6 +1,6 @@
-//! 共享层（M4 · 规则与记忆共享）的端到端验收。
+//! 共享层中规则与记忆共享的端到端验收。
 //!
-//! 覆盖 `docs/SHARED-ASSETS-IMPLEMENTATION.md` §6.4 的四条验收，外加三条安全
+//! 覆盖 `docs/DESIGN.md` §8.10 规则与记忆：两种模式 的四条验收，外加三条安全
 //! 不变式（`.mdc` 只能 link、停用只拿走我们的区块、外来编辑不改盘）。
 //!
 //! 每个夹具都活在 `temp_dir()` 下自己的临时根里，`home` 也是假的：整个套件不碰
@@ -419,7 +419,7 @@ fn a_scanned_rule_asset_can_be_shared_by_its_id() {
     assert_eq!(wrong["code"], json!("share.unsupportedKind"), "{}", wrong);
 }
 
-/// 审核发现（M1/M2）：硬链接没有可读的目标（`read_target` 返回 None），
+/// 已知缺陷：硬链接没有可读的目标（`read_target` 返回 None），
 /// `owns_target` 因此认不出「库内主副本的硬链接」，停用一条**我们自己建的**
 /// 硬链接会被误报 `share.foreignLink` —— 而 file 链接的降级链恰好在
 /// symlink 不可用的机器上产出硬链接（§3.4 的 file 链）。
@@ -499,7 +499,7 @@ fn a_foreign_hardlink_is_still_refused() {
     assert!(std::path::Path::new(&dst).exists(), "nothing must be deleted");
 }
 
-/// §26.2 的两方 diff 出口：区块被外部改过时，`force: true`（用户对着 diff 显式
+/// 两方 diff 出口：区块被外部改过时，`force: true`（用户对着 diff 显式
 /// 选了「以库内为准」）是 foreignEdit 闸门的唯一绕过方式；不带 force 的第二次
 /// 尝试仍然被拒——它是人对着 diff 做出的决定，不是调用方图省事的开关。
 #[test]

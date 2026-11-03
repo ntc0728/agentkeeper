@@ -1,9 +1,9 @@
-//! 健康检查（M5）：7 类 finding 的只读检测。
+//! 健康检查：7 类 finding 的只读检测。
 //!
 //! ## 只读契约
 //!
 //! 这里**不做任何写入**：不建目录、不探测链接能力（探测会在 `<store>/probe`
-//! 下留文件）、不改台账、不写审计。修复动作由调用方（M6 的
+//! 下留文件）、不改台账、不写审计。修复动作由调用方（界面的
 //! `apply_finding_fix`）按 `code` 决定 —— 让检测与修复共用一个函数会在某次
 //! 「顺手修一下」里把只读视图变成写入路径，这条边界必须由类型（没有 `&Store`
 //! 形参）来守。
@@ -18,7 +18,7 @@
 //!   「未纳管」「台账漂移」。
 //! - `<library>/skills/*`：库内主副本。自定义 `libraryRoot` 时它不一定出现在
 //!   扫描结果里，所以重复内容检测自己遍历库目录。
-//! - `sharing::plan_drift`：MCP 漂移（M3 已实现的只读路径，不在这里重写）。
+//! - `sharing::plan_drift`：MCP 漂移（MCP 单一事实源里已实现的只读路径，不在这里重写）。
 //!
 //! ## 为什么部分 finding 是只提示
 //!
@@ -108,7 +108,7 @@ impl DoctorReport {
         self.findings.iter().any(|f| f.severity == SEV_CRITICAL)
     }
 
-    /// 某个 code 的全部 finding（顺序与报告一致）。测试与 M6 的按类分组用它。
+    /// 某个 code 的全部 finding（顺序与报告一致）。测试与界面的按类分组用它。
     pub fn by_code(&self, code: &str) -> Vec<&DoctorFinding> {
         self.findings.iter().filter(|f| f.code == code).collect()
     }
@@ -455,7 +455,7 @@ fn check_scan_links(
         let path = store::native_str(Path::new(dir));
         let kind = a.get("kind").and_then(Value::as_str).unwrap_or_default();
         let name = a.get("name").and_then(Value::as_str).unwrap_or_default();
-        // 修复入口用 assetId / scope 做索引（M6 的 `apply_finding_fix`）。它们是
+        // 修复入口用 assetId / scope 做索引（界面的 `apply_finding_fix`）。它们是
         // 事实字段，不参与任何判定 —— `findings[].detail` 的其余键才是判据。
         let asset_id = a.get("id").cloned().unwrap_or(Value::Null);
         let scope = a.get("scope").cloned().unwrap_or(Value::Null);
@@ -573,14 +573,14 @@ struct SkillCopy {
     path: String,
     agent_id: String,
     /// 扫描结果里的资产 id / scope（库内主副本没有对应资产，为 `None` / `"library"`）。
-    /// M6 的修复入口据此把「收敛」转回一个扫描资产；不参与重复内容判定。
+    /// 界面的修复入口据此把「收敛」转回一个扫描资产；不参与重复内容判定。
     asset_id: Option<String>,
     scope: String,
 }
 
 /// `asset.duplicated`：同一个 slug 有 ≥2 份**真实目录**且内容摘要相同。
 ///
-/// 只做 skill：规则 / 记忆是单文件，重复由 M6 的文件级视图展示；插件不属于共享
+/// 只做 skill：规则 / 记忆是单文件，重复由界面的文件级视图展示；插件不属于共享
 /// 四类（§2.1 的 `KINDS`）。库内主副本也参与比较 —— 自定义 `libraryRoot` 时它
 /// 不在扫描结果里，只看 assets 会漏掉「库里已有一份 + agent 侧还有一份」。
 fn check_duplicated_skills(library: &Library, assets: &[Value], c: &mut Collector) {

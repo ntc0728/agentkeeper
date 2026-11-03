@@ -30,7 +30,7 @@
 //! 3. **降级链是 symlink → junction（目录）/ symlink → hardlink（文件）**：
 //!    symlink 是本机可用的最简单原语；junction 在 symlink 被策略禁用时顶上，
 //!    但它只解决目录。`copy` 不在这里产生 —— 它是 `store::Op::copy_dir` 的语义，
-//!    由调用方显式选择（见 `docs/SHARED-ASSETS-IMPLEMENTATION.md` §3.4）。
+//!    由调用方显式选择（见 `docs/DESIGN.md` §8.3 链接能力与降级链）。
 //!
 //! ## 为什么不用 std 建 junction
 //!
@@ -418,7 +418,7 @@ pub fn is_link(p: &Path) -> bool {
 ///
 /// 硬链接排在最后：它对 `symlink_metadata` 没有任何可观察的差别，
 /// 只能靠 `nlink > 1`；一个普通的、被别处硬链接过的文件同样会命中，
-/// 这是已知的过度判定（见 `docs/SHARED-ASSETS-IMPLEMENTATION.md` §3.4⑤）。
+/// 这是已知的过度判定（见 `docs/DESIGN.md` §8.3 链接能力与降级链）。
 pub fn link_kind(p: &Path) -> Option<LinkMethod> {
     if let Some(tag) = reparse_tag(p) {
         return Some(if tag == IO_REPARSE_TAG_MOUNT_POINT {
@@ -1057,7 +1057,7 @@ mod tests {
 
     #[test]
     fn probe_reports_a_usable_dir_chain() {
-        // 这是 M1 验收 1 的内核版本：普通会话下必须至少有一种非 copy 的目录方式。
+        // 这是链接内核验收 1 的内核版本：普通会话下必须至少有一种非 copy 的目录方式。
         let root = temp("probe");
         let cap = probe(&root);
         assert!(

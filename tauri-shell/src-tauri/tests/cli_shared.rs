@@ -1,4 +1,4 @@
-//! P6（M7）的端到端验收：命令行 `--shared`、库位置迁移的幂等、首次启用提示。
+//! 命令行与共享层的端到端验收：命令行 `--shared`、库位置迁移的幂等、首次启用提示。
 //!
 //! 三块各对应 §9 的一小节：
 //!
@@ -143,7 +143,7 @@ impl Drop for Fixture {
 /// （键集合与 `list_library` 完全一致，不多也不少）。
 #[test]
 fn ak_scan_shared_prints_library_ledger_and_findings() {
-    let fx = Fixture::new("p6-scan-shared");
+    let fx = Fixture::new("shared-scan");
     fx.seed_skill(".claude", "pdf");
 
     let out = Command::new(Fixture::ak_scan())
@@ -212,7 +212,7 @@ fn ak_scan_shared_prints_library_ledger_and_findings() {
 /// 台账损坏时 `--shared` **不能**把损坏读成空：`ok:false` + 原因。
 #[test]
 fn ak_scan_shared_reports_a_corrupt_ledger_instead_of_an_empty_one() {
-    let fx = Fixture::new("p6-scan-corrupt");
+    let fx = Fixture::new("shared-scan-corrupt");
     write(&join(&fx.library_root(), &["links.json"]), "{");
 
     let out = Command::new(Fixture::ak_scan())
@@ -241,7 +241,7 @@ fn ak_scan_shared_reports_a_corrupt_ledger_instead_of_an_empty_one() {
 /// 而不是 `--shared` 的三块。CI 依赖这一点。
 #[test]
 fn ak_scan_without_arguments_still_prints_the_scan_payload() {
-    let fx = Fixture::new("p6-scan-plain");
+    let fx = Fixture::new("shared-scan-plain");
     fx.seed_skill(".claude", "pdf");
 
     let out = Command::new(Fixture::ak_scan())
@@ -305,7 +305,7 @@ fn tree_digest(root: &Path) -> Vec<(String, usize, u64)> {
     out
 }
 
-/// 端到端幂等验收（§9.3）的默认规模。发布前用 `AK_P6_SKILLS=200` 跑一次
+/// 端到端幂等验收的默认规模。发布前用 `AK_MIGRATE_SKILLS=200` 跑一次
 /// 完整规模；默认取小值的原因见 [`migrating_a_large_library_is_end_to_end_idempotent`]。
 const DEFAULT_SKILLS: usize = 20;
 
@@ -316,7 +316,7 @@ const DEFAULT_SKILLS: usize = 20;
 /// * 顶层类别目录搬完、旧库根里不留 `links.json`；
 /// * **再跑一次一个字节都不动**（`moved=0`，两棵树指纹相同）。
 ///
-/// 规模由 `AK_P6_SKILLS` 决定，默认 [`DEFAULT_SKILLS`]。为什么默认不是 200：
+/// 规模由 `AK_MIGRATE_SKILLS` 决定，默认 [`DEFAULT_SKILLS`]。为什么默认不是 200：
 /// 每次 `enable_asset` 都要全量重扫，200 份要跑二十多分钟，那会让整条门禁变成
 /// 没人跑的东西；默认规模走的是**完全相同的代码路径**。
 ///
@@ -325,12 +325,12 @@ const DEFAULT_SKILLS: usize = 20;
 /// 覆盖 —— 那里真的把 journal 停在链接阶段的正中间。
 #[test]
 fn migrating_a_large_library_is_end_to_end_idempotent() {
-    let fx = Fixture::new("p6-migrate");
+    let fx = Fixture::new("shared-migrate");
     if !fx.links_available() {
         eprintln!("skipped: this machine cannot create directory links");
         return;
     }
-    let n = std::env::var("AK_P6_SKILLS")
+    let n = std::env::var("AK_MIGRATE_SKILLS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(DEFAULT_SKILLS);
@@ -405,7 +405,7 @@ fn migrating_a_large_library_is_end_to_end_idempotent() {
 /// （后者由共享页打开时的 `converge_plan` 现算）。
 #[test]
 fn bootstrap_shared_carries_no_scan_result() {
-    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("p6-bootstrap-store");
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("shared-bootstrap-store");
     let _ = std::fs::remove_dir_all(&root);
     settings::ensure_store(&root.to_string_lossy()).expect("ensure_store");
 

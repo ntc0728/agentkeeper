@@ -1,9 +1,9 @@
 # 构建与测试执行说明书
 
-本项目有 20 个 npm 脚本、2 个 Rust crate、5 个集成测试套件。**跑哪个、什么时候跑**，本文说了算。
+本项目有 20 个 npm 脚本、2 个 Rust crate、10 个集成测试套件。**跑哪个、什么时候跑**，本文说了算。
 
-核心原则：**改一处，只跑受影响的测试**。全量 `cargo test --workspace` 要 ~7 s / 333 个测试；
-在迭代中它既慢又稀释注意力——改一个校验器却重跑更新子系统的 39 个集成测试，会让人误以为那里出了问题。
+核心原则：**改一处，只跑受影响的测试**。全量 `cargo test --workspace` 是几百个测试；
+在迭代中它既慢又稀释注意力——改一个校验器却重跑更新子系统的集成测试，会让人误以为那里出了问题。
 
 **另一条原则：构建不吃旧产物。** `tauri-shell/dist/` 不入库（它是 `src/renderer` 的生成物），
 `tauri.conf.json` 把 `copy-frontend.js` 配成 `beforeBuildCommand` / `beforeDevCommand`，
@@ -22,6 +22,9 @@
 | `tauri-shell/core/src/update/**`、`http.rs` | `npm test` | ~4 s |
 | `tauri-shell/core/src/keeper.rs`、`assets.rs` | `npm test` | ~4 s |
 | `tauri-shell/core/src/scan.rs`、`discover.rs`、`adapters.rs` | `npm test` | ~4 s |
+| `tauri-shell/core/src/linkfs.rs`、`library.rs`、`compose.rs` | `npm test` | ~5 s |
+| `tauri-shell/core/src/sharing.rs`、`doctor.rs`、`library_view.rs`、`shared_ops.rs` | `npm test` | ~8 s |
+| `tauri-shell/core/src/mcp.rs`、`bin/ak-scan.rs` | `npm test` | ~6 s |
 | `tauri-shell/src-tauri/src/**`（shell 的 command 层） | `npm test` | ~6 s |
 | `src/renderer/**`（界面） | `npm run check` | ~0.5 s |
 | `Cargo.toml`、`Cargo.lock`、`build.rs`、`tauri.conf.json` | `npm run test:all` | ~7 s |
@@ -46,8 +49,13 @@ npm test -- --list     # 打印计划，不执行
 | 脚本 | 作用 | 何时用 |
 |---|---|---|
 | `npm test` | 只跑改动影响的测试 | **默认**。迭代中唯一该用的 |
-| `npm run test:all` | 全部 333 个测试 | 提交前、CI、改动跨越多个区域时 |
+| `npm run test:all` | 全部测试（`ALL_TESTS` 的 13 个目标，532 个用例） | 提交前、改动跨越多个区域时 |
 | `npm run check` | 8 道静态闸门 | 改了前端、脚本、文档时 |
+
+> `test:all` 的覆盖面由 `scripts/test-affected.js` 里的 `ALL_TESTS` 决定，**它不会自动发现新文件**：
+> 新增 `tauri-shell/src-tauri/tests/*.rs` 时必须同步加进那份列表，否则这个套件在默认命令下静默不跑。
+> 发布流水线（`.github/workflows/release.yml`）目前不跑 Rust 测试，只跑 `tauri:i18n`、构建与
+> `check.js tree`——**测试要靠本地 `npm run test:all` 兜住**。
 
 ### 前端
 
@@ -138,11 +146,33 @@ profile 现在只用来**出包**，而迭代走 dev profile。
 | 36 个普通函数 + serde 派生 | 0.03 MB | 1 s |
 | 36 个 `#[tauri::command]` | 82 MB | 77 s |
 
-**当前状态**：36 个命令全部注册在 `lib.rs` 的 `generate_handler!` 里，一次改动会重编整个
+**当前状态**：所有 `#[tauri::command]` 都注册在 `lib.rs` 的 `generate_handler!` 里，一次改动会重编整个
 shell crate。要压缩这个成本，可行方向是把同域命令合并成带 `op` 参数的 dispatch —— 代价是
 `tauri-shell/tauri-bridge.js` 的调用形状要跟着改，属于破坏性变更，必须同步改前端并跑全量测试。
 
 > 迁移 command 到别的 crate 不会降低这个成本：宏在哪个 crate 展开都要实例化一遍泛型运行时。
+
+### 集成测试套件
+
+集成测试一律在**外壳 crate**（`tauri-shell/src-tauri/tests/`）：`Keeper` 与 `Store` 住在 `core`，
+但集成套件都写成 `use agentkeeper_shell_lib::core::…`。所以 `cargo test -p agentkeeper-core
+--test <名字>` 会报「no test target」——那不是测试坏了，是跑错了 crate。
+
+| 套件 | 覆盖 |
+|---|---|
+| `contract.rs` | 桥接↔Rust 命令契约、载荷形状 |
+| `write_path.rs` | 写入事务：快照、还原、链接类型保持、回收站 |
+| `sharing.rs` | 技能收敛端到端、启停用的三道闸 |
+| `rule_sharing.rs` | 规则与记忆的 link / compose、区块外逐字节保留 |
+| `mcp_sharing.rs` | MCP 单一事实源物化、漂移检测 |
+| `doctor.rs` | 七类健康发现与只读契约 |
+| `shared_ui.rs` | 共享页载荷与矩阵单元格状态 |
+| `cli_shared.rs` | `ak-scan --shared`、库位置迁移端到端幂等、`bootstrap.shared` 形状 |
+| `update.rs` | 软件更新内核 |
+| `boundary.rs` | crate 边界（`core` 不引用 Tauri） |
+
+`core/tests/` 下只有 `mcp.rs`（MCP 协议回归）与 `common/mod.rs`；那份带 `temp_root` /
+`cleanup` / `dir_snapshot` 的完整工具集在 `src-tauri/tests/common/mod.rs`。
 
 ---
 
@@ -163,8 +193,8 @@ shell crate。要压缩这个成本，可行方向是把同域命令合并成带
 
 ### 为什么不能每次都跑全量
 
-`npm run test:all` 是 333 个测试、~7 s。全量跑当然不慢，但**它稀释注意力**：改一个校验器却重跑
-更新子系统的 39 个集成测试，出问题时你会误以为那里坏了。窄路径下改一个校验器只跑 3 个目标。
+`npm run test:all` 是几百个测试。全量跑当然不慢，但**它稀释注意力**：改一个校验器却重跑更新
+子系统的集成测试，出问题时你会误以为那里坏了。窄路径下改一个校验器只跑 3 个目标。
 
 更重要的是**出包不依赖全量测试**。出包只需要「代码能编译」——`cargo tauri build` 自己就会编译。
 测试是给人看信心的，不是构建的前提。所以：
@@ -186,7 +216,7 @@ shell crate。要压缩这个成本，可行方向是把同域命令合并成带
 ## 5. 出包前的检查清单
 
 ```bash
-npm run test:all      # 333 个测试
+npm run test:all      # 全部测试
 npm run check         # 8 道静态闸门
 npm run tauri:bundle  # 出包（会先 sync + stage sidecar）
 ```

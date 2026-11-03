@@ -1304,7 +1304,7 @@ impl Keeper {
     }
 
     /* -------------------------------------------------------------- */
-    /* 共享（M2）：启用到库 / 停用 / 从库里删                             */
+    /* 共享（Skills 共享）：启用到库 / 停用 / 从库里删                       */
     /* -------------------------------------------------------------- */
 
     /// 当前的库句柄。每次现算：库位置可以被设置切换，缓存进字段就会在切换后指向旧根。
@@ -1351,12 +1351,12 @@ impl Keeper {
     ///
     /// op 顺序不能变：目标已存在时 `linkDir` 会直接报「目标已被占用」，所以真实
     /// 目录必须先删；而删除与建链接只有在同一个事务里才可能一起回滚
-    /// （`docs/SHARED-ASSETS-IMPLEMENTATION.md` §11.3）。
+    /// （`docs/DESIGN.md` §8.6 链接内核与事务）。
     ///
     /// **`kind` 为 `rule` / `memory` 时是另一套编排**：目标是单个文件（`link` 或
     /// `compose`，见 [`Self::enable_rule`]），不走这里的目录收敛逻辑。
     ///
-    /// **`kind` 为 `mcp` 时也是另一套编排**（M6）：MCP 的事实源是库内规范形态
+    /// **`kind` 为 `mcp` 时也是另一套编排**：MCP 的事实源是库内规范形态
     /// `<root>/mcp/servers/<slug>.json`，写盘目标是 agent 的 JSON/TOML 配置里的
     /// **一条**服务器。§17.9 明确允许「扩这个分支」，只要每种 kind 走自己的编排 ——
     /// 这里的 `mcp` 分支只是把 `sharing::materialize_plan` 算出的 op 送进事务，
@@ -1541,7 +1541,7 @@ impl Keeper {
         tx
     }
 
-    /// 启用一个**规则或记忆**资产：`link` 或 `compose` 两种模式（M4，§6.2）。
+    /// 启用一个**规则或记忆**资产：`link` 或 `compose` 两种模式（规则与记忆共享）。
     ///
     /// 与 skill 的区别不在于「写什么」，而在于**目标是文件不是目录**，而且它
     /// 很可能是用户手写的东西。所以：
@@ -1699,7 +1699,7 @@ impl Keeper {
         tx
     }
 
-    /// 停用一条规则 / 记忆的共享（M4）。两种模式的收尾方式不同：
+    /// 停用一条规则 / 记忆的共享。两种模式的收尾方式不同：
     ///
     /// | 盘上是什么 | 动作 | 库内主副本 |
     /// |---|---|---|
@@ -1794,7 +1794,7 @@ impl Keeper {
         tx
     }
 
-    /// 启用一个 **MCP 服务器**（M6）：把库内规范形态物化到某个 agent / scope 的配置里。
+    /// 启用一个 **MCP 服务器**：把库内规范形态物化到某个 agent / scope 的配置里。
     ///
     /// `input`：`{ name, agentId, scope?, projectId?, file? }`。`file` 可选 —— 矩阵的
     /// `mcp.cells[].file` 会带上解析好的目标配置；不给时按适配器声明顺序挑第一份
@@ -1807,7 +1807,7 @@ impl Keeper {
         self.operate_mcp(lib, input, true)
     }
 
-    /// 停用一个 **MCP 服务器**（M6）：按 `DisableStyle` 删掉 agent 配置里的那一条，
+    /// 停用一个 **MCP 服务器**：按 `DisableStyle` 删掉 agent 配置里的那一条，
     /// 或把它置为 `enabled:false`；库内记录与其它 agent 的配置一个字节不动。
     fn disable_mcp(&self, lib: &library::Library, input: &Value) -> Value {
         self.operate_mcp(lib, input, false)
@@ -2015,7 +2015,7 @@ impl Keeper {
         if kind == "rule" || kind == "memory" {
             return self.disable_rule(&lib, &kind, input);
         }
-        // MCP（M6，§17.9 允许扩分支）：停用 = 在 agent 的配置里删掉那一条 / 或
+        // MCP（单一事实源）：停用 = 在 agent 的配置里删掉那一条 / 或
         // 置 `enabled:false`（由 `DisableStyle` 决定），库内记录与其它 agent 不动。
         if kind == "mcp" {
             return self.disable_mcp(&lib, input);

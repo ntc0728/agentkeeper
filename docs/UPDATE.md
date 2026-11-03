@@ -124,10 +124,21 @@ GitHub，而不是注册一个 `setInterval(minutes * 60000)`。间隔最长 24 
 | `updateApiBase` | `''` | 空 = `api.github.com`；自建源需同形的 `/repos/{repo}/releases` |
 | `updateCheck` | `false` | 自动检查开关 |
 | `updateCheckMinutes` | `20` | 1 ~ 1440 |
+| `linkMethod` | `auto` | 共享层创建链接时的偏好（`auto` / `symlink` / `junction` / `hardlink`）；只用来收窄，不越过本机能力探测。见 DESIGN §8.3 |
+| `libraryRoot` | `''` | 共享库根；空 = 默认 `~/.agents`，绝对路径 = 自定义。见 DESIGN §8.4 |
+| `trashDays` | `30` | 库内删除的回收站保留天数，启动时清理过期条目。见 DESIGN §8.7 |
 | `updateBeta` | `false` | 加入 beta 通道 |
 | `updateProxy` | `auto` | 见 §3 |
 | `updateToken` | `''` | `enc1:` 信封，绝不存明文 |
 | `updateAssetKeyword` | `AgentKeeper` | 安装包名必须包含它 |
+
+设置文件不是自由格式：`settings.save` 只接受 `defaults()` 里已经声明的键，**未知键与类型
+不匹配的键会被静默丢弃**——设置页点了保存、界面回显成功，磁盘上却没有这个键。新增设置项
+必须先加进 `defaults()`。
+
+`settings.json`、`projects.json` 与共享库台账都是「读-改-写」，桌面端与 `agentkeeper-mcp`
+又可能同时写它们，所以每次写入都持一把 `<store>/.lock` 上的跨进程排他锁。拿不到锁的一侧
+返回 `store.busy`，而不是两边各写各的、最后写者赢。
 
 ## 9. 测试怎么覆盖的
 
@@ -207,6 +218,11 @@ npm run tauri:bundle           # 前端 → dist，构建，归档到 release/
 | 7 | `cargo install tauri-cli --version "^2" --locked` | |
 | 8 | `cargo tauri build` + `package-release.js --no-build` | 产物落在 `tauri-shell/target/release/bundle/nsis/` 与 `release/*.zip` |
 | 9 | `softprops/action-gh-release@v2` | 上传**安装包 exe + 便携 zip**；tag 含 `beta` / `rc` / `alpha` 时自动标记 pre-release |
+
+> **这条流水线不跑任何 Rust 测试。** 它只保证「能编出安装包」：i18n 覆盖、前端生成、
+> 构建树体积之外，功能正确性没有任何自动化把关，也没有单元/集成测试步骤。
+> 质量门在本地——提交前自己跑 `npm run test:all` + `npm run check`（见 `docs/BUILDING.md`）。
+> 把测试接进 CI 是待办事项，尚未实现；在此之前**不要**把「CI 绿了」当成功能验证过。
 
 **两条构建通道**：
 

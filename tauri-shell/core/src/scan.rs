@@ -1673,7 +1673,7 @@ fn or_null(data: &Value, key: &str) -> Value {
 }
 
 /// `stripHeavy` —— 渲染层永远看不到 `raw`，而 `effective` 被缩减为 UI 会读的
-/// 四个字段（`sameInode` 是 M5 加的：跨 scope 指向同一物理对象的链接不构成遮蔽，
+/// 四个字段（`sameInode` 是后加的：跨 scope 指向同一物理对象的链接不构成遮蔽，
 /// 界面要靠它把这一类排除出「被遮蔽」的计数）。原地完成：这要跑过约 1000 个带着
 /// 数 MB 元数据的资产，而参考实现那套对象展开正是这个实现想要避免的那种拷贝。
 fn shrink_effective(a: &mut Value) {

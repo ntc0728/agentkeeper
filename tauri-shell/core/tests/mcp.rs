@@ -217,7 +217,7 @@ fn a_failed_tool_result_carries_is_error() {
 }
 
 /* ------------------------------------------------------------------ */
-/* 共享层（M7）                                                         */
+/* 共享层                                                               */
 /* ------------------------------------------------------------------ */
 
 // 共享层的五个工具直接复用桌面端那八个命令的 core 入口：载荷必须是同一个
@@ -397,7 +397,7 @@ fn set_baseline_answers_an_object_and_a_write_leaves_no_backup_tree() {
 /* 作为进程的服务器                                                     */
 /* ------------------------------------------------------------------ */
 /// `tools/list` 必须按顺序返回的每一个工具名。改名对已经记住该名字的 agent
-/// 是破坏性变更，所以这里把它钉死。**只能追加**（共享层五个工具是 M7 追加的）。
+/// 是破坏性变更，所以这里把它钉死。**只能追加**（共享层五个工具是后追加的）。
 const TOOLS: [&str; 21] = [
     "list_assets",
     "read_asset",
@@ -819,7 +819,7 @@ fn enable_mcp_with_config_records_it_into_the_library_first() {
     assert_eq!(row["cells"]["workbuddy"]["state"], json!("on"), "{row}");
 }
 
-/// MCP 修复工具的契约（§26 评审裁决）：`relink` 走与桌面端同一条
+/// MCP 修复工具的契约：`relink` 走与桌面端同一条
 /// `apply_finding_fix`（内容一致才连回），批量收敛显式拒绝并指引到向导。
 #[test]
 fn apply_finding_fix_relinks_a_dangling_link_and_refuses_converge() {

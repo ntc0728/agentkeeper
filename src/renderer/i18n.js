@@ -1040,7 +1040,7 @@ const STRINGS = {
     'editor.mcpArgsHint': '每行一个参数，含空格时才需加引号。',
     'editor.mcpUrl': '地址',
     'editor.mcpHeaders': '请求头',
-    'editor.mcpHeadersHint': '名称: 值，每行一条。',
+    'editor.mcpHeadersHint': '名称：值，每行一条。',
     'editor.mcpEnv': '环境变量',
     'editor.mcpEnvHint': 'KEY=value，每行一条。',
     'editor.mcpAdvanced': '高级 —— 原始 JSON',

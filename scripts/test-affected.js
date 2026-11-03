@@ -164,7 +164,7 @@ const AREAS = [
     match: (f) =>
       /tauri-shell\/core\/src\/(library_view|shared_ops|sharing|compose|library)\.rs$/.test(f) ||
       /tauri-shell\/src-tauri\/src\/lib\.rs$/.test(f) ||
-      /tauri-shell\/src-tauri\/tests\/(shared_ui|sharing|rule_sharing|mcp_sharing|p6_cli)\.rs$/.test(f) ||
+      /tauri-shell\/src-tauri\/tests\/(shared_ui|sharing|rule_sharing|mcp_sharing|cli_shared)\.rs$/.test(f) ||
       /src\/renderer\/(view-shared|engine-zh)\.js$/.test(f),
     tests: [
       { pkg: 'agentkeeper-core', args: ['--lib'] },
@@ -172,7 +172,7 @@ const AREAS = [
       { pkg: 'agentkeeper-shell', args: ['--test', 'sharing'] },
       { pkg: 'agentkeeper-shell', args: ['--test', 'rule_sharing'] },
       { pkg: 'agentkeeper-shell', args: ['--test', 'mcp_sharing'] },
-      { pkg: 'agentkeeper-shell', args: ['--test', 'p6_cli'] },
+      { pkg: 'agentkeeper-shell', args: ['--test', 'cli_shared'] },
       { pkg: 'agentkeeper-shell', args: ['--lib'] },
       { pkg: 'agentkeeper-shell', args: ['--test', 'contract'] },
     ],
@@ -197,6 +197,10 @@ const AREAS = [
   },
 ];
 
+// 这份列表必须覆盖 `tauri-shell/src-tauri/tests/` 下的**每一个**测试文件：它是
+// `--all` 的完整口径，漏掉一个就等于那个套件在默认命令下从不运行。共享层的四个
+// 端到端套件（收敛 / 规则记忆 / MCP 物化 / CLI）就曾长期漏在这里——只要不进这份
+// 列表，`npm run test:all` 全绿也说明不了它们没坏。
 const ALL_TESTS = [
   { pkg: 'agentkeeper-core', args: ['--lib'] },
   { pkg: 'agentkeeper-core', args: ['--test', 'mcp'] },
@@ -207,6 +211,10 @@ const ALL_TESTS = [
   { pkg: 'agentkeeper-shell', args: ['--test', 'write_path'] },
   { pkg: 'agentkeeper-shell', args: ['--test', 'doctor'] },
   { pkg: 'agentkeeper-shell', args: ['--test', 'shared_ui'] },
+  { pkg: 'agentkeeper-shell', args: ['--test', 'sharing'] },
+  { pkg: 'agentkeeper-shell', args: ['--test', 'rule_sharing'] },
+  { pkg: 'agentkeeper-shell', args: ['--test', 'mcp_sharing'] },
+  { pkg: 'agentkeeper-shell', args: ['--test', 'cli_shared'] },
 ];
 
 /* ------------------------------------------------------------- 改动的文件 */

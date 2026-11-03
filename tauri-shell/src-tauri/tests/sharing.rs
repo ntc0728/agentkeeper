@@ -1,6 +1,6 @@
-//! 共享层（M2 · Skills 共享）的端到端验收。
+//! 共享层中 Skills 共享的端到端验收。
 //!
-//! 覆盖 `docs/SHARED-ASSETS-IMPLEMENTATION.md` §4.4 的三条验收，外加「先删后建、
+//! 覆盖 `docs/DESIGN.md` §8.8 Skills 共享与收敛 的三条验收，外加「先删后建、
 //! 同一事务」与「停用只删链接」这两个安全不变式：
 //!
 //! 1. 5 个 agent × 同名同内容 skill → 收敛后库内 1 份、5 条链接、`audit.jsonl`
@@ -246,7 +246,7 @@ fn five_identical_skills_converge_into_one_library_copy() {
     // canonicalize 后的物理路径去重，而收敛之后五个位置就是同一个物理目录，所以
     // 资产列表只剩一条（id 与原来那五条中的第一条相同），其余四个 agent 记在
     // `meta.alsoSeen` 里。收敛前后「同一个物理资产的条数不变」正是这条规则想要的
-    // 结果 —— 改它不在本阶段（P5 的 `sameInode` 才处理 `effective` 视图）。
+    // 结果 —— 改它不在本次范围（`sameInode` 才处理 `effective` 视图）。
     let after = fx.scan();
     let linked: Vec<Value> = after["assets"]
         .as_array()
@@ -552,7 +552,7 @@ fn enabling_an_asset_already_in_the_library_links_without_copying() {
 
 /// 不认识的 kind 给出可读的 code，而不是静默成功。
 ///
-/// （M2 时代这条测的是 `rule` → `rule.shareUnsupported`；M4 起规则与记忆可以共享，
+/// （早先这条测的是 `rule` → `rule.shareUnsupported`；规则与记忆可以共享之后，
 /// 那条断言已经过期，换成真的不支持的 kind。规则共享的验收在 `rule_sharing.rs`。）
 #[test]
 fn enabling_an_unsupported_kind_reports_a_code() {
@@ -568,7 +568,7 @@ fn enabling_an_unsupported_kind_reports_a_code() {
     assert_eq!(r["code"], json!("share.unsupportedKind"));
 }
 
-/// 审核发现（M7）：`enable_asset` 在「目标已是链接」时只看 `owns_target` 就返回
+/// 已知缺陷：`enable_asset` 在「目标已是链接」时只看 `owns_target` 就返回
 /// `already linked`，于是**指错了地方**的链接——比如库迁移后仍指着旧库根、或被别的
 /// 资产占位——永远没人修，调用方（尤其经 MCP 进来的 agent，它没有「重指」入口）
 /// 拿到的却是一次「成功」。

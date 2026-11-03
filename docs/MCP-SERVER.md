@@ -20,6 +20,7 @@ Windsurf、Zed、CodeBuddy 等）都可通过一份配置接入，之后 Agent �
 | **分发** | 把一个资产复制到其他 Agent/项目 |
 | **体检** | 校验问题 + 提示注入/凭据泄露等安全扫描 |
 | **迁移** | Bundle 导出导入 |
+| **共享库** | 列出共享库与各 Agent 的启用矩阵、开关单项、健康体检与逐个修复、只读收敛方案 |
 
 它是**同一个 `core::` 的第二个入口**：与 GUI 共用扫描器、校验器、写入事务层，
 不是另写一份写盘逻辑。因此 MCP 侧的每一次写入，在桌面应用的「操作记录」里都是同一笔事务。
@@ -97,7 +98,7 @@ tauri-shell/target/release/agentkeeper-mcp.exe
 }
 ```
 
-重启 Claude Desktop，工具面板出现 `agentkeeper` 的 20 个工具即接入成功。
+重启 Claude Desktop，工具面板出现 `agentkeeper` 的 21 个工具即接入成功。
 
 ### 3.2 Cursor
 
@@ -122,7 +123,7 @@ tauri-shell/target/release/agentkeeper-mcp.exe
 - 传输：stdio，每行一个 JSON-RPC 2.0 消息；**不支持 batch**
 - `initialize` → `protocolVersion: "2024-11-05"`、`serverInfo.name: "agentkeeper"`、`capabilities.tools`
 - 通知（`notifications/*`、无 `id` 的请求、空行）**一律不应答**
-- `tools/list` → 20 个工具定义（含 JSON Schema 入参）
+- `tools/list` → 21 个工具定义（含 JSON Schema 入参）
 - `tools/call` → `{name, arguments}`，返回 `{content:[{type:"text", text:"<JSON 字符串>"}]}`；
   工具执行失败时信封上带 `result.isError: true`，payload 里是 `{ok:false, error}`
 - 协议错误码：非法 JSON `-32700`（`id: null`）、未知方法 `-32601`、未知工具 `-32602`
@@ -133,7 +134,7 @@ tauri-shell/target/release/agentkeeper-mcp.exe
 
 ---
 
-## 4. 工具 API（20 个）
+## 4. 工具 API（21 个）
 
 ### 查询类
 
@@ -224,9 +225,10 @@ tauri-shell/target/release/agentkeeper-mcp.exe
 ### 共享库类
 
 这一组与桌面应用「共享」页**读的是同一批 core 函数**（`library_view::list_library`、
-`shared_ops::converge_plan` / `doctor_report`、`Keeper::enable_asset` / `disable_asset`），
+`shared_ops::converge_plan` / `doctor_report` / `apply_finding_fix`、
+`Keeper::enable_asset` / `disable_asset`），
 所以返回载荷与界面看到的完全一致 —— 不存在「MCP 版本」的第二套形状。
-五个工具追加在列表末尾，之前的 15 个名字、描述与入参一个字节都没变。
+这六个工具追加在工具表末尾（改名对已经记住名字的 agent 是破坏性变更，只能追加）。
 
 #### `list_library`
 无参。→ `{ok, root, cap, agents[], skills[], mcp[], rules[], memory[]}`。
@@ -259,11 +261,51 @@ tauri-shell/target/release/agentkeeper-mcp.exe
 #### `link_doctor`
 无参。→ `{ok, findings[], counts}`。七类只读发现（`link.dangling` / `link.hijacked` /
 `link.unmanaged` / `link.fragile` / `asset.duplicated` / `mcp.drift` / `link.ledgerDrift`），
-每条带 `code` / `path` / 人可读解释。**零写入**：修复在桌面应用里做。
+每条带 `code` / `path` / `detail` / `fixable` / `fix`（`relink` / `adopt` / `rebuild` /
+`converge`，或空）。**零写入**：要改盘用 `apply_finding_fix`。
 
 #### `converge_plan`
 无参。→ `{ok, groups[], savedBytes, actionable}`。**只出方案，零写入**；
-`actionable` 是「能一键收敛」的组数（排除内容不一致的组）。应用收敛在桌面应用的收敛向导里。
+`actionable` 是「能一键收敛」的组数（排除内容不一致的组）。**应用收敛只能在桌面应用**的
+收敛向导里 —— 那一步需要人确认，见下面的 `apply_finding_fix`。
+
+#### `apply_finding_fix`
+修 `link_doctor` 报出的**一条**发现。参数直接抄 `link_doctor` 的返回值即可：
+
+```json
+{
+  "code": "link.dangling",
+  "path": "C:\\\\Users\\\\你\\\\.claude\\\\skills\\\\pdf",
+  "fix": "relink",
+  "detail": { "src": "…", "reason": "targetMissing" },
+  "choice": "library"
+}
+```
+
+* `code` 必填，其余按发现的类型给：`path` / `fix` / `detail` 原样透传；
+* `fix` 可省略，省略时按 `code` 自己的修法执行；给了就必须对上，对不上回
+  `doctor.unsupportedFix`；
+* `choice` 只对 `mcp.drift` 有效，取 `library`（以库内定义覆盖 agent 配置）/
+  `agent`（以该 agent 盘上的值为准回写库）/ `independent`（标记为独立，从库内启用清单移除）。
+
+各 code 的修法与前提：
+
+| code | 修法 | 前提 |
+|---|---|---|
+| `link.dangling`（`reason: targetMissing`） | 重连 | 库内主副本还在；`detail.src` 或台账能定位到主副本 |
+| `link.hijacked` | 重连 | 只在该发现 `fixable: true`（agent 侧内容与库内一致）时允许 |
+| `link.unmanaged` | 导入库（`adopt`） | 目标在库外且可读 |
+| `link.ledgerDrift` | 以磁盘为准重建台账（`rebuild`） | 无需参数 |
+| `mcp.drift` | 三选一，见 `choice` | 索引是 `detail.name` + `detail.agentId`；配置路径与条目从盘上重新解析，不信调用方给的路径 |
+| `link.fragile` | — | 硬链接可能被 agent 打断，没有可自动执行的修法，回 `doctor.notFixable` |
+
+**边界**：`asset.duplicated`（批量收敛，一次会动几十个位置）**显式拒绝**，返回
+`{ok:false, code:"doctor.notFixable", detail.reason:"converge touches every copy at once; use the desktop wizard"}`。
+要去桌面应用的「共享」页点收敛向导。同样不在这里做的还有批量修复：一次只修一条发现。
+
+写入走与桌面端同一个 `apply_finding_fix` 命令：事务、快照、失败整笔还原、审计日志一致。
+`mcp.drift` 里的「以库为准」等于用库内定义重写那一条配置条目，「以 agent 为准」是反过来
+回写库 —— 两边都由调用方明确说出选哪边，工具不会自己猜。
 
 ---
 
@@ -300,6 +342,17 @@ Agent 调 `converge_plan`（零写入）报出组数、可释放字节数与 `ac
 要真收敛就请人到桌面应用的「共享」页点向导 —— MCP 侧刻意不提供一键应用，
 因为那会把「确认」这一步整个省掉。
 
+> 「那条悬空的链接帮我修好」
+
+Agent 调 `link_doctor` 找到对应发现，再调 `apply_finding_fix`（`code` + `path` + `fix`
+照抄发现里的值）把它接回库内主副本。一次只修一条；批量收敛会被明确拒绝。
+
+> 「fetch 这个 MCP 服务在 codex 里的参数被我改过，以库里的为准」
+
+Agent 调 `link_doctor` 取到 `mcp.drift` 的发现，再调 `apply_finding_fix`
+（`code:"mcp.drift"`、`detail.name`、`detail.agentId`、`choice:"library"`）；
+选 `agent` 则反过来以盘上的值为准回写库。
+
 ---
 
 ## 6. 排障
@@ -313,6 +366,11 @@ Agent 调 `converge_plan`（零写入）报出组数、可释放字节数与 `ac
 | 写入没按预期出现 | 到「操作记录」按 `txId` 看这笔事务；`blocked` 表示校验拦下了，磁盘零写入 |
 | 写入中途失败 | 返回里会说明哪些路径没能还原（`store.restoreIncomplete`），按列出的路径手工核对 |
 | 与桌面应用数据不同步 | 确认两者 `AK_STORE_ROOT` 一致；Agent 侧改完可调 `scan` 强制刷新 |
+| 报 `store.busy` | 另一个进程（通常是桌面应用）正在写共享台账 / 设置，或正在迁移库位置。等它结束再试 |
+| `apply_finding_fix` 回 `doctor.notFixable` | 这条发现没有可自动执行的修法（硬链接易断、批量收敛），或前提不成立（库内主副本已缺失）。照 `detail.reason` 的提示走桌面端 |
+| `apply_finding_fix` 回 `doctor.unsupportedFix` | 传的 `fix` 与 `code` 对不上。省略 `fix` 即按该 `code` 的标准修法执行 |
+| `enable_asset` 回 `share.notLinked` / `share.foreignLink` | 该 agent 侧不是链接，或链接指向库外。先看 `link_doctor` 有没有对应发现 |
+| 迁移库位置期间调用共享工具报错 | 迁移整段持写锁。等迁移结束后再调用 |
 
 ---
 
@@ -324,4 +382,7 @@ Agent 调 `converge_plan`（零写入）报出组数、可释放字节数与 `ac
 | 直接写入真实目录 | ✓ 人操作，写前弹二次确认 | ✓ 无界面，靠写前快照 + 日志 |
 | 写前内存快照 + 事务日志 | ✓ | ✓ |
 | 写入失败自动还原 | ✓ | ✓ |
+| 共享库：开关、体检、逐个修复 | ✓ | ✓ |
+| 收敛重复技能（一次动多个位置） | ✓ 收敛向导逐组确认 | ✗ 只出方案（`converge_plan`） |
+| 库位置迁移 | ✓ | ✗ |
 | 语言/主题等偏好 | ✓ | — |

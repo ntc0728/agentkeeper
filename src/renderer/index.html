@@ -35,6 +35,8 @@
         <button class="nav-item" data-view="projects"><span class="nav-ico">▣</span><span class="nav-text">Projects</span></button>
         <button class="nav-item" data-view="discover"><span class="nav-ico">✦</span><span class="nav-text">Discover</span></button>
         <button class="nav-item" data-view="shared"><span class="nav-ico">⇄</span><span class="nav-text" data-i18n="nav.shared">Shared</span></button>
+        <!-- 分组标题是静态英文、启动时由 applyLanguage 改写（同 #nav-group-overview）；
+             在这里加 data-i18n 会让首帧闪一下词典里的键名。 -->
         <div class="nav-group" id="nav-group-operate">Operate</div>
         <button class="nav-item" data-view="health"><span class="nav-ico">✚</span><span class="nav-text">Health</span><span class="nav-badge warn" id="nav-issue-count">0</span></button>
         <button class="nav-item" data-view="activity"><span class="nav-ico">↺</span><span class="nav-text">Activity</span></button>

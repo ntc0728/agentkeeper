@@ -2,7 +2,7 @@
 /**
  * 共享资产页（M6 · 界面）。
  *
- * 这一页是 8 个共享命令的渲染层（契约见 `.dsh-ops/M6-CONTRACT.md`）：
+ * 这一页是 8 个共享命令的渲染层（契约见 `docs/DESIGN.md` §8.12 界面契约）：
  * 数据只来自 `window.ak.listLibrary()`（矩阵、代理列、库根、链接能力横幅的唯一
  * 数据源），写入只走 `enableAsset` / `disableAsset`；收敛与健康检查各自懒加载
  * （`planConverge` / `sharedDoctor`），进入页面时不跑耗时命令。
@@ -1359,7 +1359,7 @@
     box.appendChild(el('div', { class: 'shared-meta' },
       el('span', { class: 'muted fs-11' }, t('shared.root')),
       el('span', { class: 'mono fs-11 shared-root' }, String(d.root || '—')),
-      // 库位置迁移（§9.3 / §21.7 点名给 P6 的界面入口）。命令一直在、桥接也
+      // 库位置迁移的界面入口。命令一直在、桥接也
       // 一直在，缺的就是这个按钮：不给入口时用户只能手工改 settings.json。
       el('button', {
         class: 'btn sm' + (S.migrateBusy ? ' loading' : ''),

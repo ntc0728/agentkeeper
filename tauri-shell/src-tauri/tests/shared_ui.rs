@@ -1,6 +1,6 @@
-//! 共享页（M6）的端到端验收。
+//! 共享页（界面契约）的端到端验收。
 //!
-//! 覆盖 M6 契约里界面直接依赖的五块数据面：
+//! 覆盖界面契约里界面直接依赖的五块数据面：
 //!
 //! 1. `list_library` 的键集合与矩阵形状（列 = agent，行 = 资产，单元格状态词表）；
 //! 2. `plan_converge` 只读 —— 调用前后整棵夹具逐字节不变；
@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 
 use common::{cleanup, join, read, temp_root, write};
 
-/// 单元格状态词表（M6-CONTRACT §2.1）。渲染层只认这些值。
+/// 单元格状态词表（见 `docs/DESIGN.md` §8.12 界面契约）。渲染层只认这些值。
 const CELL_STATES: [&str; 7] = [
     "on",
     "off",
@@ -217,7 +217,7 @@ fn list_library_has_the_contract_shape() {
     let data = fx.list();
     assert_eq!(data["ok"], json!(true), "list_library: {}", data);
 
-    // 顶层键就是契约 §2 那 8 个，多了少了都说明数据面走样。
+    // 顶层键就是 `docs/DESIGN.md` §8.12 那 8 个，多了少了都说明数据面走样。
     let obj = data.as_object().expect("list_library returns an object");
     let mut keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
     keys.sort_unstable();
@@ -247,7 +247,7 @@ fn list_library_has_the_contract_shape() {
         cap
     );
 
-    // 列：每个已解析出 home 的 agent 一条，字段与契约 §2 对齐。
+    // 列：每个已解析出 home 的 agent 一条，字段与 `docs/DESIGN.md` §8.12 对齐。
     let agents = data["agents"].as_array().expect("agents array");
     let agent_ids: Vec<String> = agents
         .iter()

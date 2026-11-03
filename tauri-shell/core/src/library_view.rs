@@ -1,13 +1,13 @@
-//! 共享页（M6）的只读数据视图。
+//! 共享页（界面契约）的只读数据视图。
 //!
 //! `list_library` 是共享矩阵的唯一数据源：一次请求拿回库根、链接能力、矩阵列
 //! （agent）与 skills / mcp / rules / memory 四类行。渲染层**不做**路径解析与
 //! 状态判定 —— 那些规则（哪些路径由哪个 agent 声明、一个位置算「已启用」还是
 //! 「副本」）全部在 Rust 侧按适配器表算好，界面只负责画。
 //!
-//! 载荷形状见 `.dsh-ops/M6-CONTRACT.md` §2 与 `docs/SHARED-ASSETS-IMPLEMENTATION.md`
-//! §8；单元格状态词表（`on` / `off` / `copy` / `foreign` / `drift` /
-//! `unsupported` / `error`）是冻结的，前端只认这些值。
+//! 载荷形状与单元格状态词表（`on` / `off` / `copy` / `foreign` / `drift` /
+//! `unsupported` / `error`）见 `docs/DESIGN.md` §8.12 界面契约；这份词表是冻结的，
+//! 前端只认这些值。
 //!
 //! ## 只读契约
 //!
@@ -143,7 +143,7 @@ fn resolve_agents(keeper: &Keeper) -> Vec<AgentView> {
 
 /// 某类（rule / memory）全局声明所在的基准目录，去重后给界面当提示。
 ///
-/// 契约 §2 的 `ruleDirs` / `memoryDirs` 是「基准目录」而不是逐文件路径：
+/// 契约（见 `docs/DESIGN.md` §8.12 界面契约）的 `ruleDirs` / `memoryDirs` 是「基准目录」而不是逐文件路径：
 /// 全局 scope 下同类声明都挂在同一个基准目录（agent 的 home）上，去重后只有
 /// 一项。没有声明（如 `warp` 的 rules）就是空数组。
 fn declared_dirs(keeper: &Keeper, agent_id: &str, kind: &str) -> Vec<String> {
@@ -444,7 +444,7 @@ fn mcp_rows(lib: &Library, agents: &[AgentView], drifts: &[sharing::McpDrift]) -
 
 /// 一条 MCP 服务器在某个 agent 上的状态。
 ///
-/// 契约补充（`.dsh-ops/M6-CONTRACT.md` §2.1）：**每个** cell 都带 `file`，
+/// 契约补充（见 `docs/DESIGN.md` §8.12 界面契约）：**每个** cell 都带 `file`，
 /// 固定取该 agent 的第一个可物化配置候选（与 `agents[].mcpFiles[0]` 同源），
 /// 前端 enable / disable 会把它原样传回。
 fn mcp_cell(
@@ -676,7 +676,7 @@ fn slug_of_decl(rel: &str) -> String {
     slug_of_path(Path::new(rel))
 }
 
-/// 规则 / 记忆文件的判定（契约 §2.1）。
+/// 规则 / 记忆文件的判定（见 `docs/DESIGN.md` §8.12 界面契约）。
 ///
 /// | 盘上是什么 | 状态 |
 /// |---|---|

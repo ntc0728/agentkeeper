@@ -185,7 +185,7 @@ pub fn tools() -> Vec<Value> {
                 "agentId": s("target agent (default: first installed agent)")
             }, "required": ["repo"] }
         }),
-        // 共享层（M7）：下面五个只能追加在末尾。`core/tests/mcp.rs` 的 `TOOLS`
+        // 共享层：下面五个只能追加在末尾。`core/tests/mcp.rs` 的 `TOOLS`
         // 按顺序钉死这份列表，重排或改名对已经记住名字的 agent 是破坏性变更。
         json!({
             "name": "list_library",
@@ -905,7 +905,7 @@ fn install_skill(keeper: &Keeper, args: &Value) -> Value {
 }
 
 /* ------------------------------------------------------------------ */
-/* 共享层（M7）                                                         */
+/* 共享层                                                               */
 /* ------------------------------------------------------------------ */
 
 /// `list_library` —— 矩阵数据视图，与桌面端「共享」页读的是同一个函数。
@@ -1326,7 +1326,7 @@ mod tests {
                 "import_bundle",
                 "search_registry",
                 "install_skill",
-                // 共享层（M7）：只能追加，不能重排。
+                // 共享层：只能追加，不能重排。
                 "list_library",
                 "enable_asset",
                 "disable_asset",

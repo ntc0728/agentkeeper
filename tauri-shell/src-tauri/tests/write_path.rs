@@ -270,7 +270,7 @@ fn a_failed_transaction_of_a_new_file_leaves_it_absent() {
 
 // 链接 op 在真实目录上跑通：**建出来的是链接**，不是副本；取消链接不会动库内主副本。
 //
-// 这是 M1 验收 1 的集成版本（core 单测那边还有一条 `probe_reports_a_usable_dir_chain`，
+// 这是链接内核验收 1 的集成版本（core 单测那边还有一条 `probe_reports_a_usable_dir_chain`，
 // 断言的是能力探测本身）。两条都过的意义：能力探测说有、事务里真的建得出来。
 #[test]
 fn a_link_op_creates_a_link_not_a_copy() {
@@ -313,7 +313,7 @@ fn a_link_op_creates_a_link_not_a_copy() {
 }
 
 // 同一事务里「删真实目录 + 建链接」，后续 op 必然失败 → 目录树**按链接还原**，
-// 而且还原出来的链接还指向原来的地方。这是 M1 验收 2。
+// 而且还原出来的链接还指向原来的地方。这是链接内核验收 2。
 #[test]
 fn a_failed_transaction_restores_the_directory_and_its_links() {
     use agentkeeper_shell_lib::core::linkfs;
@@ -386,7 +386,7 @@ fn a_failed_transaction_restores_the_directory_and_its_links() {
     );
 }
 
-// junction 还原后必须**还是 junction**。这是 M1 验收 3，也是本功能「零特权前提」
+// junction 还原后必须**还是 junction**。这是链接内核验收 3，也是本功能「零特权前提」
 // 的守卫：如果还原成 symlink，一次失败的写入就会把用户推进「需要开发者模式」的
 // 境地里去。
 #[test]
@@ -436,7 +436,7 @@ fn a_junction_is_restored_as_a_junction() {
 }
 
 // 台账损坏（写个 `{`）→ `load_ledger` 返回 Err，**不返回空台账**，且不碰磁盘。
-// 这是 M1 验收 4。
+// 这是链接内核验收 4。
 #[test]
 fn a_corrupt_link_ledger_is_an_error_not_an_empty_one() {
     use agentkeeper_shell_lib::core::library::Library;
