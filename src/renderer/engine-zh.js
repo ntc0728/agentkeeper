@@ -312,6 +312,7 @@ const PATTERNS = [
   ['^shared_doctor task failed: §1$', '共享健康检查失败：§1'],
   ['^apply_finding_fix task failed: §1$', '修复健康问题失败：§1'],
   ['^library_migrate task failed: §1$', '迁移共享库失败：§1'],
+  ['^not materialised for this transport: §1$', '该传输方式不物化「§1」（记录里有值，但没有写进这个 agent 的配置）'],
   ['^op[§1] (§2) is missing a "from"$', '第 §1 个操作（§2）缺少 "from" 字段'],
   ['^cannot read write source §1: §2$', '无法读取写入源 §1：§2'],
   ['^write failed for §1: §2$', '写入 §1 失败：§2'],

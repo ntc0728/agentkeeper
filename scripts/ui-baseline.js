@@ -52,7 +52,15 @@ const PORT = Number(process.env.AK_CDP_PORT || 9222);
 /** 固定几何：基线只在一个尺寸下有意义。 */
 const VIEWPORT = { width: 1440, height: 900 };
 /** 页面列表：`[文件名, 导航 data-view]`，取自运行中的导航按钮。 */
-const VIEWS = [['overview', 'overview'], ['assets', 'assets'], ['settings', 'settings']];
+const VIEWS = [
+  ['overview', 'overview'],
+  ['assets', 'assets'],
+  ['settings', 'settings'],
+  // §21.7 曾把 shared 标为「可选未做」；共享页已是 8 个正式命令的渲染层，
+  // 像素回归同样该守住它的骨架（copyOnly 横幅 / tab 栏 / 矩阵表头）。
+  // 活数据靠下面的 VOLATILE 规则盖：库根是叶子路径、tab 计数是纯数字。
+  ['shared', 'shared']
+];
 /** 单像素三通道差值超过它，才算这个像素变了。 */
 const PIXEL_TOLERANCE = 12;
 /** 变化像素占比超过它，就认为这一页漂移了。 */
@@ -67,6 +75,7 @@ const DEFAULT_THRESHOLD = 0.02;
  */
 const VOLATILE_SELECTORS = [
   '.nav-badge',        // 资产 · 904、健康检查 · 2
+  '.shared-root',      // 共享页库根：每台机器不同（§21.7 的 shared 基线）
   '.num',              // 表格里的计数列
   '.upd-log-date',     // 发布说明的发布日期
   '.kv dd',            // 存储策略里的绝对路径

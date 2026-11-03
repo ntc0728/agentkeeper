@@ -1928,7 +1928,20 @@ impl Keeper {
         self.invalidate();
         if let Value::Object(m) = &mut tx {
             m.insert("written".to_string(), json!([plan.file]));
-            m.insert("skipped".to_string(), json!([]));
+            // 被 transport 挑选丢掉的非空字段（stdio 丢 url/headers、非 stdio 丢
+            // command/args/env/cwd）：进 `skipped` 让「没有物化的内容」可见 ——
+            // 静默丢弃曾让用户以为记录里的每一样都到了 agent 配置里。
+            let skipped = plan
+                .dropped
+                .iter()
+                .map(|f| {
+                    json!({
+                        "target": plan.file,
+                        "reason": format!("not materialised for this transport: {}", f),
+                    })
+                })
+                .collect::<Vec<_>>();
+            m.insert("skipped".to_string(), json!(skipped));
             m.insert("file".to_string(), json!(plan.file));
             m.insert("server".to_string(), json!(plan.server));
             m.insert("style".to_string(), json!(plan.style.as_str()));

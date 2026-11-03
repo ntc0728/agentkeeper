@@ -19,6 +19,7 @@ mod common;
 
 use agentkeeper_shell_lib::core::adapters::DisableStyle;
 use agentkeeper_shell_lib::core::library::Library;
+use agentkeeper_shell_lib::core::keeper::Keeper;
 use agentkeeper_shell_lib::core::settings;
 use agentkeeper_shell_lib::core::sharing;
 use agentkeeper_shell_lib::core::store::{self, Store};
@@ -415,4 +416,102 @@ fn materialize_mcp_picks_the_agent_config_file() {
         plan
     );
     assert_eq!(plan["style"], json!("remove"));
+}
+
+/// 审核记录（§23.3）的口径修正：`plan_drift` 此前只比**第一份**含该名字的
+/// 配置。codex 与 opencode 都声明了两份可物化配置（config.toml + mcp.json），
+/// 只比第一份意味着第二份里的漂移永远不会被发现——用户手改过 `mcp.json`
+/// 这件事静默存在，直到某次启用把它覆盖。现在每一份含该服务器的配置都
+/// 独立比对、独立报告（finding 的 `file` 字段定位到具体文件）。
+#[test]
+fn drift_is_reported_per_config_file_not_just_the_first_one() {
+    let _lock = common::serial();
+    let fx = Fixture::new("mcp-drift-second-file");
+    let lib = fx.library();
+
+    // 库内记录：github，command = "gh"（stdio）。
+    fx.seed_record("github", "stdio");
+
+    // codex 两份配置都声明了 github：第一份（config.toml）与库一致；
+    // 第二份（mcp.json）被手改过 —— 只有 widened 之后的口径才会发现。
+    write(
+        &fx.codex_config(),
+        // 与库内记录（record_json 的 `command: "uvx"`）完全一致。
+        r#"[mcp_servers.github]
+command = "uvx"
+args = ["mcp-server-fetch"]
+"#,
+    );
+    let second = join(&fx.home_path(), &[".codex", "mcp.json"]);
+    write(
+        &second,
+        r#"{ "mcpServers": { "github": { "command": "gh-edited" } } }"#,
+    );
+
+    let drifts = sharing::plan_drift(&lib, &fx.home_path(), None, "global");
+    let on_mcp_json: Vec<_> = drifts
+        .iter()
+        .filter(|d| d.file.ends_with("mcp.json"))
+        .collect();
+    assert_eq!(
+        on_mcp_json.len(),
+        1,
+        "the second config file's drift must be reported: {:?}",
+        drifts
+    );
+    assert_eq!(on_mcp_json[0].field, "command", "{:?}", on_mcp_json[0]);
+    // 第一份与库一致：不出现在结果里。
+    assert!(
+        drifts.iter().all(|d| !d.file.ends_with("config.toml")),
+        "the matching first config must not be reported: {:?}",
+        drifts
+    );
+}
+
+/// §23.3 口径升级：非 stdio 记录里的 `args`/`env`（stdio 专属字段）此前被
+/// **静默丢弃**——用户以为记录里的每一样都到了 agent 配置里。现在
+/// `materialize_entry` 记下被丢的非空字段，`operate_mcp` 把它带进应答的
+/// `skipped`，让「没有物化的内容」可见。
+#[test]
+fn dropped_fields_are_reported_in_skipped_instead_of_silence() {
+    let _lock = common::serial();
+    let fx = Fixture::new("mcp-dropped-fields");
+
+    // sse 记录带 stdio 专属的 args/env（都有值）。
+    let record = json!({
+        "schema": sharing::MCP_SCHEMA,
+        "name": "remote",
+        "transport": "sse",
+        "url": "https://example.com/sse",
+        "headers": { "Authorization": "Bearer t" },
+        "args": ["--flag"],
+        "env": { "KEY": "v" },
+        "allOf": { "claude-code": true }
+    });
+    write(
+        &fx.record_path("remote"),
+        &format!("{}\n", serde_json::to_string_pretty(&record).unwrap()),
+    );
+
+    let k = Keeper::new(fx.store(), &fx.home_path());
+    let r = k.enable_asset(&json!({
+        "name": "remote",
+        "kind": "mcp",
+        "agentId": "claude-code",
+        "scope": "global",
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let skipped = r["skipped"].as_array().expect("skipped array");
+    let dropped: Vec<&str> = skipped
+        .iter()
+        .filter_map(|s| s["reason"].as_str())
+        .collect();
+    assert!(
+        dropped.iter().any(|s| s.contains("args")),
+        "args must be reported as dropped: {skipped:?}"
+    );
+    assert!(
+        dropped.iter().any(|s| s.contains("env")),
+        "env must be reported as dropped: {skipped:?}"
+    );
 }

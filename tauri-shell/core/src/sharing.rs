@@ -586,6 +586,10 @@ pub struct McpMaterial {
     pub key: String,
     /// 落盘的那一条（不含 `allOf`，那是记账，不是 agent 的配置）。
     pub entry: Value,
+    /// 记录里有值、但被 transport 挑选**丢掉**的字段名（stdio 丢 url/headers，
+    /// 非 stdio 丢 command/args/env/cwd）。空 = 什么都没丢。调用方应把它带进
+    /// 应答的 `skipped`：静默丢弃正是 §23.3 记过的那类「看不见的取舍」。
+    pub dropped: Vec<String>,
 }
 
 /// 把库内规范形态转成某个 agent 的写盘形态。
@@ -616,6 +620,24 @@ pub fn materialize_entry(agent_id: &str, record: &Value) -> Option<McpMaterial> 
         "stdio" => &["command", "args", "env", "cwd"],
         _ => &["url", "headers"],
     };
+    // 这个 transport 用不上的字段：记录里有值却没被带走 → 显式记下来，让应答
+    // 能说清「哪些内容没有物化」。空值不算丢（没什么可丢的）。
+    let mut dropped: Vec<String> = Vec::new();
+    let other_side: &[&str] = if transport == "stdio" {
+        &["url", "headers"]
+    } else {
+        &["command", "args", "env", "cwd"]
+    };
+    for k in other_side {
+        let Some(v) = record.get(*k) else { continue };
+        let has_value = !v.is_null()
+            && !v.as_array().map(|a| a.is_empty()).unwrap_or(false)
+            && !v.as_object().map(|m| m.is_empty()).unwrap_or(false)
+            && !v.as_str().map(|s| s.is_empty()).unwrap_or(false);
+        if has_value {
+            dropped.push((*k).to_string());
+        }
+    }
     for k in keys {
         let Some(v) = record.get(*k) else { continue };
         if v.is_null() {
@@ -640,6 +662,7 @@ pub fn materialize_entry(agent_id: &str, record: &Value) -> Option<McpMaterial> 
         key: name.clone(),
         name,
         entry: Value::Object(entry),
+        dropped,
     })
 }
 
@@ -944,6 +967,9 @@ pub struct McpPlan {
     pub server: String,
     pub style: crate::adapters::DisableStyle,
     pub ops: Vec<store::Op>,
+    /// 被 transport 挑选丢弃的非空字段（`materialize_entry` 的 `dropped`）；
+    /// 应答把它带进 `skipped`，让「没有物化的内容」可见。关闭动作不丢字段（空）。
+    pub dropped: Vec<String>,
 }
 
 impl McpPlan {
@@ -1032,6 +1058,7 @@ pub fn materialize_plan(
         server: m.name,
         style,
         ops,
+        dropped: m.dropped,
     })))
 }
 
@@ -1184,6 +1211,11 @@ pub fn plan_drift(
             let Some(want) = materialize_entry(agent.id, &rec) else {
                 continue;
             };
+            // **每一份**含这条服务器的配置都独立比对（不再只比第一份）：
+            // codex 与 opencode 都声明了两份可物化配置（config.toml + mcp.json），
+            // 只比第一份意味着第二份里的漂移**永远不会被发现**——用户在
+            // mcp.json 里手改过参数这件事会静默存在，直到某次启用把它覆盖。
+            // finding 按 (code, path) 去重，不同文件各报各的，互不吞并。
             for file in mcp_config_candidates(agent.id, scope, project_dir, user_home) {
                 let Some(agent_value) = read_entry(&file, agent.id, name) else {
                     continue;
@@ -1200,7 +1232,6 @@ pub fn plan_drift(
                         agent_value,
                     });
                 }
-                break;
             }
         }
     }

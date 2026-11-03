@@ -2505,3 +2505,51 @@ node --check 前端两文件        语法通过
 | 矩阵只覆盖全局作用域、foreign 三方 diff、规则/记忆导入口子 | M4/M6 契约简化（§21.7） |
 
 > 除设计取舍与契约简化（每一处都有文档归属与理由）之外，**没有未处理的缺陷**。
+
+---
+
+## 26. 已记录取舍的逐条评审（2026-11-03：能否现在执行）
+
+> 对 §23.3 / §22.5 / §21.7 的全部取舍逐条调研「现在是否可以执行」。
+> 结论：**3 项立即执行了**（其中 plan_drift 一项经查证是真实的检测缺口，不是风格取舍），
+> 其余按「依赖产品决策」或「改动面大于收益」明确归档，不再以「待评审」状态存在。
+
+### 26.1 执行了的 3 项
+
+| 项 | 调研结论 | 实施 |
+|---|---|---|
+| `plan_drift` 只比第一份配置 | **这不是风格取舍，是检测缺口**：适配器表里 codex（`config.toml` + `mcp.json`）与 opencode（`opencode.json` + `mcp.json`）都有两份可物化配置——只比第一份意味着用户在第二份里手改过的参数**永远不会被发现**，直到某次启用把它覆盖 | 每一份含该服务器的配置独立比对、独立报告（finding 的 `file` 定位到具体文件；`(code, path)` 去重键本来就支持多文件）。+1 回归：第二份 `mcp.json` 的漂移被发现、一致的第一份不误报 |
+| 非 stdio 静默丢 `args`/`env` | 挑字段逻辑在 `materialize_entry`，是纯函数；把丢弃记录下来并透传到应答是局部改动 | `McpMaterial`/`McpPlan` 加 `dropped`，`operate_mcp` 把它带进 `skipped`（`reason: "not materialised for this transport: <field>"`）。+1 回归：sse 记录的 `args`/`env` 出现在 `skipped` |
+| `ui-baseline` 不含 shared | 纯登记；共享页已是 8 个正式命令的渲染层，像素回归同样该守住它的骨架 | `VIEWS` 加 `shared`；库根路径是活数据，`VOLATILE_SELECTORS` 加 `.shared-root`（capture 需要 Chrome CDP，开发者本机工具） |
+
+### 26.2 归档为「依赖产品决策」（3 项，改的不是代码而是交互语义）
+
+| 项 | 为什么不能单方面执行 |
+|---|---|
+| MCP 提供一键收敛 / 健康修复 | 需要确认界面；agent 自己决定「信谁」没有意义（§22.5）。若做，正确形态是 MCP 返回候选清单 + 桌面端弹确认——跨界面产品决策 |
+| 矩阵覆盖 project 作用域 | 矩阵是「全局启用视图」的设计契约（§21.7）；加列需要先定义 project 行的交互（每个项目一列会爆炸）。属 M6 契约修订 |
+| `foreign` 三方 diff 界面 | 需要新的 diff 组件与交互流（§21.7）；当前替代路径（compose 采纳 / 中文 toast）可用 |
+
+### 26.3 归档为「改动面大于收益」（3 项，附条件）
+
+| 项 | 条件 |
+|---|---|
+| TOML 区块边界（注释归属上一节） | 参考实现契约、用例钉死；改语义 = 所有用户的既有 diff 预期变化。仅当上游参考实现先改才跟 |
+| `ui-audit` 探针按文件拆分 | 需要先为共享页定义「哪些探针该过」的清单，否则引入新误报；收益是开发期工具精度 |
+| `link.methodUnavailable` / `converge.partial` | 无发出路径；等一个真实需要它们的交互出现再加（无消费者的 code 是死码） |
+
+### 26.4 规则/记忆「导入到库」口子（§21.7）—— 评估后维持不做
+
+compose 的语义是「库内**已有**内容圈成区块」；「把一份现成规则导入库」等价于
+`enable`（link 模式）已经做的事——目标文件成为主副本。补一个独立按钮会与
+enable 的语义重叠成两个入口做同一件事。维持 §21.7 的口径。
+
+### 26.5 门禁（本轮全量）
+
+```text
+cargo test --workspace        530 passed / 0 failed（528 → +2：drift 第二份、dropped skipped）
+cargo clippy (core lib)       24 条，与基线一致
+node scripts/check.js         all 8 gates passed
+node scripts/ui-audit.js      total findings: 0
+node scripts/tauri-i18n.js    OK（新句子走 PATTERNS 数组，C4 教科书式补法）
+```
